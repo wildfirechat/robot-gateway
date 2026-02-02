@@ -29,6 +29,7 @@
 - ✅ **心跳保活**：客户端自动心跳（4.5分钟间隔），连接断开自动重连
 - ✅ **并发请求**：客户端SDK完全支持并发请求
 - ✅ **完整SDK**：提供RobotService的完整Java SDK实现
+- ✅ **BotFather集成**：支持自动创建机器人，用户通过聊天命令即可创建和管理机器人
 
 ## 快速开始
 
@@ -73,6 +74,7 @@ mvn clean package -DskipTests
 - `gateway/target/gateway-1.0.0.jar` - 网关服务可执行JAR
 - `client/target/client-1.0.0.jar` - 客户端SDK库
 - `demo/target/demo-1.0.0.jar` - 示例程序可执行JAR
+- `moltbot-adapter/target/moltbot-adapter-1.0.0.jar` - OpenClaw转换器示例
 
 
 ### 4. 启动网关服务
@@ -232,14 +234,60 @@ List<IMResult<InputOutputUserInfo>> results = userIds.parallelStream()
 | websocket.port | WebSocket服务端口 | 8884 |
 | im.url | IM服务地址 | http://localhost |
 
+### BotFather 配置（可选）
+
+网关集成了 BotFather 功能，支持用户通过聊天命令自动创建机器人。
+
+| 配置项 | 说明               | 默认值                    |
+|--------|------------------|------------------------|
+| botfather.enabled | BotFather 功能开关   | false                  |
+| botfather.robot.id | BotFather 机器人 ID | -                      |
+| botfather.robot.name | BotFather 机器人名称  | -                      |
+| botfather.robot.secret | BotFather 机器人密钥  | -                      |
+| botfather.admin.url | IM服务API地址        | http://localhost:18080 |
+| botfather.admin.secret | IM服务API密钥        | -                      |
+| botfather.callbackUrl | 机器人回调地址    | -                      |
+| botfather.publicAddr | 网关公网地址       | -                      |
+
+配置示例：
+
+```properties
+# ========== BotFather 配置 ==========
+
+# 功能开关（设为 false 可完全禁用）
+botfather.enabled=true
+
+# BotFather 机器人信息
+botfather.robot.id=robotfather
+botfather.robot.name=机器人工厂
+botfather.robot.secret=123456
+
+# IM管理API配置（用于创建机器人）
+botfather.admin.url=http://localhost:18080
+botfather.admin.secret=123456
+
+# 回调地址（创建机器人时自动设置，需要是网关的地址）
+botfather.callbackUrl=http://127.0.0.1:8883/robot/recvmsg
+
+# 网关公网地址
+# 用户连接此地址来使用创建的机器人
+botfather.publicAddr=ws://192.168.1.81:8884/robot/gateway
+```
+
+**重要提示**：
+- 回调地址由系统统一配置，用户无法通过命令修改
+- **网关公网地址是必填项**，创建机器人后会发送给用户
+- Server API密钥必须正确配置，否则无法创建机器人
+- 可以通过 `botfather.enabled=false` 完全禁用 BotFather 功能
+
 ### 客户端配置
 
 客户端无需配置文件，连接时传入网关地址即可：
 
 ```java
-ConnectionManager manager = new ConnectionManager(
-    "ws://your-gateway:8884/robot/gateway",
-    handler
+RobotServiceClient robot = new RobotServiceClient(
+        "ws://网关地址:8884/robot/gateway",
+        handler
 );
 ```
 
@@ -248,7 +296,76 @@ ConnectionManager manager = new ConnectionManager(
 - **重连间隔**：5秒
 - **请求超时**：30秒
 
+## BotFather 功能
+
+网关集成了 BotFather 功能，用户可以直接向 BotFather 机器人发送命令来创建和管理机器人。
+
+**重要提示**：BotFather **仅支持私聊**，群聊消息会被忽略。
+
+### 支持的命令
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `/help` | 显示帮助信息 | `/help` |
+| `/create` | 创建机器人 | `/create` |
+| `/info` | 查看机器人信息 | `/info` |
+| `/list` | 列出所有机器人 | `/list` |
+| `/delete` | 删除机器人 | `/delete` |
+| `/update name <名称>` | 更新机器人名称 | `/update name 我的助手` |
+| `/update portrait <URL>` | 更新机器人头像 | `/update portrait http://...` |
+
+**智能缓存机制**：
+- 自动缓存用户机器人信息，提高响应速度
+- 缓存丢失后（如网关重启）自动从 IM 服务器恢复
+- 用户数据不会因网关重启而丢失
+
+### 工作流程
+
+1. 用户向 BotFather 机器人**私聊**发送 `/create` 命令
+2. Gateway 判断消息目标是否是配置的 botfather 机器人 ID
+3. 如果是私聊消息，调用 RobotFatherService 创建机器人
+4. 创建时自动使用 `botfather.callbackUrl` 作为回调地址
+5. 返回机器人 ID、密钥和网关地址给用户
+
+### 消息路由逻辑
+
+```
+IM 服务器推送消息
+     ↓
+判断是否启用 BotFather
+     ↓
+判断目标机器人是否是 BotFather
+     ↓
+┌─────────────────────────────────┐
+│  是 BotFather 机器人？          │
+└─────────────────────────────────┘
+     ↓ 是                    ↓ 否
+┌─────────────────────────────────┐
+│  是私聊消息？                   │  ← 群聊消息被忽略
+└─────────────────────────────────┘
+     ↓ 是                    ↓ 否
+BotFather 命令处理      忽略消息
+     ↓
+返回机器人信息给用户
+```
+
+### 使用场景
+
+- **私聊（支持）**：用户直接向 BotFather 机器人发送命令，立即得到响应
+- **群聊（不支持）**：群聊中的 BotFather 消息会被忽略，即使在群组中 @BotFather 也不会响应
+
+### 功能开关
+
+将 `botfather.enabled` 设为 `false`，所有消息将走原有网关业务，BotFather 功能完全禁用。
+
 ## 部署指南
+
+### 创建机器人工厂（BotFather）
+进入到数据库中执行
+```sql
+insert into t_user (`_uid`,`_name`,`_display_name`,`_portrait`,`_type`,`_dt`) values ('robotfather','robotfather','机器人工厂','https://static.wildfirechat.cn/botfather.png',1,1);
+insert into t_robot (`_uid`,`_owner`,`_secret`,`_callback`,`_state`,`_dt`) values ('robotfather', 'robotfather', '123456', 'http://127.0.0.1:8883/robot/recvmsg', 0, 1);
+```
 
 ### 生产环境部署
 
@@ -336,7 +453,7 @@ wscat -c ws://localhost:8884/robot/gateway
 ## 常见问题
 
 ### Q: 打包时提示找不到SDK类
-A: 确保 `lib/` 目录下有 `sdk-1.4.2.jar` 和 `common-1.4.2.jar`
+A: 确保 `lib/` 目录下有 `sdk-1.4.3.jar` 和 `common-1.4.3.jar`
 
 ### Q: Gateway无法启动
 A:
@@ -356,22 +473,64 @@ A: 不会。首次鉴权失败不会触发重连，需要人工处理。重连�
 ### Q: 支持并发请求吗？
 A: 完全支持。客户端SDK使用ConcurrentHashMap和CompletableFuture实现线程安全的并发请求。
 
+### Q: BotFather 功能如何使用？
+A:
+1. 创建机器人工厂（BotFather）机器人。
+2. 在配置文件中设置 `botfather.enabled=true`
+3. 配置 BotFather 机器人信息和Server API信息
+4. **向 BotFather 机器人私聊发送** `/create` 命令即可创建机器人
+5. 详细说明请参考 [BOTFATHER_INTEGRATION.md](BOTFATHER_INTEGRATION.md)
+
+### Q: BotFather 支持群聊吗？
+A: **不支持**。BotFather 只支持私聊，群聊中的消息会被忽略。必须在私聊中向 BotFather 机器人发送命令。
+
+### Q: 用户可以自定义机器人的回调地址吗？
+A: 不可以。为了安全和管理方便，回调地址由系统统一配置，用户无法通过命令修改。所有创建的机器人都会自动使用配置文件中的 `botfather.callbackUrl`。
+
+### Q: 如何禁用 BotFather 功能？
+A: 将配置文件中的 `botfather.enabled` 设为 `false` 即可。禁用后，BotFather 机器人的消息将走原有网关业务。
+
+### Q: BotFather 创建机器人失败怎么办？
+A:
+1. 检查Server API配置是否正确（`botfather.admin.url` 和 `botfather.admin.secret`）
+2. **检查公网地址是否配置**（`botfather.publicAddr` 为必填项）
+3. 确认网络连接正常
+4. 查看 Gateway 日志中的错误信息
+5. 确认 IM 服务器运行正常
+
+### Q: 用户创建机器人后如何连接？
+A: 创建机器人后，用户会收到：
+- 🆔 机器人ID
+- 🔑 密钥
+- 🌐 网关地址
+
+用户使用这些信息通过客户端SDK连接网关：
+```java
+RobotServiceClient robot = new RobotServiceClient(
+    "ws://网关地址:8884/robot/gateway",
+    handler
+);
+robot.connect("机器人ID", "密钥");
+```
+
 ## 技术栈
 
 ### 网关服务
 - Spring Boot 2.2.10
 - Spring WebSocket (Tomcat)
-- 野火IM SDK 1.4.2
+- 野火IM SDK 1.4.3
 - Gson
 
 ### 客户端
 - Java-WebSocket 1.5.3
 - Gson 2.8.9
-- 野火IM Common SDK 1.4.2
+- 野火IM Common SDK 1.4.3
 
 ## 更多文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) - 详细设计文档，包含架构设计、通信协议、技术实现等
+- [BOTFATHER_INTEGRATION.md](BOTFATHER_INTEGRATION.md) - BotFather 功能集成文档，包含自动创建机器人的实现细节
+- [MOLTBOT_INTEGRATION.md](MOLTBOT_INTEGRATION.md) - MoltBot 适配器集成文档
 
 ## 许可证
 MIT。
