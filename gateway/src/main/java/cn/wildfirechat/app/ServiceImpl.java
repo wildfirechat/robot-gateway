@@ -49,7 +49,11 @@ public class ServiceImpl implements Service {
     private String getTargetRobotId(OutputMessageData messageData) {
         // 消息的conv.target就是机器人ID
         if (messageData.getConv() != null) {
-            return messageData.getConv().getTarget();
+            if(messageData.getConv().getType() == 0) {
+                return messageData.getConv().getTarget();
+            } else {
+                return messageData.getToRobotId();
+            }
         }
         return null;
     }
