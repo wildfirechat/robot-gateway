@@ -20,6 +20,12 @@
 └─────────────────┘               └─────────────────┘                     └──────────────┘
 ```
 
+### 模块
+- gateway 网关，把机器人的HTTP接口转换为WebSocket接口。另外添加了机器人工厂功能，可以用户自己创建机器人，参考电报的BotFather。
+- client 客户端SDK，实现了客户端WebSocket接口，可以直接使用。
+- demo 使用客户端SDK的Demo，演示如何使用SDK。
+- moltbot-adapter OpenClaw的转换器，使用客户端SDK，实现了野火IM和OpenClaw的对接。
+
 ### 特性
 
 - ✅ **多机器人支持**：支持多个机器人同时连接，每个连接独立的RobotService实例

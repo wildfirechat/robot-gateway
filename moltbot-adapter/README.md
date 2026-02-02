@@ -30,13 +30,13 @@ moltbot-adapter模块是野火IM机器人网关与Moltbot Gateway的桥接器，
 
 ```properties
 # 野火网关配置
-wildfire.gateway.url=ws://localhost:8884/robot/gateway
+wildfire.gateway.url=ws://192.168.1.81:8884/robot/gateway
 wildfire.robot.id=YourRobotId
 wildfire.robot.secret=YourRobotSecret
 
 # Moltbot Gateway配置
 moltbot.gateway.url=ws://127.0.0.1:18789
-moltbot.gateway.token=  # 可选
+moltbot.gateway.token=47ad97ccf12a4cf3ed799dc7dfc94690990c67348f4cf242  # moltbot配置文件openclaw.json中的 gateway.auth.token
 moltbot.scope=wildfire-im
 
 # 用户/群组白名单（默认启用）
