@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cn.wildfirechat</groupId>
+        <artifactId>robot-gateway</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>openclaw-adapter</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Openclaw Adapter</name>
+    <description>Adapter for integrating Wildfire IM with Openclaw Gateway</description>
+
+    <dependencies>
+        <!-- Client SDK -->
+        <dependency>
+            <groupId>cn.wildfirechat</groupId>
+            <artifactId>client</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!-- WFC SDK -->
+        <dependency>
+            <groupId>cn.wildfirechat</groupId>
+            <artifactId>sdk</artifactId>
+            <version>${wfc.sdk.version}</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../lib/sdk-${wfc.sdk.version}.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>cn.wildfirechat</groupId>
+            <artifactId>common</artifactId>
+            <version>${wfc.sdk.version}</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../lib/common-${wfc.sdk.version}.jar</systemPath>
+        </dependency>
+
+        <!-- Spring Boot Starter -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- Spring Boot Web (for actuator) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Spring Boot Actuator (for health check) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- WebSocket Client -->
+        <dependency>
+            <groupId>org.java-websocket</groupId>
+            <artifactId>Java-WebSocket</artifactId>
+            <version>1.5.3</version>
+        </dependency>
+
+        <!-- Gson -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+        </dependency>
+
+        <!-- SLF4J Logging -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <!-- Logback for runtime -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.2.11</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Spring Boot Maven Plugin -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring.boot.version}</version>
+                <configuration>
+                    <mainClass>cn.wildfirechat.openclaw.OpenclawAdapterApplication</mainClass>
+                    <includeSystemScope>true</includeSystemScope>
+                    <executable>true</executable>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Maven编译插件 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                    <encoding>${project.build.sourceEncoding}</encoding>
+                </configuration>
+            </plugin>
+        </plugins>
+
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
+    </build>
+</project>

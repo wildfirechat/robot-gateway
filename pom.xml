@@ -16,7 +16,7 @@
         <module>gateway</module>
         <module>client</module>
         <module>demo</module>
-        <module>moltbot-adapter</module>
+        <module>openclaw-adapter</module>
     </modules>
 
     <properties>
