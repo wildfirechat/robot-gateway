@@ -184,6 +184,10 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
             }
 
             // 3. 发送到Openclaw Gateway（保存sender信息用于回复）
+            if (senderId == null || senderId.trim().isEmpty()) {
+                LOG.warn("Sender ID is null or empty, skipping message");
+                return;
+            }
             openclawClient.sendMessage(openclawMessage, senderId);
 
         } catch (Exception e) {

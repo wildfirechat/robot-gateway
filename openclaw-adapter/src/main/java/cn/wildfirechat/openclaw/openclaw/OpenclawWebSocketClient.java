@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class OpenclawWebSocketClient extends WebSocketClient {
     private static final Logger LOG = LoggerFactory.getLogger(OpenclawWebSocketClient.class);
+    private static final long MESSAGE_CONTEXT_TIMEOUT_MS = 5 * 60 * 1000; // 5分钟超时
 
     private final Gson gson = new Gson();
     private final OpenclawConfig config;
@@ -43,11 +44,13 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         String senderId;
         String threadId;
         boolean isGroup;
+        long timestamp;
 
         MessageContext(String senderId, String threadId, boolean isGroup) {
             this.senderId = senderId;
             this.threadId = threadId;
             this.isGroup = isGroup;
+            this.timestamp = System.currentTimeMillis();
         }
     }
 
@@ -298,6 +301,16 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         MessageContext context = messageContexts.get(runId);
         if (context == null) {
             LOG.debug("No context found for runId={}, skipping agent event", runId);
+            // 清理可能存在的孤立pendingRequests
+            pendingRequests.entrySet().removeIf(entry -> {
+                if ("chat.send".equals(entry.getValue().method) &&
+                    entry.getValue().threadId != null &&
+                    entry.getValue().threadId.equals(runId)) {
+                    LOG.debug("Removing orphaned pending request for runId={}", runId);
+                    return true;
+                }
+                return false;
+            });
             return;
         }
 
@@ -529,12 +542,31 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                     lastHeartbeatTime = System.currentTimeMillis();
                     LOG.debug("Sent ping to Openclaw Gateway");
                 }
+                // 清理超时的消息上下文
+                cleanupExpiredMessageContexts();
             } catch (Exception e) {
                 LOG.error("Heartbeat error", e);
             }
         }, config.getHeartbeatInterval(), config.getHeartbeatInterval(), TimeUnit.MILLISECONDS);
 
         LOG.info("Openclaw heartbeat started with interval: {} ms", config.getHeartbeatInterval());
+    }
+
+    /**
+     * 清理超时的消息上下文，防止内存泄漏
+     */
+    private void cleanupExpiredMessageContexts() {
+        long now = System.currentTimeMillis();
+        int removedCount = 0;
+        for (java.util.Map.Entry<String, MessageContext> entry : messageContexts.entrySet()) {
+            if (now - entry.getValue().timestamp > MESSAGE_CONTEXT_TIMEOUT_MS) {
+                messageContexts.remove(entry.getKey());
+                removedCount++;
+            }
+        }
+        if (removedCount > 0) {
+            LOG.debug("Cleaned up {} expired message contexts", removedCount);
+        }
     }
 
     /**

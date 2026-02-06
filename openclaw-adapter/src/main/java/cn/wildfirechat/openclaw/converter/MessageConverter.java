@@ -111,12 +111,13 @@ public class MessageConverter {
             Conversation conversation = new Conversation();
             // 如果有threadId且不是peerId，说明是群聊
             boolean isGroup = channel.getThreadId() != null &&
+                            channel.getPeerId() != null &&
                             !channel.getThreadId().equals(channel.getPeerId());
 
             conversation.setType(isGroup ? 1 : 0);  // 0=单聊, 1=群聊
             conversation.setTarget(channel.getThreadId() != null ?
                                     channel.getThreadId() :
-                                    channel.getPeerId());
+                                    (channel.getPeerId() != null ? channel.getPeerId() : ""));
             conversation.setLine(0);
 
             // 构建消息内容
@@ -127,7 +128,7 @@ public class MessageConverter {
             WildfireSendMessage wfMessage = new WildfireSendMessage();
             wfMessage.setConversation(conversation);
             wfMessage.setPayload(payload);
-            wfMessage.setTargetUserId(channel.getPeerId());
+            wfMessage.setTargetUserId(channel.getPeerId() != null ? channel.getPeerId() : "");
             wfMessage.setGroup(isGroup);
             wfMessage.setText(message != null ? message.getText() : "");
 
