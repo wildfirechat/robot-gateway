@@ -206,15 +206,10 @@ public class OpenClawProtocol {
     public static class ChatSendParams {
         private String sessionKey;  // 会话键，如"main"
         private String message;      // 消息文本
+        private java.util.List<Attachment> attachments; // 附件列表（媒体文件）
         private String idempotencyKey;  // 幂等键，用于防止重复
 
         public ChatSendParams() {
-        }
-
-        public ChatSendParams(String sessionKey, String message, String idempotencyKey) {
-            this.sessionKey = sessionKey;
-            this.message = message;
-            this.idempotencyKey = idempotencyKey;
         }
 
         public String getSessionKey() {
@@ -233,12 +228,61 @@ public class OpenClawProtocol {
             this.message = message;
         }
 
+        public java.util.List<Attachment> getAttachments() {
+            return attachments;
+        }
+
+        public void setAttachments(java.util.List<Attachment> attachments) {
+            this.attachments = attachments;
+        }
+
         public String getIdempotencyKey() {
             return idempotencyKey;
         }
 
         public void setIdempotencyKey(String idempotencyKey) {
             this.idempotencyKey = idempotencyKey;
+        }
+    }
+
+    /**
+     * 附件信息
+     */
+    public static class Attachment {
+        private String type;  // 附件类型：image, audio, video, file
+        private String url;   // 附件URL
+        private String name;  // 文件名（可选）
+
+        public Attachment() {
+        }
+
+        public Attachment(String type, String url) {
+            this.type = type;
+            this.url = url;
+        }
+
+        public String getType() {
+            return type;
+        }
+
+        public void setType(String type) {
+            this.type = type;
+        }
+
+        public String getUrl() {
+            return url;
+        }
+
+        public void setUrl(String url) {
+            this.url = url;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
         }
     }
 

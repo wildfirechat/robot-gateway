@@ -6,6 +6,7 @@ import cn.wildfirechat.openclaw.openclaw.protocol.OpenclawOutMessage;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenClawProtocol;
 import cn.wildfirechat.openclaw.session.SessionContextManager;
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
@@ -299,22 +300,33 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         // 提取stream类型
         String stream = payload.has("stream") ? payload.get("stream").getAsString() : "";
 
+        boolean startCommand = false;
+        if("lifecycle".equals(stream) && payload.has("data")) {
+            JsonObject data = payload.getAsJsonObject("data");
+            if(data.has("phase")) {
+                String phase = data.get("phase").getAsString();
+                if("start".equals(phase)) {
+                    startCommand = true;
+                }
+            }
+        }
+
         // 只处理assistant流
-        if (!"assistant".equals(stream)) {
+        if (!"assistant".equals(stream) && !startCommand) {
             return;
         }
 
         // 提取data中的文本
-        if (!payload.has("data")) {
+        if (!payload.has("data") && !startCommand) {
             return;
         }
 
         com.google.gson.JsonObject data = payload.getAsJsonObject("data");
-        if (!data.has("text")) {
+        if (!data.has("text") && !startCommand) {
             return;
         }
 
-        String text = data.get("text").getAsString();
+        String text = data.has("text")?data.get("text").getAsString():"";
 
         // 查找消息上下文（优先从 runId 映射，其次从 session 上下文管理器）
         MessageContext context = messageContexts.get(runId);
@@ -364,7 +376,11 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         msgContent.setText(text);
         // 附加streamId到消息
         msgContent.setExtra("streamId", runId);  // 使用runId作为streamId
-        msgContent.setExtra("state", "generating");  // 标识为生成中状态
+        if(startCommand) {
+            msgContent.setExtra("state", "start");
+        } else {
+            msgContent.setExtra("state", "generating");  // 标识为生成中状态
+        }
         openclawResponse.setMessage(msgContent);
 
         // 设置channel信息
@@ -572,6 +588,15 @@ public class OpenclawWebSocketClient extends WebSocketClient {
             chatParams.setSessionKey("main");  // 使用默认的main session
             chatParams.setMessage(message.getMessage().getText());
             chatParams.setIdempotencyKey(UUID.randomUUID().toString());
+            
+            // 添加附件（如果有媒体）
+            if (message.getMessage() != null && message.getMessage().getMediaUrl() != null && !message.getMessage().getMediaUrl().isEmpty()) {
+                OpenClawProtocol.Attachment attachment = new OpenClawProtocol.Attachment();
+                attachment.setType(message.getMessage().getMediaType());
+                attachment.setUrl(message.getMessage().getMediaUrl());
+                chatParams.setAttachments(java.util.Collections.singletonList(attachment));
+                LOG.debug("Adding attachment to message: type={}, url={}", attachment.getType(), attachment.getUrl());
+            }
 
             // 构建req消息
             OpenClawProtocol.RequestMessage request = new OpenClawProtocol.RequestMessage();

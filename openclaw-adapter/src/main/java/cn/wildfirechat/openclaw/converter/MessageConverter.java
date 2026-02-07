@@ -37,10 +37,10 @@ public class MessageConverter {
         }
 
         try {
-            // 提取消息内容
+            // 提取消息内容（支持文本、语音、图片、视频等）
             String text = extractTextContent(wildfireMessage.getData());
-            if (text == null || text.trim().isEmpty()) {
-                LOG.debug("Non-text message, skipping: type={}",
+            if (text == null) {
+                LOG.debug("Unknown or unsupported message type: type={}",
                         wildfireMessage.getData().getPayload() != null ?
                         wildfireMessage.getData().getPayload().getType() : "null");
                 return null;
@@ -65,12 +65,22 @@ public class MessageConverter {
             // 提取@提及信息
             List<OpenclawOutMessage.Message.Mention> mentions = extractMentions(wildfireMessage.getData());
 
+            // 检测消息类型和媒体URL
+            MediaInfo mediaInfo = detectMediaInfo(wildfireMessage.getData());
+
             // 设置消息内容
             OpenclawOutMessage.Message message = new OpenclawOutMessage.Message();
             message.setId(UUID.randomUUID().toString());
             message.setText(text);
             message.setTimestamp(System.currentTimeMillis());
             message.setMentions(mentions);
+            
+            // 设置媒体信息（如果有）
+            if (mediaInfo != null && mediaInfo.getUrl() != null) {
+                message.setMediaUrl(mediaInfo.getUrl());
+                message.setMediaType(mediaInfo.getType());
+            }
+            
             openclawMessage.setMessage(message);
 
             // 会话ID（基于threadId+peerId）
@@ -136,7 +146,7 @@ public class MessageConverter {
             if (message != null && message.getExtra() != null) {
                 String streamId = (String) message.getExtra("streamId");
                 String state = (String) message.getExtra("state");
-                if("generating".equals(state)) {
+                if("generating".equals(state) || "start".equals(state)) {
                     MessageContent messageContent = new StreamTextGeneratingMessageContent(message != null ? message.getText() : "", streamId);
                     wfMessage.setPayload(messageContent.encode());
                 } else if("completed".equals(state)) {
@@ -161,7 +171,8 @@ public class MessageConverter {
     }
 
     /**
-     * 提取文本内容
+     * 提取消息内容
+     * 支持文本、语音、图片、视频等多种类型
      */
     private String extractTextContent(cn.wildfirechat.pojos.OutputMessageData data) {
         if (data.getPayload() == null) {
@@ -169,16 +180,198 @@ public class MessageConverter {
         }
 
         int type = data.getPayload().getType();
-        if (type == 1) {
-            // 文本消息
-            return data.getPayload().getSearchableContent();
-        } else if (type == 0) {
-            // 未知类型
+        MessagePayload payload = data.getPayload();
+        com.google.gson.JsonObject extraJson = parseExtraJson(payload.getExtra());
+
+        switch (type) {
+            case 1:
+                // 文本消息
+                return payload.getSearchableContent();
+
+            case 2:
+                // 语音消息
+                String voiceUrl = extractMediaUrl(payload);
+                int duration = getIntFromExtra(extraJson, "duration", 0);
+                return String.format("[语音消息] 时长:%d秒 URL:%s", duration, voiceUrl != null ? voiceUrl : "未知");
+
+            case 3:
+                // 图片消息
+                String imageUrl = extractMediaUrl(payload);
+                String imageDesc = payload.getSearchableContent();
+                if (imageDesc == null || imageDesc.isEmpty()) {
+                    imageDesc = "图片";
+                }
+                return String.format("[图片消息] %s URL:%s", imageDesc, imageUrl != null ? imageUrl : "未知");
+
+            case 4:
+                // 视频消息
+                String videoUrl = extractMediaUrl(payload);
+                String videoThumbnail = hasExtraField(extraJson, "thumbnail") ? "有缩略图" : "无缩略图";
+                int videoDuration = getIntFromExtra(extraJson, "duration", 0);
+                return String.format("[视频消息] 时长:%d秒 %s URL:%s",
+                    videoDuration,
+                    videoThumbnail,
+                    videoUrl != null ? videoUrl : "未知");
+
+            case 5:
+                // 文件消息
+                String fileUrl = extractMediaUrl(payload);
+                String fileName = payload.getSearchableContent();
+                long fileSize = getLongFromExtra(extraJson, "size", 0);
+                return String.format("[文件消息] %s 大小:%s URL:%s",
+                    fileName != null ? fileName : "未知文件",
+                    formatFileSize(fileSize),
+                    fileUrl != null ? fileUrl : "未知");
+
+            case 0:
+                // 未知类型
+                return null;
+
+            default:
+                // 其他类型
+                LOG.debug("Unknown message type: {}", type);
+                return String.format("[消息类型:%d] %s", type, payload.getSearchableContent() != null ? payload.getSearchableContent() : "");
+        }
+    }
+
+    /**
+     * 解析 extra 字段为 JSON 对象
+     */
+    private com.google.gson.JsonObject parseExtraJson(String extra) {
+        if (extra == null || extra.isEmpty()) {
             return null;
-        } else {
-            // 其他类型（图片、语音、视频、文件等）
-            // 可以转换为描述性文本
-            return String.format("[消息类型:%d]", type);
+        }
+        try {
+            return gson.fromJson(extra, com.google.gson.JsonObject.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 从 extra JSON 中获取 int 值
+     */
+    private int getIntFromExtra(com.google.gson.JsonObject extraJson, String field, int defaultValue) {
+        if (extraJson != null && extraJson.has(field)) {
+            try {
+                return extraJson.get(field).getAsInt();
+            } catch (Exception e) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    /**
+     * 从 extra JSON 中获取 long 值
+     */
+    private long getLongFromExtra(com.google.gson.JsonObject extraJson, String field, long defaultValue) {
+        if (extraJson != null && extraJson.has(field)) {
+            try {
+                return extraJson.get(field).getAsLong();
+            } catch (Exception e) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    /**
+     * 检查 extra JSON 中是否存在字段
+     */
+    private boolean hasExtraField(com.google.gson.JsonObject extraJson, String field) {
+        return extraJson != null && extraJson.has(field);
+    }
+
+    /**
+     * 从 payload 中提取媒体 URL
+     * 优先使用 remoteMediaUrl 字段（媒体类消息专用）
+     */
+    private String extractMediaUrl(MessagePayload payload) {
+        // 首先尝试使用 remoteMediaUrl 字段（媒体类消息）
+        if (payload.getRemoteMediaUrl() != null && !payload.getRemoteMediaUrl().isEmpty()) {
+            return payload.getRemoteMediaUrl();
+        }
+
+        // 回退：尝试从 extra JSON 中获取 url 字段
+        com.google.gson.JsonObject extraJson = parseExtraJson(payload.getExtra());
+        if (extraJson != null && extraJson.has("url")) {
+            try {
+                return extraJson.get("url").getAsString();
+            } catch (Exception e) {
+                // 忽略解析错误
+            }
+        }
+
+        // 回退：尝试从 extra 字符串中获取（如果 extra 是纯 URL）
+        if (payload.getExtra() != null && !payload.getExtra().isEmpty()) {
+            String extra = payload.getExtra();
+            if (extra.startsWith("http://") || extra.startsWith("https://")) {
+                return extra;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 格式化文件大小
+     */
+    private String formatFileSize(long size) {
+        if (size <= 0) return "未知";
+        if (size < 1024) return size + "B";
+        if (size < 1024 * 1024) return String.format("%.2fKB", size / 1024.0);
+        if (size < 1024 * 1024 * 1024) return String.format("%.2fMB", size / (1024.0 * 1024));
+        return String.format("%.2fGB", size / (1024.0 * 1024 * 1024));
+    }
+
+    /**
+     * 检测消息中的媒体信息
+     */
+    private MediaInfo detectMediaInfo(cn.wildfirechat.pojos.OutputMessageData data) {
+        if (data.getPayload() == null) {
+            return null;
+        }
+
+        int type = data.getPayload().getType();
+        String mediaUrl = extractMediaUrl(data.getPayload());
+
+        if (mediaUrl == null || mediaUrl.isEmpty()) {
+            return null;
+        }
+
+        switch (type) {
+            case 2: // 语音
+                return new MediaInfo(mediaUrl, "audio");
+            case 3: // 图片
+                return new MediaInfo(mediaUrl, "image");
+            case 4: // 视频
+                return new MediaInfo(mediaUrl, "video");
+            case 5: // 文件
+                return new MediaInfo(mediaUrl, "file");
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * 媒体信息内部类
+     */
+    private static class MediaInfo {
+        private final String url;
+        private final String type;
+
+        public MediaInfo(String url, String type) {
+            this.url = url;
+            this.type = type;
+        }
+
+        public String getUrl() {
+            return url;
+        }
+
+        public String getType() {
+            return type;
         }
     }
 

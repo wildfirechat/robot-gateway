@@ -177,7 +177,7 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
             // 1. 转换为Openclaw格式
             OpenclawOutMessage openclawMessage = messageConverter.convertToOpenclaw(message);
             if (openclawMessage == null) {
-                LOG.debug("Failed to convert message or non-text message, skipping");
+                LOG.debug("Failed to convert message, skipping");
                 return;
             }
 

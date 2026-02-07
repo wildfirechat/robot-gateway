@@ -123,6 +123,8 @@ public class OpenclawOutMessage {
         private String text;
         private long timestamp;
         private List<Mention> mentions;
+        private String mediaUrl;      // 媒体文件URL（图片、语音、视频等）
+        private String mediaType;     // 媒体类型：image, audio, video, file
 
         public Message() {
         }
@@ -157,6 +159,22 @@ public class OpenclawOutMessage {
 
         public void setMentions(List<Mention> mentions) {
             this.mentions = mentions;
+        }
+
+        public String getMediaUrl() {
+            return mediaUrl;
+        }
+
+        public void setMediaUrl(String mediaUrl) {
+            this.mediaUrl = mediaUrl;
+        }
+
+        public String getMediaType() {
+            return mediaType;
+        }
+
+        public void setMediaType(String mediaType) {
+            this.mediaType = mediaType;
         }
 
         public static class Mention {
