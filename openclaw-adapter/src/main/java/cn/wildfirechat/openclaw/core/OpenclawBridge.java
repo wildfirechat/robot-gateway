@@ -10,6 +10,7 @@ import cn.wildfirechat.openclaw.openclaw.OpenclawWebSocketClient;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenclawInMessage;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenclawOutMessage;
 import cn.wildfirechat.openclaw.session.GroupFilter;
+import cn.wildfirechat.openclaw.session.SessionContextManager;
 import cn.wildfirechat.sdk.model.IMResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +49,9 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
 
     @Autowired
     private WhitelistFilter whitelistFilter;
+
+    @Autowired
+    private SessionContextManager sessionContextManager;
 
     private RobotServiceClient wildfireClient;
     private OpenclawWebSocketClient openclawClient;
@@ -100,7 +104,7 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
 
         // 2. 连接到Openclaw Gateway
         LOG.info("Connecting to Openclaw Gateway: {}", openclawConfig.getUrl());
-        openclawClient = new OpenclawWebSocketClient(openclawConfig, this);
+        openclawClient = new OpenclawWebSocketClient(openclawConfig, this, sessionContextManager);
         try {
             openclawClient.connect();
 
@@ -324,7 +328,7 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
 
                     try {
                         // 创建新的连接
-                        openclawClient = new OpenclawWebSocketClient(openclawConfig, this);
+                        openclawClient = new OpenclawWebSocketClient(openclawConfig, this, sessionContextManager);
                         openclawClient.connect();
 
                         // 等待连接和认证完成（最多等待5秒）

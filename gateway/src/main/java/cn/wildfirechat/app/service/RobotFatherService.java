@@ -4,6 +4,7 @@ import cn.wildfirechat.app.config.BotFatherConfig;
 import cn.wildfirechat.common.ErrorCode;
 import cn.wildfirechat.pojos.*;
 import cn.wildfirechat.sdk.RelationAdmin;
+import cn.wildfirechat.sdk.RobotService;
 import cn.wildfirechat.sdk.UserAdmin;
 import cn.wildfirechat.sdk.model.IMResult;
 import cn.wildfirechat.sdk.utilities.AdminHttpUtils;
@@ -11,6 +12,7 @@ import io.netty.util.internal.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
@@ -28,6 +30,9 @@ public class RobotFatherService {
 
     @Autowired
     private BotFatherConfig botFatherConfig;
+
+    @Value("${im.url}")
+    private String imUrl;
 
     // 内存缓存：用户ID -> 机器人信息
     private final Map<String, RobotInfo> userRobotCache = new HashMap<>();
@@ -126,6 +131,54 @@ public class RobotFatherService {
     }
 
     /**
+     * 发送欢迎消息给用户
+     * 使用新创建的机器人账号发送
+     *
+     * @param userId    用户ID
+     * @param robotId   机器人ID
+     * @param robotSecret 机器人密钥
+     * @param robotDisplayName 机器人显示名称
+     */
+    private void sendWelcomeMessage(String userId, String robotId, String robotSecret, String robotDisplayName) {
+        try {
+            LOG.info("Sending welcome message from robot {} to user {}", robotId, userId);
+
+            // 创建机器人服务实例
+            RobotService robotService = new RobotService(imUrl, robotId, robotSecret);
+
+            // 构建会话（私聊）
+            Conversation conversation = new Conversation();
+            conversation.setType(0); // 私聊
+            conversation.setLine(0);
+            conversation.setTarget(userId); // 发送给创建者
+
+            // 构建消息内容
+            MessagePayload payload = new MessagePayload();
+            payload.setType(1); // 文本消息
+            String welcomeText = String.format(
+                "你好！我是 %s。\n\n" +
+                "我已经创建完成，现在可以开始为你服务了。\n" +
+                "你可以直接给我发消息，我会尽力帮助你！",
+                robotDisplayName
+            );
+            payload.setSearchableContent(welcomeText);
+
+            // 发送消息
+            IMResult<SendMessageResult> result = robotService.sendMessage(robotId, conversation, payload);
+
+            if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
+                LOG.info("Welcome message sent successfully from {} to {}", robotId, userId);
+            } else {
+                LOG.error("Failed to send welcome message, error: {}",
+                    result != null ? result.getCode() : "null");
+            }
+
+        } catch (Exception e) {
+            LOG.error("Exception when sending welcome message from {} to {}", robotId, userId, e);
+        }
+    }
+
+    /**
      * 为用户创建新机器人
      * 回调地址自动使用配置文件中的 botfather.callbackUrl
      *
@@ -174,6 +227,11 @@ public class RobotFatherService {
                     userRobotCache.put(userId, info);
                     LOG.info("Robot created successfully for user: {}, robotId: {}", userId, output.getUserId());
                     addRobotFriend(userId, info.getRobotId());
+                    
+                    // ========== 发送欢迎消息给用户 ==========
+                    sendWelcomeMessage(userId, info.getRobotId(), info.getRobotSecret(), input.getDisplayName());
+                    // ======================================
+                    
                     return info;
                 }
             } else {

@@ -4,6 +4,7 @@ import cn.wildfirechat.openclaw.config.OpenclawConfig;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenclawInMessage;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenclawOutMessage;
 import cn.wildfirechat.openclaw.openclaw.protocol.OpenClawProtocol;
+import cn.wildfirechat.openclaw.session.SessionContextManager;
 import com.google.gson.Gson;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
@@ -29,6 +30,7 @@ public class OpenclawWebSocketClient extends WebSocketClient {
     private final OpenclawConfig config;
     private final OpenclawMessageHandler messageHandler;
     private final ScheduledExecutorService heartbeatExecutor;
+    private final SessionContextManager sessionContextManager;
 
     private volatile boolean isAuthenticated = false;
     private volatile long lastHeartbeatTime;
@@ -55,9 +57,14 @@ public class OpenclawWebSocketClient extends WebSocketClient {
     }
 
     public OpenclawWebSocketClient(OpenclawConfig config, OpenclawMessageHandler messageHandler) {
+        this(config, messageHandler, null);
+    }
+
+    public OpenclawWebSocketClient(OpenclawConfig config, OpenclawMessageHandler messageHandler, SessionContextManager sessionContextManager) {
         super(URI.create(config.getUrl())); // 不再需要在URL中添加token
         this.config = config;
         this.messageHandler = messageHandler;
+        this.sessionContextManager = sessionContextManager;
         this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "OpenclawHeartbeatThread");
             thread.setDaemon(true);
@@ -171,6 +178,18 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                         pendingRequest.threadId,
                         pendingRequest.isGroup
                     ));
+                    
+                    // 同时注册到 session 上下文管理器（用于 cron 任务等异步消息）
+                    if (sessionContextManager != null && pendingRequest.senderId != null) {
+                        sessionContextManager.associateRunId(runId, SessionContextManager.DEFAULT_SESSION_KEY);
+                        sessionContextManager.registerSession(
+                            SessionContextManager.DEFAULT_SESSION_KEY,
+                            pendingRequest.senderId,
+                            pendingRequest.threadId,
+                            pendingRequest.isGroup
+                        );
+                    }
+                    
                     LOG.debug("Saved message context for runId={}, sender={}", runId, pendingRequest.senderId);
                 }
             }
@@ -297,8 +316,28 @@ public class OpenclawWebSocketClient extends WebSocketClient {
 
         String text = data.get("text").getAsString();
 
-        // 查找消息上下文
+        // 查找消息上下文（优先从 runId 映射，其次从 session 上下文管理器）
         MessageContext context = messageContexts.get(runId);
+        
+        // 如果没有找到上下文，尝试从 session 上下文管理器获取（用于 cron 任务等异步消息）
+        if (context == null && sessionContextManager != null) {
+            SessionContextManager.SessionContext sessionContext = sessionContextManager.getContextByRunId(runId);
+            if (sessionContext == null) {
+                // 尝试获取默认 session 上下文
+                sessionContext = sessionContextManager.getDefaultSessionContext();
+            }
+            
+            if (sessionContext != null) {
+                context = new MessageContext(
+                    sessionContext.getSenderId(),
+                    sessionContext.getThreadId(),
+                    sessionContext.isGroup()
+                );
+                LOG.debug("Resolved context from session manager for runId={}, sender={}", 
+                    runId, sessionContext.getSenderId());
+            }
+        }
+        
         if (context == null) {
             LOG.debug("No context found for runId={}, skipping agent event", runId);
             // 清理可能存在的孤立pendingRequests
@@ -382,8 +421,27 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         LOG.debug("Chat event: state={}, runId={}, text={}", state, runId,
                 messageText != null ? messageText.substring(0, Math.min(50, messageText.length())) : "null");
 
-        // 查找消息上下文（用于回复给原始发送者）
+        // 查找消息上下文（优先从 runId 映射，其次从 session 上下文管理器）
         MessageContext context = messageContexts.get(runId);
+        
+        // 如果没有找到上下文，尝试从 session 上下文管理器获取（用于 cron 任务等异步消息）
+        if (context == null && sessionContextManager != null) {
+            SessionContextManager.SessionContext sessionContext = sessionContextManager.getContextByRunId(runId);
+            if (sessionContext == null) {
+                // 尝试获取默认 session 上下文
+                sessionContext = sessionContextManager.getDefaultSessionContext();
+            }
+            
+            if (sessionContext != null) {
+                context = new MessageContext(
+                    sessionContext.getSenderId(),
+                    sessionContext.getThreadId(),
+                    sessionContext.isGroup()
+                );
+                LOG.debug("Resolved context from session manager for runId={}, sender={}", 
+                    runId, sessionContext.getSenderId());
+            }
+        }
 
         // 根据状态处理
         if ("final".equals(state)) {
@@ -494,6 +552,18 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         }
 
         try {
+            // 注册 session 上下文（用于 cron 任务等异步消息的回复）
+            if (sessionContextManager != null && senderId != null) {
+                String threadId = message.getChannel() != null ? message.getChannel().getThreadId() : senderId;
+                boolean isGroup = message.getChannel() != null && message.getChannel().isGroup();
+                sessionContextManager.registerSession(
+                    SessionContextManager.DEFAULT_SESSION_KEY,
+                    senderId,
+                    threadId,
+                    isGroup
+                );
+            }
+
             // 将OpenclawOutMessage转换为OpenClaw的chat.send格式
             String requestId = UUID.randomUUID().toString();
 
@@ -544,6 +614,10 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                 }
                 // 清理超时的消息上下文
                 cleanupExpiredMessageContexts();
+                // 清理过期的session上下文
+                if (sessionContextManager != null) {
+                    sessionContextManager.cleanupExpiredSessions(MESSAGE_CONTEXT_TIMEOUT_MS);
+                }
             } catch (Exception e) {
                 LOG.error("Heartbeat error", e);
             }
