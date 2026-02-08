@@ -109,6 +109,8 @@ public class RobotFatherService {
                             // 缓存机器人信息
                             userRobotCache.put(userId, info);
                             addRobotFriend(userId, robot.getUserId());
+                            // 发送欢迎消息
+                            sendWelcomeMessage(userId, robot.getUserId(), robot.getSecret(), robot.getDisplayName());
                             return info;
                         }
                     }
