@@ -16,9 +16,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * RobotFather 服务类
@@ -36,6 +35,9 @@ public class RobotFatherService {
 
     // 内存缓存：用户ID -> 机器人信息
     private final Map<String, RobotInfo> userRobotCache = new HashMap<>();
+
+    // 已使用的robotId集合，用于快速检查重复
+    private final Set<String> usedRobotIds = ConcurrentHashMap.newKeySet();
 
     @PostConstruct
     private void init() {
@@ -196,7 +198,7 @@ public class RobotFatherService {
             }
 
             // 生成机器人信息
-            String robotId = "robot_" + userId + "_" + System.currentTimeMillis();
+            String robotId = generateUniqueRobotId(userId);
             String robotSecret = generateSecret();
 
             // 构建创建机器人请求
@@ -251,6 +253,56 @@ public class RobotFatherService {
      */
     private String generateSecret() {
         return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    /**
+     * 生成6位随机数字字符串
+     * @return 6位随机数字字符串
+     */
+    private String generate6DigitRandom() {
+        Random random = new Random();
+        int num = 100000 + random.nextInt(900000); // 100000 ~ 999999
+        return String.valueOf(num);
+    }
+
+    /**
+     * 生成唯一的机器人ID
+     * 格式：robot_{userId}_{6位随机数字}
+     * @param userId 用户ID
+     * @return 唯一的机器人ID
+     */
+    private String generateUniqueRobotId(String userId) {
+        String baseId = "robot_" + userId + "_";
+        int maxRetries = 100;
+
+        for (int i = 0; i < maxRetries; i++) {
+            String robotId = baseId + generate6DigitRandom();
+
+            // 检查是否已存在
+            if (!usedRobotIds.contains(robotId) && !isRobotIdExists(robotId)) {
+                usedRobotIds.add(robotId);
+                return robotId;
+            }
+        }
+
+        // 如果所有尝试仍然重复，使用UUID作为后备
+        LOG.warn("Failed to generate unique robot ID with random suffix, falling back to UUID");
+        return baseId + UUID.randomUUID().toString().replace("-", "").substring(0, 6);
+    }
+
+    /**
+     * 检查机器人ID是否已存在于IM服务器
+     * @param robotId 机器人ID
+     * @return 是否已存在
+     */
+    private boolean isRobotIdExists(String robotId) {
+        try {
+            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotId);
+            return result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS && result.getResult() != null;
+        } catch (Exception e) {
+            LOG.error("Error checking if robot ID exists: {}", robotId, e);
+            return false;
+        }
     }
 
     /**
