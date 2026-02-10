@@ -158,6 +158,13 @@ public class OpenclawBridge implements OpenclawWebSocketClient.OpenclawMessageHa
             return;
         }
 
+        if(message.getData().getPayload().getType() <= 0
+                || (message.getData().getPayload().getType() > 15 && message.getData().getPayload().getType() < 100)
+                || message.getData().getPayload().getType() > 200
+        ) {
+            LOG.info("Ignore message type {}", message.getData().getPayload().getType());
+        }
+
         try {
             LOG.info("Received message from Wildfire: sender={}, type={}",
                     message.getData() != null ? message.getData().getSender() : "null",
