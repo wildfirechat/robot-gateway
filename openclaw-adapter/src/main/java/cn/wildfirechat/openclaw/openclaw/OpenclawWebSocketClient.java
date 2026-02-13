@@ -11,6 +11,7 @@ import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.util.StringUtils;
 
 import java.net.URI;
 import java.util.UUID;
@@ -48,11 +49,16 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         String threadId;
         boolean isGroup;
         long timestamp;
+        String lastText;
 
         MessageContext(String senderId, String threadId, boolean isGroup) {
             this.senderId = senderId;
             this.threadId = threadId;
             this.isGroup = isGroup;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        void refreshTimestamp() {
             this.timestamp = System.currentTimeMillis();
         }
     }
@@ -174,11 +180,14 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                 if (payload.has("runId")) {
                     String runId = payload.get("runId").getAsString();
                     // 保存runId到sender信息的映射
-                    messageContexts.put(runId, new MessageContext(
-                        pendingRequest.senderId,
-                        pendingRequest.threadId,
-                        pendingRequest.isGroup
-                    ));
+                    messageContexts.compute(runId, (s, messageContext) -> {
+                        if(messageContext == null) {
+                            messageContext = new MessageContext(pendingRequest.senderId, pendingRequest.threadId, pendingRequest.isGroup);
+                        } else {
+                            messageContext.refreshTimestamp();
+                        }
+                        return messageContext;
+                    });
                     
                     // 同时注册到 session 上下文管理器（用于 cron 任务等异步消息）
                     if (sessionContextManager != null && pendingRequest.senderId != null) {
@@ -301,28 +310,31 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         String stream = payload.has("stream") ? payload.get("stream").getAsString() : "";
 
         boolean startCommand = false;
+        boolean endCommand = false;
         if("lifecycle".equals(stream) && payload.has("data")) {
             JsonObject data = payload.getAsJsonObject("data");
             if(data.has("phase")) {
                 String phase = data.get("phase").getAsString();
                 if("start".equals(phase)) {
                     startCommand = true;
+                } else if("end".equals(phase)) {
+                    endCommand = true;
                 }
             }
         }
 
         // 只处理assistant流
-        if (!"assistant".equals(stream) && !startCommand) {
+        if (!"assistant".equals(stream) && !startCommand && !endCommand) {
             return;
         }
 
         // 提取data中的文本
-        if (!payload.has("data") && !startCommand) {
+        if (!payload.has("data") && !startCommand && !endCommand) {
             return;
         }
 
         com.google.gson.JsonObject data = payload.getAsJsonObject("data");
-        if (!data.has("text") && !startCommand) {
+        if (!data.has("text") && !startCommand && !endCommand) {
             return;
         }
 
@@ -330,6 +342,10 @@ public class OpenclawWebSocketClient extends WebSocketClient {
 
         // 查找消息上下文（优先从 runId 映射，其次从 session 上下文管理器）
         MessageContext context = messageContexts.get(runId);
+
+        if(StringUtils.isEmpty(text) && endCommand && context != null) {
+            text = context.lastText;
+        }
         
         // 如果没有找到上下文，尝试从 session 上下文管理器获取（用于 cron 任务等异步消息）
         if (context == null && sessionContextManager != null) {
@@ -345,6 +361,7 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                     sessionContext.getThreadId(),
                     sessionContext.isGroup()
                 );
+                messageContexts.put(runId, context);
                 LOG.debug("Resolved context from session manager for runId={}, sender={}", 
                     runId, sessionContext.getSenderId());
             }
@@ -365,6 +382,10 @@ public class OpenclawWebSocketClient extends WebSocketClient {
             return;
         }
 
+        if(!endCommand) {
+            context.lastText = text;
+        }
+
         LOG.debug("Agent event: runId={}, text={}, sender={}", runId,
                 text.substring(0, Math.min(50, text.length())), context.senderId);
 
@@ -378,6 +399,8 @@ public class OpenclawWebSocketClient extends WebSocketClient {
         msgContent.setExtra("streamId", runId);  // 使用runId作为streamId
         if(startCommand) {
             msgContent.setExtra("state", "start");
+        } else if(endCommand) {
+            msgContent.setExtra("state", "completed");
         } else {
             msgContent.setExtra("state", "generating");  // 标识为生成中状态
         }
@@ -391,6 +414,9 @@ public class OpenclawWebSocketClient extends WebSocketClient {
 
         if (messageHandler != null) {
             messageHandler.onResponse(openclawResponse);
+        }
+        if(endCommand) {
+            messageContexts.remove(runId);
         }
     }
 
@@ -454,6 +480,7 @@ public class OpenclawWebSocketClient extends WebSocketClient {
                     sessionContext.getThreadId(),
                     sessionContext.isGroup()
                 );
+                messageContexts.put(runId, context);
                 LOG.debug("Resolved context from session manager for runId={}, sender={}", 
                     runId, sessionContext.getSenderId());
             }
@@ -461,32 +488,8 @@ public class OpenclawWebSocketClient extends WebSocketClient {
 
         // 根据状态处理
         if ("final".equals(state)) {
-            // final状态 - 最终结果
-            if (messageText != null && !messageText.isEmpty()) {
-                // 转换为OpenclawInMessage格式
-                OpenclawInMessage openclawResponse = new OpenclawInMessage();
-                openclawResponse.setType("response");
-
-                OpenclawInMessage.Message msgContent = new OpenclawInMessage.Message();
-                msgContent.setText(messageText);
-                // 附加streamId和状态信息
-                msgContent.setExtra("streamId", runId);
-                msgContent.setExtra("state", "completed");  // 标识为完成状态
-                openclawResponse.setMessage(msgContent);
-
-                // 设置channel信息
-                OpenclawInMessage.Channel channel = new OpenclawInMessage.Channel();
-                if (context != null) {
-                    channel.setPeerId(context.senderId);
-                    channel.setThreadId(context.threadId);
-                }
-                openclawResponse.setChannel(channel);
-
-                if (messageHandler != null) {
-                    messageHandler.onResponse(openclawResponse);
-                }
-            }
-
+            // final状态 不再处理，放到lifecycle的end处理
+            
             // 清理上下文
             messageContexts.remove(runId);
         } else if ("error".equals(state)) {

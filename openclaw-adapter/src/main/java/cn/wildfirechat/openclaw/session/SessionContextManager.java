@@ -140,6 +140,9 @@ public class SessionContextManager {
         int count = 0;
         
         for (Map.Entry<String, SessionContext> entry : sessionContexts.entrySet()) {
+            if(entry.getKey().equals(DEFAULT_SESSION_KEY)) {
+                continue;
+            }
             if (now - entry.getValue().getLastActivityTime() > maxAgeMs) {
                 sessionContexts.remove(entry.getKey());
                 count++;
