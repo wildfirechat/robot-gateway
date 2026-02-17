@@ -1,0 +1,77 @@
+# ========================================
+# Openclaw Adapter Configuration
+# ========================================
+
+# Wildfire IM Gateway Configuration
+wildfire:
+  # 野火网关WebSocket地址
+  gateway_url: "ws://localhost:8884/robot/gateway"
+  # 机器人ID
+  robot_id: "YourRobotId"
+  # 机器人密钥
+  robot_secret: "YourRobotSecret"
+  # 重连间隔
+  reconnect_interval: "5s"
+
+# Openclaw Gateway Configuration
+openclaw:
+  # Openclaw网关WebSocket地址
+  url: "ws://127.0.0.1:18789"
+  # Openclaw访问令牌
+  token: ""
+  # 作用域标识
+  scope: "wildfire-im"
+  # 重连间隔
+  reconnect_interval: "5s"
+  # 心跳间隔
+  heartbeat_interval: "30s"
+
+# Group Chat Strategy Configuration
+# 群组消息处理策略
+group:
+  # 是否启用群组消息处理
+  enabled: true
+  # 允许处理的群组ID列表（为空表示处理所有群组）
+  allowed_ids: []
+  # 是否在被@时响应
+  respond_on_mention: true
+  # 是否在检测到问题时响应
+  respond_on_question: true
+  # 帮助关键词列表（检测到这些词时响应）
+  help_keywords:
+    - "帮"
+    - "请"
+    - "分析"
+    - "总结"
+    - "怎么"
+    - "如何"
+
+# Session Management Configuration
+# 会话管理配置
+session:
+  # 会话超时时间
+  timeout: "30m"
+  # 最大会话数
+  max_sessions: 1000
+
+# Whitelist Filter Configuration
+# 白名单过滤器配置
+whitelist:
+  # 是否启用白名单（true=只处理白名单中的消息，false=处理所有消息）
+  enabled: false
+  # 允许的用户ID列表
+  allowed_senders: []
+  # 允许的群组ID列表
+  allowed_groups: []
+  # 阻止的用户ID列表（优先级高于allowed_senders）
+  blocked_senders: []
+  # 阻止的群组ID列表（优先级高于allowed_groups）
+  blocked_groups: []
+
+# Logging Configuration
+# 日志配置
+logging:
+  # 日志级别: debug, info, warn, error
+  level: "info"
+  # 控制台输出格式: console, json
+  format: "console"
