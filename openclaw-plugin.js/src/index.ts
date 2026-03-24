@@ -4,7 +4,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { WildfireChannelPlugin } from "./channel.js";
-import { startClient, stopClient, isClientConnected } from "./clients.js";
+import { startClient} from "./clients.js";
 import { getAccountConfig, validateConfig } from "./config.js";
 import { handleIncomingMessage } from "./inbound.js";
 
@@ -119,7 +119,7 @@ export default function register(api: any): void {
         return true;
       }
 
-      await handleIncomingMessage(
+      handleIncomingMessage(
         api,
         {
           data: {
@@ -144,10 +144,6 @@ export default function register(api: any): void {
   api.registerService({
     id: "wildfire",
     start: async () => {
-      if (isClientConnected()) {
-        api.logger?.info?.("[wildfire] service already started");
-        return;
-      }
 
       const config = getAccountConfig(api);
       if (!config) {
@@ -171,7 +167,6 @@ export default function register(api: any): void {
       }
     },
     stop: async () => {
-      await stopClient(api);
       api.logger?.info?.("[wildfire] service stopped");
     },
   });

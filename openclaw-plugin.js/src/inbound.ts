@@ -5,7 +5,7 @@
 import type { WildfireConfig } from "./config.js";
 // @ts-ignore - runtime may not be fully typed
 import { shouldRespondToGroupMessage } from "./utils.js";
-import { getClient } from "./clients.js";
+import { getRobotServiceSender } from "./clients.js";
 import { WhitelistFilter } from "./whitelist.js";
 import {
   TextMessageContent,
@@ -265,10 +265,10 @@ async function sendStreamingReply(
   api?: any
 ): Promise<void> {
   api?.logger?.debug?.(`[wildfire-debug] sendStreamingReply called, state=${state}, text=${text?.substring(0, 30)}`);
-  const client = getClient();
-  if (!client) {
-    api?.logger?.error?.("[wildfire-debug] client not connected");
-    throw new Error("Wildfire client not connected");
+  const robotService = getRobotServiceSender();
+  if (!robotService) {
+    api?.logger?.error?.("[wildfire-debug] robot service sender not ready");
+    throw new Error("Wildfire robot service not ready");
   }
 
   const conversation: Conversation = {
@@ -300,7 +300,7 @@ async function sendStreamingReply(
   api?.logger?.debug?.(`[wildfire-debug] sending streaming message: state=${state}, streamId=${streamId}`);
 
   try {
-    const result = await client.sendMessage(conversation, payload);
+    const result = await robotService.sendMessage(conversation, payload);
     api?.logger?.debug?.(`[wildfire-debug] sendMessage result: success=${result.isSuccess()}, msg=${result.getMsg()}`);
 
     if (!result.isSuccess()) {
@@ -323,10 +323,10 @@ async function sendReply(
   api?: any
 ): Promise<void> {
   api?.logger?.debug?.(`[wildfire-debug] sendReply called, text=${text?.substring(0, 30)}`);
-  const client = getClient();
-  if (!client) {
-    api?.logger?.error?.("[wildfire-debug] client not connected");
-    throw new Error("Wildfire client not connected");
+  const robotService = getRobotServiceSender();
+  if (!robotService) {
+    api?.logger?.error?.("[wildfire-debug] robot service sender not ready");
+    throw new Error("Wildfire robot service not ready");
   }
 
   const conversation: Conversation = {
@@ -343,7 +343,7 @@ async function sendReply(
   api?.logger?.debug?.(`[wildfire-debug] content encoded, sending...`);
   
   try {
-    const result = await client.sendMessage(conversation, content.encode());
+    const result = await robotService.sendMessage(conversation, content.encode());
     api?.logger?.debug?.(`[wildfire-debug] sendMessage result: success=${result.isSuccess()}, msg=${result.getMsg()}`);
     
     if (!result.isSuccess()) {
@@ -384,10 +384,10 @@ async function sendDirectReply(
   api?: any
 ): Promise<void> {
   api?.logger?.debug?.(`[wildfire-debug] sendDirectReply called, text=${text?.substring(0, 30)}`);
-  const client = getClient();
-  if (!client) {
-    api?.logger?.error?.("[wildfire-debug] client not connected");
-    throw new Error("Wildfire client not connected");
+  const robotService = getRobotServiceSender();
+  if (!robotService) {
+    api?.logger?.error?.("[wildfire-debug] robot service sender not ready");
+    throw new Error("Wildfire robot service not ready");
   }
 
   const conversation: Conversation = {
@@ -402,7 +402,7 @@ async function sendDirectReply(
   content.content = text;
 
   try {
-    const result = await client.sendMessage(conversation, content.encode());
+    const result = await robotService.sendMessage(conversation, content.encode());
     api?.logger?.debug?.(`[wildfire-debug] sendDirectReply result: success=${result.isSuccess()}, msg=${result.getMsg()}`);
     
     if (!result.isSuccess()) {
