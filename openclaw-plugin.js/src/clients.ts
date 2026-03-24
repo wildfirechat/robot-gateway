@@ -3,13 +3,20 @@
  */
 
 import { RobotServiceClient } from "@wildfirechat/robot-gateway-client-sdk";
-import { init as initServerSdk } from "@wildfirechat/server-sdk";
+import { RobotService } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
 import { handleIncomingMessage } from "./inbound.js";
 
 // Single client instance
 let client: RobotServiceClient | null = null;
 let connected = false;
+
+type RobotServiceSender = {
+  sendMessage: (conversation: any, payload: any, toUsers?: string[] | null) => Promise<any>;
+  uploadFile: (filePathOrFileBuffer: string | Buffer, mediaType?: number, contentType?: string) => Promise<any>;
+};
+
+let robotServiceSender: RobotServiceSender | null = null;
 
 /**
  * Check if client is connected
@@ -27,11 +34,8 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
     return;
   }
 
-  // Initialize server SDK for message models
-  initServerSdk("http://localhost:18080", "dummy");
-
   client = new RobotServiceClient(
-    config.gatewayUrl!,
+    config.imUrl!,
     {
       onMessage: (message: any) => handleIncomingMessage(api, message, config),
       onConnectionChanged: (isConnected: boolean) => {
@@ -51,9 +55,18 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
 
   const isConn = await client.connect(config.robotId!, config.robotSecret!);
 
+  const robotService = new RobotService(config.imUrl!, config.robotId!, config.robotSecret!);
+  robotServiceSender = {
+    sendMessage: (conversation: any, payload: any, toUsers?: string[] | null) =>
+      robotService.sendMessageWithOptions(config.robotId!, conversation, payload, toUsers ?? null),
+    uploadFile: (filePathOrFileBuffer: string | Buffer, mediaType?: number, contentType?: string) =>
+      robotService.uploadFile(filePathOrFileBuffer, mediaType, contentType),
+  };
+
   if (isConn) {
     connected = true;
     api.logger?.info?.(`[wildfire] connected as ${config.robotId}`);
+    api.logger?.info?.(`[wildfire] robot service sender ready: ${config.imUrl}`);
   } else {
     api.logger?.error?.(`[wildfire] failed to connect`);
     throw new Error("Failed to connect to Wildfire IM");
@@ -78,6 +91,13 @@ export function getConnectedClient(): RobotServiceClient | null {
 }
 
 /**
+ * Get RobotService sender for outbound sendText/sendMedia
+ */
+export function getRobotServiceSender(): RobotServiceSender | null {
+  return robotServiceSender;
+}
+
+/**
  * Stop the client
  */
 export async function stopClient(api?: any): Promise<void> {
@@ -90,6 +110,7 @@ export async function stopClient(api?: any): Promise<void> {
     }
     client = null;
     connected = false;
+    robotServiceSender = null;
   }
 }
 

@@ -40,7 +40,7 @@ openclaw restart
           "accounts": {
               "default": {
                   "enabled": true,
-                  "gatewayUrl": "ws://your_gateway_host:8884/robot/gateway",
+                  "imUrl": "http://your_im_host",
                   "robotId": "your robot id",
                   "robotSecret": "your robot secret",
                   "requireMention": true,
@@ -63,7 +63,7 @@ openclaw restart
 | 配置项 | 必填 | 说明 |
 |--------|------|------|
 | `enabled` | 否 | 是否启用，默认 `true` |
-| `gatewayUrl` | 是 | 野火网关 WebSocket 地址 |
+| `imUrl` | 是 | Wildfire IM 服务地址（RobotService URL），端口默认是 80 |
 | `robotId` | 是 | 机器人 ID |
 | `robotSecret` | 是 | 机器人密钥 |
 | `requireMention` | 否 | 群聊是否需要@机器人才回复，默认 `true` |

@@ -2,7 +2,7 @@
  * OpenClaw Channel Plugin implementation for Wildfire IM
  */
 
-import { getConnectedClient } from "./clients.js";
+import { getRobotServiceSender } from "./clients.js";
 
 import { parseTarget } from "./targets.js";
 import {
@@ -106,13 +106,13 @@ export const WildfireChannelPlugin = {
     }) => {
       console.log(`[wildfire] sendText called: to=${to}, text=${text?.substring(0, 50)}`);
       
-      const client = getConnectedClient();
-      if (!client) {
-        console.error("[wildfire] client not found");
-        return { ok: false, error: new Error("Wildfire not connected") };
+      const robotService = getRobotServiceSender();
+      if (!robotService) {
+        console.error("[wildfire] robot service sender not ready");
+        return { ok: false, error: new Error("Wildfire robot service not ready") };
       }
-      
-      console.log(`[wildfire] client found, connected=${client.isConnected?.()}`);
+
+      console.log(`[wildfire] robot service sender found`);
 
       const target = parseTarget(to);
       if (!target) {
@@ -133,7 +133,7 @@ export const WildfireChannelPlugin = {
         content.content = text;
 
         console.log(`[wildfire] sending message...`);
-        const result = await client.sendMessage(conversation, content.encode());
+        const result = await robotService.sendMessage(conversation, content.encode());
         console.log(`[wildfire] send result: success=${result.isSuccess()}, msg=${result.getMsg?.()}`);
 
         if (!result.isSuccess()) {
@@ -156,12 +156,12 @@ export const WildfireChannelPlugin = {
         return { ok: false, error: new Error("mediaUrl is required") };
       }
       
-      const client = getConnectedClient();
-      if (!client) {
-        console.error(`[wildfire] client not connected`);
-        return { ok: false, error: new Error("Wildfire not connected") };
+      const robotService = getRobotServiceSender();
+      if (!robotService) {
+        console.error(`[wildfire] robot service sender not ready`);
+        return { ok: false, error: new Error("Wildfire robot service not ready") };
       }
-      console.log(`[wildfire] client connected: ${client.isConnected?.()}`);
+      console.log(`[wildfire] robot service sender connected`);
 
       const target = parseTarget(to);
       if (!target) {
@@ -208,7 +208,7 @@ export const WildfireChannelPlugin = {
           console.log(`[wildfire] uploading file with name=${fileName}...`);
           let uploadResult: any;
           try {
-            uploadResult = await client.uploadFile(fileData, fileName, 4, 'application/octet-stream');
+            uploadResult = await robotService.uploadFile(fileData, 4, 'application/octet-stream');
             console.log(`[wildfire] uploadFile returned: code=${uploadResult?.getCode?.()}, msg=${uploadResult?.getMsg?.()}`);
           } catch (uploadErr: any) {
             console.error(`[wildfire] uploadFile threw error: ${uploadErr.message}`);
@@ -244,7 +244,7 @@ export const WildfireChannelPlugin = {
         }
 
         console.log(`[wildfire] sending message...`);
-        const result = await client.sendMessage(conversation, payload);
+        const result = await robotService.sendMessage(conversation, payload);
         console.log(`[wildfire] sendMessage result: success=${result.isSuccess()}, msg=${result.getMsg?.()}`);
 
         if (!result.isSuccess()) {

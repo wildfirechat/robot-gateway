@@ -131,6 +131,7 @@ export async function handleIncomingMessage(
     Provider: "wildfire",
     Surface: "wildfire",
     // Use real message ID when available; fall back to timestamp+random to avoid same-ms collisions
+    // MessageSid 相同的话，OpenClaw 会认为是同一条消息，openclaw 直接回复空，所以必须保证每条消息的 MessageSid 唯一
     MessageSid: `wildfire-${(data.messageId ?? data.msgId ?? data.mid) || `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`}`,
     Timestamp: timestamp,
     OriginatingChannel: "wildfire",

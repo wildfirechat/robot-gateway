@@ -3,6 +3,18 @@
  */
 
 declare module "@wildfirechat/server-sdk" {
+  export class RobotService {
+    constructor(url: string, robotId: string, robotSecret: string, timeout?: number);
+    sendMessage(sender: string, conversation: any, payload: any): Promise<any>;
+    sendMessageWithOptions(
+      sender: string,
+      conversation: any,
+      payload: any,
+      toUsers?: string[] | null,
+    ): Promise<any>;
+    uploadFile(filePathOrFileBuffer: string | Buffer, mediaType?: number, contentType?: string): Promise<any>;
+  }
+
   export class MessageContent {
     constructor(type?: number);
     encode(): any;

@@ -4,7 +4,7 @@
 
 export interface WildfireConfig {
   enabled?: boolean;
-  gatewayUrl?: string;
+  imUrl?: string;
   robotId?: string;
   robotSecret?: string;
   requireMention?: boolean;
@@ -29,7 +29,7 @@ export function getAccountConfig(api: any, accountId: string = "default"): Wildf
     const account = cfg.accounts[accountId];
     if (account.enabled === false) return null;
     return {
-      gatewayUrl: account.gatewayUrl ?? cfg.gatewayUrl,
+      imUrl: account.imUrl ?? cfg.imUrl,
       robotId: account.robotId ?? cfg.robotId,
       robotSecret: account.robotSecret ?? cfg.robotSecret,
       requireMention: account.requireMention ?? cfg.requireMention ?? true,
@@ -47,7 +47,7 @@ export function getAccountConfig(api: any, accountId: string = "default"): Wildf
   if (accountId === "default") {
     if (cfg.enabled === false) return null;
     return {
-      gatewayUrl: cfg.gatewayUrl,
+      imUrl: cfg.imUrl,
       robotId: cfg.robotId,
       robotSecret: cfg.robotSecret,
       requireMention: cfg.requireMention ?? true,
@@ -98,8 +98,8 @@ export function listEnabledAccountConfigs(api: any): Array<{ id: string; config:
  * Validate account configuration
  */
 export function validateConfig(config: WildfireConfig): string | null {
-  if (!config.gatewayUrl) {
-    return "gatewayUrl is required";
+  if (!config.imUrl) {
+    return "imUrl is required";
   }
   if (!config.robotId) {
     return "robotId is required";
