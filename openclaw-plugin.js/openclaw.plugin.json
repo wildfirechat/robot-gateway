@@ -15,9 +15,9 @@
         "type": "boolean",
         "default": true
       },
-      "gatewayUrl": {
+      "imUrl": {
         "type": "string",
-        "description": "Wildfire IM gateway WebSocket URL, e.g. ws://localhost:8884/robot/gateway",
+        "description": "Wildfire IM im-server URL, e.g. http://im-server",
         "default": ""
       },
       "robotId": {
@@ -52,7 +52,7 @@
               "type": "boolean",
               "default": true
             },
-            "gatewayUrl": {
+            "imUrl": {
               "type": "string",
               "default": ""
             },
@@ -74,9 +74,9 @@
     }
   },
   "uiHints": {
-    "gatewayUrl": {
-      "label": "Gateway URL",
-      "placeholder": "ws://localhost:8884/robot/gateway"
+    "imUrl": {
+      "label": "Wildfire IM-Server URL",
+      "placeholder": "http://im-server.com"
     },
     "robotId": {
       "label": "Robot ID"

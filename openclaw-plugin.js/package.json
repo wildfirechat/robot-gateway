@@ -38,7 +38,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@wildfirechat/server-sdk": "^1.0.0"
+    "@wildfirechat/server-sdk": "^1.0.2"
   },
   "peerDependencies": {
     "openclaw": "*"
