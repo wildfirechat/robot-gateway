@@ -1,6 +1,5 @@
 import { ConnectionManager } from './ConnectionManager.js';
 import { IMResult } from '@wildfirechat/server-sdk';
-import { RequestMessage } from './protocol/RequestMessage.js';
 
 /**
  * RobotService 客户端
@@ -614,9 +613,6 @@ export class RobotServiceClient {
         const key = uploadUrl.substring(secondQuestion + 1);
 
         try {
-            // Node.js 环境使用 node-fetch
-            const { default: fetch } = await import('node-fetch');
-            const FormData = (await import('form-data')).default;
             const nodeFormData = new FormData();
             nodeFormData.append('token', token);
             nodeFormData.append('key', key);
@@ -656,9 +652,6 @@ export class RobotServiceClient {
                 body = Buffer.from(fileData);
             }
 
-            // Node.js 环境使用 node-fetch
-            const { default: fetch } = await import('node-fetch');
-            
             // 使用主上传URL
             let response = await fetch(presignedUrl.uploadUrl, {
                 method: 'PUT',

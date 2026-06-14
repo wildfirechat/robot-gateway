@@ -1,6 +1,6 @@
 {
   "name": "@wildfirechat/robot-gateway-client-sdk",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "野火IM机器人网关客户端SDK (Node.js/JavaScript版)",
   "main": "src/index.js",
   "type": "module",
@@ -21,7 +21,6 @@
     "ws": "^8.16.0"
   },
   "optionalDependencies": {
-    "node-fetch": "^3.3.2",
     "form-data": "^4.0.0"
   }
 }

@@ -9,9 +9,8 @@ npm install @wildfirechat/robot-gateway-client
 ```
 
 ## 依赖
-
-本 SDK 依赖 `@wildfirechat/server-sdk` 提供模型类（Conversation, MessagePayload 等）。
-
+1. node 18+
+2. 本 SDK 依赖 `@wildfirechat/server-sdk` 提供模型类（Conversation, MessagePayload 等）。 
 请确保 `server-sdk.js` 位于 `../server-sdk.js` 目录，或修改 package.json 中的依赖路径。
 
 ## 快速开始
