@@ -3,7 +3,6 @@
  */
 
 import { RobotServiceClient } from "@wildfirechat/robot-gateway-client-sdk";
-import { init as initServerSdk } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
 import { handleIncomingMessage } from "./inbound.js";
 

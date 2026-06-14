@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { WildfireConfig } from "./config.js";
 // @ts-ignore - runtime may not be fully typed
@@ -12,6 +13,9 @@ import { getClient } from "./clients.js";
 import { WhitelistFilter } from "./whitelist.js";
 import {
   TextMessageContent,
+  ImageMessageContent,
+  VideoMessageContent,
+  FileMessageContent,
   StreamingTextGeneratingMessageContent,
   StreamingTextGeneratedMessageContent,
   Conversation,
@@ -266,8 +270,71 @@ export async function handleIncomingMessage(
       cfg,
       dispatcherOptions: {
         // deliver is called once per block (paragraph) with that block's text only — NOT cumulative.
-        deliver: async (_payload: { text?: string }) => {
-          // no-op: streaming delivery is handled via onPartialReply + sendStreamingReply
+        deliver: async (_payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
+          if (!_payload) return;
+          // Handle media (file/image/video) delivery
+          const mediaUrl = _payload.mediaUrl || (_payload.mediaUrls && _payload.mediaUrls[0]);
+          const mediaClient = getClient();
+          if (mediaUrl && mediaClient) {
+            api.logger?.info?.(`[wildfire] deliver: mediaUrl=${mediaUrl}`);
+            try {
+              // Read the file
+              let fileData: Buffer;
+              let fileName = 'file';
+              try {
+                const urlPath = mediaUrl.split('?')[0];
+                fileName = urlPath.split('/').pop() || 'file';
+                fileData = readFileSync(mediaUrl);
+              } catch (readErr: any) {
+                api.logger?.warn?.(`[wildfire] deliver: media read failed for ${mediaUrl}: ${readErr.message}`);
+                return;
+              }
+
+              const fileSize = fileData.length;
+
+              // Upload file
+              api.logger?.info?.(`[wildfire] deliver: uploading ${fileName} (${fileSize} bytes)...`);
+              const uploadResult = await mediaClient.uploadFile(fileData, fileName, 4, 'application/octet-stream');
+              if (!uploadResult.isSuccess()) {
+                api.logger?.error?.(`[wildfire] deliver: upload failed: ${uploadResult.getMsg()}`);
+                return;
+              }
+
+              const remoteUrl = uploadResult.getResult();
+              api.logger?.info?.(`[wildfire] deliver: file uploaded: ${remoteUrl}`);
+
+              // Detect media type and send
+              const ext = fileName.toLowerCase();
+              const conversation = {
+                type: conv.type,
+                target: conv.type === 0 ? sender : conv.target,
+                line: conv.line,
+              };
+
+              let payload: any;
+              if (ext.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/)) {
+                const imageContent = new ImageMessageContent(null, remoteUrl, null);
+                payload = imageContent.encode();
+              } else if (ext.match(/\.(mp4|mov|avi|mkv|webm)$/)) {
+                const videoContent = new VideoMessageContent(null, remoteUrl, null, 0);
+                payload = videoContent.encode();
+              } else {
+                const fileContent = new FileMessageContent(null, remoteUrl, fileName, fileSize);
+                payload = fileContent.encode();
+              }
+
+              const sendResult = await mediaClient.sendMessage(conversation, payload);
+              api.logger?.info?.(`[wildfire] deliver: send result: success=${sendResult.isSuccess()}`);
+
+              // If we sent media, suppress the text-only streaming reply
+              if (_payload.text && finalText.length > 0) {
+                // Keep the text in finalText so the completed message has context
+                // but don't send additional text-only message
+              }
+            } catch (e: any) {
+              api.logger?.error?.(`[wildfire] deliver: media send error: ${e.message}`);
+            }
+          }
         },
         onError: (err: unknown, info: { kind?: string }) => {
           api.logger?.error?.(`[wildfire] ${info?.kind || "reply"} failed: ${String(err)}`);

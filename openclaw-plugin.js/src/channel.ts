@@ -140,7 +140,9 @@ export const WildfireChannelPlugin = {
           return { ok: false, error: new Error(result.getMsg()) };
         }
 
-        return { ok: true, provider: "wildfire" };
+        const messageUid = String(result.getResult()?.messageUid ?? "");
+        console.log(`[wildfire] sendText completed, messageUid=${messageUid}`);
+        return { channel: "wildfire", messageId: messageUid };
       } catch (e: any) {
         console.error(`[wildfire] send error:`, e);
         return { ok: false, error: new Error(e.message) };
@@ -148,8 +150,10 @@ export const WildfireChannelPlugin = {
     },
 
     sendMedia: async (ctx: any) => {
-      const { to, mediaUrl, text, accountId } = ctx;
+      const { to, mediaUrl, text, accountId, mediaAccess } = ctx;
       console.log(`[wildfire] sendMedia called: to=${to}, mediaUrl=${mediaUrl}`);
+      console.log(`[wildfire] ctx keys:`, Object.keys(ctx));
+      console.log(`[wildfire] mediaAccess:`, JSON.stringify(mediaAccess));
       
       if (!mediaUrl) {
         console.error(`[wildfire] mediaUrl is required`);
@@ -177,53 +181,103 @@ export const WildfireChannelPlugin = {
           line: 0,
         };
 
-        let remoteUrl: string;
-        let fileName: string;
+        let remoteUrl: string | null = null;
+        let fileName: string = '';
         let fileSize: number = 0;
 
-        // Check if it's a local file path or remote URL
-        if (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://')) {
+        // Resolve the actual file path - try mediaAccess.localRoots if available
+        let resolvedPath = mediaUrl;
+        if (!mediaUrl.startsWith('http://') && !mediaUrl.startsWith('https://')) {
+          // Try reading via mediaReadFile if available
+          if (ctx.mediaReadFile) {
+            try {
+              const result = await ctx.mediaReadFile(mediaUrl);
+              if (result) {
+                const buf = Buffer.isBuffer(result) ? result : Buffer.from(result);
+                fileName = mediaUrl.split('/').pop() || 'file';
+                fileSize = buf.length;
+                console.log(`[wildfire] read via mediaReadFile: size=${fileSize}`);
+
+                // Upload file
+                console.log(`[wildfire] uploading file with name=${fileName}...`);
+                let uploadResult: any;
+                try {
+                  uploadResult = await client.uploadFile(buf, fileName, 4, 'application/octet-stream');
+                  console.log(`[wildfire] uploadFile returned: code=${uploadResult?.getCode?.()}, msg=${uploadResult?.getMsg?.()}`);
+                } catch (uploadErr: any) {
+                  console.error(`[wildfire] uploadFile threw error: ${uploadErr.message}`);
+                  return { ok: false, error: new Error(`Upload error: ${uploadErr.message}`) };
+                }
+
+                if (!uploadResult.isSuccess()) {
+                  console.error(`[wildfire] upload failed: ${uploadResult.getMsg()}`);
+                  return { ok: false, error: new Error(`Upload failed: ${uploadResult.getMsg()}`) };
+                }
+
+                remoteUrl = uploadResult.getResult();
+                console.log(`[wildfire] file uploaded success, remoteUrl=${remoteUrl}`);
+              }
+            } catch (readErr: any) {
+              console.log(`[wildfire] mediaReadFile failed: ${readErr.message}, falling back to readFileSync`);
+            }
+          }
+
+          if (!remoteUrl) {
+            // Try reading the file directly
+            console.log(`[wildfire] reading file directly: ${mediaUrl}`);
+            let fileData: Buffer | undefined;
+            try {
+              fileData = readFileSync(mediaUrl);
+              fileSize = fileData.length;
+              fileName = mediaUrl.split('/').pop() || 'file';
+              console.log(`[wildfire] file read success, size=${fileSize} bytes`);
+            } catch (readErr: any) {
+              // If direct read fails, try mediaLocalRoots paths
+              console.error(`[wildfire] file read failed: ${readErr.message}`);
+              if (mediaAccess?.localRoots?.length > 0) {
+                for (const root of mediaAccess.localRoots) {
+                  const altPath = root.endsWith('/') ? root + mediaUrl.split('/').pop() : root + '/' + mediaUrl.split('/').pop();
+                  console.log(`[wildfire] trying alt path: ${altPath}`);
+                  try {
+                    fileData = readFileSync(altPath);
+                    fileSize = fileData.length;
+                    fileName = altPath.split('/').pop() || 'file';
+                    console.log(`[wildfire] success reading from alt path, size=${fileSize}`);
+                    break;
+                  } catch {}  /* eslint-disable-line no-empty */
+                }
+              }
+              if (!fileData) {
+                return { ok: false, error: new Error(`Failed to read file: ${readErr.message}`) };
+              }
+            }
+
+            // Upload file
+            console.log(`[wildfire] uploading file with name=${fileName}...`);
+            let uploadResult: any;
+            try {
+              uploadResult = await client.uploadFile(fileData, fileName, 4, 'application/octet-stream');
+              console.log(`[wildfire] uploadFile returned: code=${uploadResult?.getCode?.()}, msg=${uploadResult?.getMsg?.()}`);
+            } catch (uploadErr: any) {
+              console.error(`[wildfire] uploadFile threw error: ${uploadErr.message}`);
+              return { ok: false, error: new Error(`Upload error: ${uploadErr.message}`) };
+            }
+
+            if (!uploadResult.isSuccess()) {
+              console.error(`[wildfire] upload failed: ${uploadResult.getMsg()}`);
+              return { ok: false, error: new Error(`Upload failed: ${uploadResult.getMsg()}`) };
+            }
+
+            remoteUrl = uploadResult.getResult();
+            console.log(`[wildfire] file uploaded success, remoteUrl=${remoteUrl}`);
+          }
+        }
+        else {
           // Remote URL - use directly
           console.log(`[wildfire] using remote URL`);
           remoteUrl = mediaUrl;
           fileName = mediaUrl.split('/').pop()?.split('?')[0] || "file";
           console.log(`[wildfire] fileName: ${fileName}`);
-        } else {
-          // Local file - upload to Wildfire server
-          console.log(`[wildfire] local file path detected: ${mediaUrl}`);
-          fileName = mediaUrl.split('/').pop() || "file";
-          console.log(`[wildfire] fileName: ${fileName}`);
-          
-          // Read file as Buffer
-          console.log(`[wildfire] reading file...`);
-          let fileData: Buffer;
-          try {
-            fileData = readFileSync(mediaUrl);
-            fileSize = fileData.length;
-            console.log(`[wildfire] file read success, size=${fileSize} bytes`);
-          } catch (readErr: any) {
-            console.error(`[wildfire] file read failed: ${readErr.message}`);
-            return { ok: false, error: new Error(`Failed to read file: ${readErr.message}`) };
-          }
-          
-          // Upload file
-          console.log(`[wildfire] uploading file with name=${fileName}...`);
-          let uploadResult: any;
-          try {
-            uploadResult = await client.uploadFile(fileData, fileName, 4, 'application/octet-stream');
-            console.log(`[wildfire] uploadFile returned: code=${uploadResult?.getCode?.()}, msg=${uploadResult?.getMsg?.()}`);
-          } catch (uploadErr: any) {
-            console.error(`[wildfire] uploadFile threw error: ${uploadErr.message}`);
-            return { ok: false, error: new Error(`Upload error: ${uploadErr.message}`) };
-          }
-          
-          if (!uploadResult.isSuccess()) {
-            console.error(`[wildfire] upload failed: ${uploadResult.getMsg()}`);
-            return { ok: false, error: new Error(`Upload failed: ${uploadResult.getMsg()}`) };
-          }
-          
-          remoteUrl = uploadResult.getResult();
-          console.log(`[wildfire] file uploaded success, remoteUrl=${remoteUrl}`);
         }
 
         // Detect media type from file extension
@@ -253,8 +307,9 @@ export const WildfireChannelPlugin = {
           return { ok: false, error: new Error(result.getMsg()) };
         }
 
-        console.log(`[wildfire] sendMedia completed successfully`);
-        return { ok: true, provider: "wildfire" };
+        const messageUid = String(result.getResult()?.messageUid ?? "");
+        console.log(`[wildfire] sendMedia completed successfully, messageUid=${messageUid}`);
+        return { channel: "wildfire", messageId: messageUid };
       } catch (e: any) {
         console.error(`[wildfire] sendMedia error: ${e.message}`, e);
         return { ok: false, error: new Error(e.message) };
