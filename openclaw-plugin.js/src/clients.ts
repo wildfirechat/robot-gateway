@@ -41,7 +41,7 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
     {
       timeout: 30,
       reconnectInterval: 5000,
-      heartbeatInterval: 270000,
+      heartbeatInterval: 180000,
     }
   );
 
