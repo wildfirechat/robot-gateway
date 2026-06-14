@@ -1,6 +1,6 @@
 {
   "name": "@wildfirechat/openclaw-wf",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Wildfire IM channel plugin for OpenClaw",
   "license": "MIT",
   "author": "Wildfire IM Team",
@@ -38,7 +38,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@wildfirechat/robot-gateway-client-sdk": "^1.0.4",
+    "@wildfirechat/robot-gateway-client-sdk": "^1.0.5",
     "@wildfirechat/server-sdk": "^1.0.2"
   },
   "peerDependencies": {
