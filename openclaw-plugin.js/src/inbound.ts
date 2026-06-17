@@ -60,7 +60,7 @@ export async function handleIncomingMessage(
 
   // Skip non-content messages
   const payloadType = payload.type;
-  if (payloadType <= 0 || (payloadType > 15 && payloadType < 100) || payloadType > 200) {
+  if (payloadType <= 0 || payloadType === 14 ||  (payloadType > 15 && payloadType < 100) || payloadType > 200) {
     return;
   }
 
