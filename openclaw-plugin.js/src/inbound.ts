@@ -480,7 +480,7 @@ function extractPayloadInfo(payload: any): { text: string; mediaUrl?: string } {
     case MESSAGE_TYPE_FILE:
       return { text: `[文件] ${payload.searchableContent || ""}`, mediaUrl };
     default:
-      return { text: `[消息类型:${payload.type}]` };
+      return { text: `${payload.searchableContent || ('暂不支持的消息类型: ' + payload.type)}` };
   }
 }
 
