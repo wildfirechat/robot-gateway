@@ -61,7 +61,7 @@ func main() {
 	}
 
 	fmt.Println("Connected and authenticated!")
-	fmt.Println("Commands: send <userId> <text>, info <userId>, profile, upload <filePath> [userId], help, quit")
+	fmt.Println("Commands: send <userId> <text>, info <userId>, profile, friendlist, search <keyword>, robots <userId>, upload <filePath> [userId], help, quit")
 	fmt.Print("> ")
 
 	// Interactive command loop
@@ -134,6 +134,58 @@ func main() {
 				fmt.Printf("  Callback: %s\n", result.Result.Callback)
 			} else {
 				fmt.Printf("Failed: %s (code: %d)\n", result.Msg, result.Code)
+			}
+
+		case "friendlist":
+			result, err := robotClient.GetOwnerFriendList()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+			} else if result.IsSuccess() {
+				friends := result.Result.Friends
+				fmt.Printf("Friend count: %d\n", len(friends))
+				if len(friends) > 0 {
+					fmt.Printf("Friends: %s\n", strings.Join(friends, ", "))
+				}
+			} else {
+				fmt.Printf("Failed: %s (code: %d)\n", result.Msg, result.Code)
+			}
+
+		case "search":
+			if len(parts) < 2 {
+				fmt.Println("Usage: search <keyword>")
+				break
+			}
+			keyword := parts[1]
+			r, err := robotClient.SearchUserByDisplayName(keyword)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+			} else if r.IsSuccess() {
+				infos := r.Result.UserInfos
+				fmt.Printf("Found %d users\n", len(infos))
+				for _, u := range infos {
+					fmt.Printf("  ID: %s, DisplayName: %s\n", u.UserID, u.DisplayName)
+				}
+			} else {
+				fmt.Printf("Failed: %s (code: %d)\n", r.Msg, r.Code)
+			}
+
+		case "robots":
+			if len(parts) < 2 {
+				fmt.Println("Usage: robots <userId>")
+				break
+			}
+			uid := parts[1]
+			r, err := robotClient.GetUserRobots(uid)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+			} else if r.IsSuccess() {
+				robots := r.Result.RobotInfoList
+				fmt.Printf("Found %d robots\n", len(robots))
+				for _, rb := range robots {
+					fmt.Printf("  ID: %s, Name: %s\n", rb.UserID, rb.Name)
+				}
+			} else {
+				fmt.Printf("Failed: %s (code: %d)\n", r.Msg, r.Code)
 			}
 
 		case "status":
@@ -221,6 +273,9 @@ func main() {
 			fmt.Println("  send <userId> <text>          - Send a message")
 			fmt.Println("  info <userId>                 - Get user info")
 			fmt.Println("  profile                       - Get robot profile")
+			fmt.Println("  friendlist                    - Get robot owner's friend list")
+			fmt.Println("  search <keyword>              - Search user by display name")
+			fmt.Println("  robots <userId>               - Get user's robots")
 			fmt.Println("  status                        - Get connection status")
 			fmt.Println("  upload <filePath> [userId]    - Upload file (Qiniu/S3/OSS)")
 			fmt.Println("  help                          - Show this help")

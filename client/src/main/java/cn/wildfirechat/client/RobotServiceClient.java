@@ -3,6 +3,8 @@ package cn.wildfirechat.client;
 import cn.wildfirechat.client.handler.MessageHandler;
 import cn.wildfirechat.client.protocol.ResponseMessage;
 import cn.wildfirechat.pojos.*;
+import cn.wildfirechat.pojos.mesh.PojoSearchUserReq;
+import cn.wildfirechat.pojos.mesh.PojoSearchUserRes;
 import cn.wildfirechat.pojos.moments.CommentPojo;
 import cn.wildfirechat.pojos.moments.FeedsPojo;
 import cn.wildfirechat.pojos.moments.FeedPojo;
@@ -205,6 +207,23 @@ public class RobotServiceClient {
     public IMResult<String> sendConferenceRequest(String userId, String clientId, String request, long sessionId, String roomId, String data, boolean advance) {
         return invoke("sendConferenceRequest", Arrays.asList(userId, clientId, request, sessionId, roomId, data, advance),
                 new com.google.gson.reflect.TypeToken<IMResult<String>>(){}.getType());
+    }
+
+    // ==================== 好友相关 ====================
+
+    public IMResult<OutputGetFriendList> getOwnerFriendList() {
+        return invoke("getOwnerFriendList", null,
+                new com.google.gson.reflect.TypeToken<IMResult<OutputGetFriendList>>(){}.getType());
+    }
+
+    public IMResult<PojoSearchUserRes> searchUserByDisplayName(String keyword) {
+        return invoke("searchUserByDisplayName", Arrays.asList(keyword),
+                new com.google.gson.reflect.TypeToken<IMResult<PojoSearchUserRes>>(){}.getType());
+    }
+
+    public IMResult<OutputGetRobotList> getUserRobots(String userId) {
+        return invoke("getUserRobots", Arrays.asList(userId),
+                new com.google.gson.reflect.TypeToken<IMResult<OutputGetRobotList>>(){}.getType());
     }
 
     // ==================== 机器人资料 ====================

@@ -167,6 +167,56 @@ async function processCommand(command, args) {
             break;
         }
         
+        case 'friendlist': {
+            const result = await client.getOwnerFriendList();
+            if (result.isSuccess()) {
+                const friends = result.getResult().friends || [];
+                console.log(`好友数量: ${friends.length}`);
+                if (friends.length > 0) {
+                    console.log('好友列表:', friends.join(', '));
+                }
+            } else {
+                console.log('获取失败:', result.getMsg());
+            }
+            break;
+        }
+
+        case 'search': {
+            // search <keyword>
+            if (args.length < 1) {
+                console.log('用法: search <keyword>');
+                return;
+            }
+            const keyword = args[0];
+            const result = await client.searchUserByDisplayName(keyword);
+            if (result.isSuccess()) {
+                const userInfos = result.getResult().userInfos || [];
+                console.log(`搜索到 ${userInfos.length} 个用户`);
+                userInfos.forEach(u => console.log(`  ID: ${u.userId}, 昵称: ${u.displayName}`));
+            } else {
+                console.log('搜索失败:', result.getMsg());
+            }
+            break;
+        }
+
+        case 'robots': {
+            // robots <userId>
+            if (args.length < 1) {
+                console.log('用法: robots <userId>');
+                return;
+            }
+            const userId = args[0];
+            const result = await client.getUserRobots(userId);
+            if (result.isSuccess()) {
+                const robots = result.getResult().robotInfoList || [];
+                console.log(`找到 ${robots.length} 个机器人`);
+                robots.forEach(r => console.log(`  ID: ${r.userId}, 昵称: ${r.displayName}`));
+            } else {
+                console.log('获取失败:', result.getMsg());
+            }
+            break;
+        }
+
         case 'status': {
             console.log('连接状态:', client.isConnected() ? '已连接' : '未连接');
             console.log('鉴权状态:', client.isAuthenticated() ? '已鉴权' : '未鉴权');
@@ -302,6 +352,9 @@ async function processCommand(command, args) {
             console.log('  info <userId>                   - 获取用户信息');
             console.log('  group <name> <members...>       - 创建群组');
             console.log('  profile                         - 获取机器人资料');
+            console.log('  friendlist                      - 获取机器人owner好友列表');
+            console.log('  search <keyword>                - 根据昵称搜索用户');
+            console.log('  robots <userId>                 - 获取指定用户的机器人列表');
             console.log('  status                          - 查看连接状态');
             console.log('  upload <filePath> [userId]      - 上传文件(支持七牛/S3/OSS)');
             console.log('  upload-stream <filePath> [userId] - 流式上传大文件');

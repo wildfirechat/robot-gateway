@@ -217,6 +217,24 @@ func (c *RobotServiceClient) ApplicationGetUserInfo(userID string) (*protocol.IM
 	return invoke[protocol.OutputApplicationUserInfo](c, "applicationGetUserInfo", params)
 }
 
+// GetFriendList gets the robot owner's friend list.
+func (c *RobotServiceClient) GetOwnerFriendList() (*protocol.IMResult[protocol.OutputGetFriendList], error) {
+	params := []interface{}{}
+	return invoke[protocol.OutputGetFriendList](c, "getOwnerFriendList", params)
+}
+
+// SearchUserByDisplayName searches users by display name.
+func (c *RobotServiceClient) SearchUserByDisplayName(keyword string) (*protocol.IMResult[protocol.PojoSearchUserRes], error) {
+	params := []interface{}{keyword}
+	return invoke[protocol.PojoSearchUserRes](c, "searchUserByDisplayName", params)
+}
+
+// GetUserRobots gets the list of robots owned by a user.
+func (c *RobotServiceClient) GetUserRobots(userID string) (*protocol.IMResult[protocol.OutputGetRobotList], error) {
+	params := []interface{}{userID}
+	return invoke[protocol.OutputGetRobotList](c, "getUserRobots", params)
+}
+
 // ==================== Robot Profile ====================
 
 // GetProfile gets the robot's profile.

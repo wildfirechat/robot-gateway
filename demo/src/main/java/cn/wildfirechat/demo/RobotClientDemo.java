@@ -4,6 +4,8 @@ import cn.wildfirechat.client.RobotServiceClient;
 import cn.wildfirechat.client.handler.MessageHandler;
 import cn.wildfirechat.client.protocol.PushMessage;
 import cn.wildfirechat.pojos.*;
+import cn.wildfirechat.pojos.mesh.PojoSearchUserReq;
+import cn.wildfirechat.pojos.mesh.PojoSearchUserRes;
 import cn.wildfirechat.sdk.model.IMResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -149,6 +151,26 @@ public class RobotClientDemo {
                     }
                     break;
 
+                case "friendlist":
+                    getOwnerFriendListDemo();
+                    break;
+
+                case "search":
+                    if (parts.length < 2) {
+                        LOG.warn("用法: search <关键词>");
+                    } else {
+                        searchUserDemo(parts[1]);
+                    }
+                    break;
+
+                case "robots":
+                    if (parts.length < 2) {
+                        LOG.warn("用法: robots <用户ID>");
+                    } else {
+                        getUserRobotsDemo(parts[1]);
+                    }
+                    break;
+
                 case "status":
                     printStatus();
                     break;
@@ -178,6 +200,9 @@ public class RobotClientDemo {
         LOG.info("  info <用户ID>               - 获取用户信息");
         LOG.info("  group                        - 创建群组");
         LOG.info("  profile                      - 获取机器人资料");
+        LOG.info("  friendlist                   - 获取机器人owner好友列表");
+        LOG.info("  search <关键词>              - 根据昵称搜索用户");
+        LOG.info("  robots <用户ID>              - 获取指定用户的机器人列表");
         LOG.info("  upload <文件路径>           - 上传文件");
         LOG.info("  status                       - 查看连接状态");
         LOG.info("  help                         - 显示帮助");
@@ -293,6 +318,81 @@ public class RobotClientDemo {
         LOG.info("  是否连接: {}", robotClient.isConnected());
         LOG.info("  是否鉴权: {}", robotClient.isAuthenticated());
         LOG.info("========================================");
+    }
+
+    /**
+     * 获取机器人owner好友列表Demo
+     */
+    private static void getOwnerFriendListDemo() {
+        LOG.info("获取机器人owner好友列表");
+
+        try {
+            IMResult<OutputGetFriendList> result = robotClient.getOwnerFriendList();
+
+            if (result.getCode() == 0) {
+                OutputGetFriendList friendList = result.getResult();
+                LOG.info("好友数量: {}", friendList.getFriends() != null ? friendList.getFriends().size() : 0);
+                if (friendList.getFriends() != null && !friendList.getFriends().isEmpty()) {
+                    LOG.info("好友列表: {}", String.join(", ", friendList.getFriends()));
+                }
+            } else {
+                LOG.error("获取失败: [{}] {}", result.getCode(), result.getMsg());
+            }
+        } catch (Exception e) {
+            LOG.error("获取好友列表异常: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 根据昵称搜索用户Demo
+     */
+    private static void searchUserDemo(String keyword) {
+        LOG.info("搜索用户: {}", keyword);
+
+        try {
+            IMResult<PojoSearchUserRes> result = robotClient.searchUserByDisplayName(keyword);
+
+            if (result.getCode() == 0) {
+                PojoSearchUserRes searchRes = result.getResult();
+                int count = searchRes.getUserInfos() != null ? searchRes.getUserInfos().size() : 0;
+                LOG.info("搜索到 {} 个用户", count);
+                if (searchRes.getUserInfos() != null) {
+                    for (InputOutputUserInfo userInfo : searchRes.getUserInfos()) {
+                        LOG.info("  用户ID: {}, 昵称: {}", userInfo.getUserId(), userInfo.getDisplayName());
+                    }
+                }
+            } else {
+                LOG.error("搜索失败: [{}] {}", result.getCode(), result.getMsg());
+            }
+        } catch (Exception e) {
+            LOG.error("搜索用户异常: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 获取指定用户的机器人列表Demo
+     */
+    private static void getUserRobotsDemo(String userId) {
+        LOG.info("获取用户 {} 的机器人列表", userId);
+
+        try {
+            IMResult<OutputGetRobotList> result = robotClient.getUserRobots(userId);
+
+            if (result.getCode() == 0) {
+                OutputGetRobotList robotList = result.getResult();
+                int count = robotList.robotInfoList != null ? robotList.robotInfoList.size() : 0;
+                LOG.info("找到 {} 个机器人", count);
+                if (robotList.robotInfoList != null) {
+                    for (OutputRobot robot : robotList.robotInfoList) {
+                        LOG.info("  机器人ID: {}, 昵称: {}", robot.getUserId(), robot.getDisplayName());
+                    }
+                }
+            } else {
+                LOG.error("获取失败: [{}] {}", result.getCode(), result.getMsg());
+            }
+        } catch (Exception e) {
+            LOG.error("获取机器人列表异常: {}", e.getMessage(), e);
+        }
     }
 
     /**

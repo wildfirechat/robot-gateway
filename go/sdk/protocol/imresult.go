@@ -137,3 +137,28 @@ type OutputPresignedUploadUrl struct {
 	BackupUploadURL  string `json:"backupUploadUrl"`  // Backup upload URL (for S3/OSS)
 	DownloadURL      string `json:"downloadUrl"`      // Download URL after upload
 }
+
+// OutputGetFriendList represents the friend list result.
+type OutputGetFriendList struct {
+	Friends []string `json:"friends"`
+}
+
+// PojoSearchUserReq represents a search user request.
+type PojoSearchUserReq struct {
+	Keyword    string `json:"keyword"`
+	SearchType int    `json:"searchType"`
+	UserType   int    `json:"userType"`
+	Page       int    `json:"page"`
+	DomainID   string `json:"domainId"`
+}
+
+// PojoSearchUserRes represents a search user result.
+type PojoSearchUserRes struct {
+	UserInfos []InputOutputUserInfo `json:"userInfos"`
+	Keyword   string                `json:"keyword"`
+}
+
+// OutputGetRobotList represents a list of robots.
+type OutputGetRobotList struct {
+	RobotInfoList []OutputRobot `json:"robotInfoList"`
+}

@@ -199,6 +199,34 @@ export class RobotServiceClient {
         return this.invoke('applicationGetUserInfo', [userId]);
     }
 
+    // ==================== 好友/搜索/机器人列表 API ====================
+
+    /**
+     * 获取机器人 owner 的好友列表
+     * @returns {Promise<IMResult>}
+     */
+    async getOwnerFriendList() {
+        return this.invoke('getOwnerFriendList', []);
+    }
+
+    /**
+     * 根据昵称搜索用户
+     * @param {string} keyword - 搜索关键词
+     * @returns {Promise<IMResult>}
+     */
+    async searchUserByDisplayName(keyword) {
+        return this.invoke('searchUserByDisplayName', [keyword]);
+    }
+
+    /**
+     * 获取指定用户拥有的机器人列表
+     * @param {string} userId - 用户ID
+     * @returns {Promise<IMResult>}
+     */
+    async getUserRobots(userId) {
+        return this.invoke('getUserRobots', [userId]);
+    }
+
     // ==================== 机器人资料 API ====================
 
     /**
