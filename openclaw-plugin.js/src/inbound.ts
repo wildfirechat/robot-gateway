@@ -443,6 +443,11 @@ async function sendStreamingReply(
 
   api?.logger?.debug?.(`[wildfire-debug] sending streaming message: state=${state}, streamId=${streamId}`);
 
+  if(text && text.indexOf('NO_REPLY') >= 0){
+    api?.logger?.debug?.(`[wildfire-debug] do not send message contains no_reply command`);
+    return;
+  }
+
   try {
     const result = await client.sendMessage(conversation, payload);
     api?.logger?.debug?.(`[wildfire-debug] sendMessage result: success=${result.isSuccess()}, msg=${result.getMsg()}`);
