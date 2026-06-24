@@ -1,0 +1,306 @@
+"""Async WebSocket client for the Wildfire robot-gateway protocol."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import uuid
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
+import websockets
+from websockets.protocol import State
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ConnectResult:
+    success: bool
+    code: int = 0
+    message: str = ""
+
+
+@dataclass
+class ResponseMessage:
+    request_id: str
+    code: int
+    message: str
+    result: Any = None
+
+    @property
+    def is_success(self) -> bool:
+        return self.code == 0
+
+
+class RobotGatewayClient:
+    """WebSocket client that speaks the robot-gateway protocol.
+
+    Supports:
+    - connect / authenticate
+    - request/response correlation via requestId
+    - inbound push-message callback
+    - keep-alive heartbeat
+    - automatic reconnect with exponential backoff
+    """
+
+    def __init__(
+        self,
+        gateway_url: str,
+        robot_id: str,
+        robot_secret: str,
+        *,
+        on_push_message: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        reconnect_interval: float = 5.0,
+        heartbeat_interval: float = 270.0,
+        request_timeout: float = 30.0,
+    ):
+        self.gateway_url = gateway_url
+        self.robot_id = robot_id
+        self.robot_secret = robot_secret
+        self.on_push_message = on_push_message
+        self.reconnect_interval = reconnect_interval
+        self.heartbeat_interval = heartbeat_interval
+        self.request_timeout = request_timeout
+
+        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._pending: dict[str, asyncio.Future[ResponseMessage]] = {}
+        self._running = False
+        self._authenticated = False
+        self._recv_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._connect_event = asyncio.Event()
+        self._auth_event = asyncio.Event()
+        self._auth_result = ConnectResult(success=False)
+
+    # ------------------------------------------------------------------
+    # Public lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def is_connected(self) -> bool:
+        return self._ws is not None and self._ws.state == State.OPEN
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self._authenticated
+
+    async def start(self) -> ConnectResult:
+        """Connect and authenticate; returns the auth result."""
+        if self._running:
+            return self._auth_result
+        self._running = True
+        await self._connect_and_auth()
+        return self._auth_result
+
+    async def stop(self) -> None:
+        """Disconnect and cancel all background tasks."""
+        self._running = False
+        self._cancel_reconnect()
+        await self._close_ws()
+        await self._cancel_tasks()
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(asyncio.CancelledError("Client stopped"))
+        self._pending.clear()
+
+    async def send_request(self, method: str, params: list[Any]) -> ResponseMessage:
+        """Send an API request and await the correlated response."""
+        if not self._authenticated or not self.is_connected:
+            raise RuntimeError("Not connected or not authenticated")
+
+        request_id = str(uuid.uuid4())
+        payload = {
+            "requestId": request_id,
+            "method": method,
+            "params": params,
+        }
+
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[ResponseMessage] = loop.create_future()
+        self._pending[request_id] = future
+
+        try:
+            await self._send_json(payload)
+            return await asyncio.wait_for(future, timeout=self.request_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Request %s method=%s timed out", request_id, method)
+            raise
+        finally:
+            self._pending.pop(request_id, None)
+
+    # ------------------------------------------------------------------
+    # Internal connection helpers
+    # ------------------------------------------------------------------
+
+    async def _connect_and_auth(self) -> None:
+        self._connect_event.clear()
+        self._auth_event.clear()
+        self._auth_result = ConnectResult(success=False)
+
+        try:
+            logger.info("Connecting to robot-gateway at %s", self.gateway_url)
+            self._ws = await websockets.connect(self.gateway_url, ping_interval=None)
+            self._connect_event.set()
+            self._recv_task = asyncio.create_task(self._receive_loop(), name="wf-recv")
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="wf-heartbeat"
+            )
+
+            await self._send_json(
+                {
+                    "type": "connect",
+                    "robotId": self.robot_id,
+                    "secret": self.robot_secret,
+                }
+            )
+
+            try:
+                await asyncio.wait_for(self._auth_event.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.error("Authentication timed out")
+                self._auth_result = ConnectResult(
+                    success=False, code=408, message="Authentication timed out"
+                )
+                await self._close_ws()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to connect to robot-gateway: %s", exc)
+            self._auth_result = ConnectResult(success=False, code=500, message=str(exc))
+            await self._close_ws()
+            self._schedule_reconnect()
+
+    async def _receive_loop(self) -> None:
+        while self._running and self._ws is not None:
+            try:
+                raw = await self._ws.recv()
+            except websockets.ConnectionClosed as exc:
+                close_code = getattr(exc, "rcvd", exc).code if hasattr(exc, "rcvd") else exc.code
+                close_reason = getattr(exc, "rcvd", exc).reason if hasattr(exc, "rcvd") else exc.reason
+                logger.warning(
+                    "robot-gateway connection closed: code=%s reason=%s",
+                    close_code,
+                    close_reason,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Error receiving from robot-gateway: %s", exc)
+                break
+
+            await self._handle_message(raw)
+
+        # Loop exited: mark disconnected and schedule reconnect if still running
+        self._authenticated = False
+        await self._close_ws()
+        if self._running:
+            self._schedule_reconnect()
+
+    async def _handle_message(self, raw: str | bytes) -> None:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning("Invalid JSON from robot-gateway: %s", exc)
+            return
+
+        msg_type = data.get("type")
+        request_id = data.get("requestId")
+
+        if msg_type == "connect":
+            code = data.get("code", 0)
+            self._auth_result = ConnectResult(
+                success=code == 0,
+                code=code,
+                message=data.get("msg", ""),
+            )
+            self._authenticated = self._auth_result.success
+            self._auth_event.set()
+            if not self._authenticated:
+                logger.error("Authentication failed: %s", self._auth_result.message)
+                self._running = False
+            else:
+                logger.info("Authenticated with robot-gateway as %s", self.robot_id)
+            return
+
+        if msg_type == "heartbeat":
+            logger.debug("Heartbeat ack received")
+            return
+
+        if msg_type == "message":
+            if self.on_push_message is not None:
+                try:
+                    result = self.on_push_message(data)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:  # noqa: BLE001
+                    logger.exception("Push message handler failed")
+            return
+
+        if request_id is not None:
+            future = self._pending.pop(request_id, None)
+            if future is not None and not future.done():
+                future.set_result(
+                    ResponseMessage(
+                        request_id=request_id,
+                        code=data.get("code", 0),
+                        message=data.get("msg", ""),
+                        result=data.get("result"),
+                    )
+                )
+            return
+
+        logger.debug("Unhandled robot-gateway message: %s", data)
+
+    async def _heartbeat_loop(self) -> None:
+        while self._running and self.is_connected:
+            try:
+                await asyncio.sleep(self.heartbeat_interval)
+                if self._authenticated and self.is_connected:
+                    await self.send_request("heartbeat", [])
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Heartbeat error: %s", exc)
+                break
+
+    def _schedule_reconnect(self) -> None:
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(
+            self._reconnect_after_delay(), name="wf-reconnect"
+        )
+
+    def _cancel_reconnect(self) -> None:
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+
+    async def _reconnect_after_delay(self) -> None:
+        await asyncio.sleep(self.reconnect_interval)
+        if self._running and not self.is_connected:
+            await self._connect_and_auth()
+
+    async def _close_ws(self) -> None:
+        ws = self._ws
+        self._ws = None
+        if ws is not None and ws.state == State.OPEN:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _cancel_tasks(self) -> None:
+        tasks = [self._recv_task, self._heartbeat_task]
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._recv_task = None
+        self._heartbeat_task = None
+
+    async def _send_json(self, payload: dict[str, Any]) -> None:
+        if self._ws is None or self._ws.state != State.OPEN:
+            raise RuntimeError("WebSocket not connected")
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))

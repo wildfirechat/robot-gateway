@@ -1,0 +1,120 @@
+Metadata-Version: 2.4
+Name: hermes-wildfire
+Version: 0.1.0
+Summary: Hermes Agent platform adapter for Wildfire IM via robot-gateway WebSocket
+Author: Wildfire IM Team
+License: MIT
+Keywords: hermes,wildfire,im,gateway,websocket
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: websockets<16.0,>=14.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
+# Hermes Wildfire IM Platform Adapter
+
+A [Hermes Agent](https://github.com/NousResearch/hermes-agent) platform plugin that bridges Hermes with [Wildfire IM](https://www.wildfirechat.cn/) through the [robot-gateway](https://github.com/wildfirechat/robot-gateway) WebSocket protocol.
+
+## Features
+
+- **Bidirectional messaging**: receive messages from Wildfire IM users/groups and send Hermes replies back.
+- **Auto reconnect**: exponential-backoff reconnect to `robot-gateway`.
+- **Group filtering**: only reply in groups when @mentioned, the message ends with `?`, or it contains help keywords (configurable).
+- **Media support**: text, image, file, and video messages (files are uploaded via `robot-gateway` first).
+- **Session isolation**: one Hermes session per user DM and per group.
+
+## Architecture
+
+```
+┌─────────────┐     WebSocket      ┌──────────────┐     HTTP/RobotService     ┌──────────┐
+│  Hermes     │ ◀──robot-gateway──▶ │ robot-gateway │ ◀──────────────────────▶ │ Wildfire │
+│  Agent      │    protocol        │ (ws :8884)    │                         │   IM     │
+└─────────────┘                    └──────────────┘                         └──────────┘
+```
+
+## Installation
+
+### Option 1: Directory plugin (recommended for development)
+
+```bash
+# Clone or copy this repo into the Hermes plugins directory
+git clone https://github.com/your-org/hermes-wildfire.git ~/.hermes/plugins/hermes-wildfire
+
+# Restart Hermes gateway
+hermes gateway restart
+```
+
+### Option 2: pip package
+
+```bash
+pip install -e .
+# Hermes will discover the plugin via the `hermes_agent.plugins` entry point.
+hermes gateway restart
+```
+
+## Configuration
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `WILDFIRE_GATEWAY_URL` | Yes | `ws://host:8884/robot/gateway` |
+| `WILDFIRE_ROBOT_ID` | Yes | Wildfire IM robot ID |
+| `WILDFIRE_ROBOT_SECRET` | Yes | Wildfire IM robot secret |
+| `WILDFIRE_HOME_CHANNEL` | No | Default `user:userId` or `group:groupId` for cron/notifications |
+| `WILDFIRE_REQUIRE_MENTION` | No | `true` to require @mention/help keywords in groups (default `true`) |
+| `WILDFIRE_HELP_KEYWORDS` | No | Comma-separated keywords, e.g. `帮,请,分析,总结` |
+| `WILDFIRE_ALLOWED_USERS` | No | Comma-separated user IDs allowed to DM the bot |
+| `WILDFIRE_ALLOWED_GROUPS` | No | Comma-separated group IDs the bot may join |
+
+### `config.yaml`
+
+```yaml
+wildfire:
+  enabled: true
+  gateway_url: ws://localhost:8884/robot/gateway
+  robot_id: YourRobotId
+  robot_secret: YourRobotSecret
+  require_mention: true
+  help_keywords: "帮,请,分析,总结,怎么,如何"
+```
+
+## Usage
+
+After the gateway is running:
+
+```bash
+hermes gateway status
+```
+
+You should see **Wildfire IM** listed as a connected platform.
+
+In Wildfire IM, search for your robot ID and start a chat:
+
+- **Private chat**: every message is forwarded to Hermes.
+- **Group chat**: the bot only responds when:
+  - It is @mentioned, **or**
+  - The message ends with `?` / `？`, **or**
+  - The message contains one of the configured help keywords.
+
+## Development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+## License
+
+MIT

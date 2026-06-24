@@ -1,0 +1,2 @@
+[hermes_agent.plugins]
+hermes_wildfire = hermes_wildfire:register

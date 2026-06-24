@@ -1,0 +1,49 @@
+name: wildfire-platform
+label: Wildfire IM
+kind: platform
+version: 0.1.0
+description: >
+  Wildfire IM gateway adapter for Hermes Agent.
+  Connects to the robot-gateway WebSocket endpoint and relays messages
+  between Wildfire IM users/groups and the Hermes agent.
+author: Wildfire IM Team
+requires_env:
+  - name: WILDFIRE_GATEWAY_URL
+    description: "robot-gateway WebSocket URL, e.g. ws://localhost:8884/robot/gateway"
+    prompt: "Wildfire robot-gateway URL"
+    password: false
+  - name: WILDFIRE_ROBOT_ID
+    description: "Wildfire IM robot ID registered in the server"
+    prompt: "Robot ID"
+    password: false
+  - name: WILDFIRE_ROBOT_SECRET
+    description: "Secret for the Wildfire IM robot"
+    prompt: "Robot secret"
+    password: true
+optional_env:
+  - name: WILDFIRE_HOME_CHANNEL
+    description: "Default user or group ID for cron / notification delivery"
+    prompt: "Home channel (user:userId or group:groupId)"
+    password: false
+  - name: WILDFIRE_REQUIRE_MENTION
+    description: "In groups, only respond when the robot is @mentioned (1/true/yes to enable)"
+    prompt: "Require mention in groups?"
+    password: false
+  - name: WILDFIRE_HELP_KEYWORDS
+    description: "Comma-separated keywords that trigger bot response in groups"
+    prompt: "Group help keywords"
+    password: false
+  - name: WILDFIRE_ALLOWED_USERS
+    description: "Comma-separated user IDs allowed to talk to the bot (empty = allow all)"
+    prompt: "Allowed users"
+    password: false
+  - name: WILDFIRE_ALLOWED_GROUPS
+    description: "Comma-separated group IDs the bot is allowed to join and reply in"
+    prompt: "Allowed groups"
+    password: false
+  - name: WILDFIRE_ALLOW_ALL_USERS
+    description: "Set to true to allow all users (dev only; use allowlists in production)"
+    prompt: "Allow all users?"
+    password: false
+pip_dependencies:
+  - websockets>=14.0

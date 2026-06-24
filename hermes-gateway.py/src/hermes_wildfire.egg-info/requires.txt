@@ -1,0 +1,6 @@
+websockets<16.0,>=14.0
+
+[dev]
+pytest>=8.0
+pytest-asyncio>=0.24
+ruff>=0.6

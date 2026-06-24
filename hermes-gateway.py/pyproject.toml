@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-wildfire"
+version = "0.1.0"
+description = "Hermes Agent platform adapter for Wildfire IM via robot-gateway WebSocket"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Wildfire IM Team" }
+]
+keywords = ["hermes", "wildfire", "im", "gateway", "websocket"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    # Hermes Agent core already ships websockets; keep a loose floor here so
+    # plugin installs do not downgrade the gateway's pinned version.
+    # 16.0 has handshake issues on some Python 3.13 builds, so cap below it.
+    "websockets>=14.0,<16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes_wildfire = "hermes_wildfire:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
