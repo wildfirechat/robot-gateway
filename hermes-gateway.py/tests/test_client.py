@@ -235,3 +235,38 @@ async def test_heartbeat_failure_closes_connection():
 
     assert client._ws is None
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_send_request_timeout_closes_connection():
+    """A timed-out request must close the WebSocket to force reconnect."""
+
+    closed = asyncio.Event()
+
+    class FakeWs:
+        state = websockets.protocol.State.OPEN
+
+        async def send(self, _data):
+            pass
+
+        async def recv(self):
+            await asyncio.Event().wait()  # never returns
+
+        async def close(self):
+            closed.set()
+
+    client = RobotGatewayClient(
+        "ws://localhost:0",
+        robot_id="robot1",
+        robot_secret="secret1",
+        request_timeout=0.01,
+    )
+    client._running = True
+    client._authenticated = True
+    client._ws = FakeWs()  # type: ignore[assignment]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await client.send_request("sendMessage", [])
+
+    assert client._ws is None
+    assert closed.is_set()

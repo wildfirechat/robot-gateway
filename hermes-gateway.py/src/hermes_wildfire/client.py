@@ -127,6 +127,10 @@ class RobotGatewayClient:
             return await asyncio.wait_for(future, timeout=self.request_timeout)
         except asyncio.TimeoutError:
             logger.warning("Request %s method=%s timed out", request_id, method)
+            # A timed-out request usually means the connection is dead or the
+            # server is not responding. Force-close so the next attempt will
+            # trigger a fresh connection instead of retrying on a dead socket.
+            await self._close_ws()
             raise
         finally:
             self._pending.pop(request_id, None)
