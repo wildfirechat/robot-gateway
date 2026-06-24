@@ -168,3 +168,70 @@ async def test_client_push_message(mock_gateway):
     assert len(received) == 1
     assert received[0]["data"]["sender"] == "alice"
     await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_handles_connection_closed_without_rcvd():
+    """_receive_loop must not crash when ConnectionClosed.rcvd is None.
+
+    This reproduces the restart-time bug where the client sent a close frame
+    but received none, causing the old getattr(exc, 'rcvd', exc).code access
+    to raise AttributeError.
+    """
+
+    class FakeWs:
+        state = websockets.protocol.State.OPEN
+
+        async def recv(self):
+            raise websockets.ConnectionClosedError(
+                rcvd=None,
+                sent=websockets.frames.Close(1000, "OK"),
+                rcvd_then_sent=False,
+            )
+
+        async def close(self):
+            pass
+
+    client = RobotGatewayClient(
+        "ws://localhost:0",
+        robot_id="robot1",
+        robot_secret="secret1",
+    )
+    client._ws = FakeWs()  # type: ignore[assignment]
+    client._running = True
+
+    await client._receive_loop()
+
+    assert client._ws is None
+    assert not client._authenticated
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_failure_closes_connection():
+    """A failed heartbeat must close the WebSocket so reconnect can happen."""
+
+    closed = asyncio.Event()
+
+    class FakeWs:
+        state = websockets.protocol.State.OPEN
+
+        async def send(self, _data):
+            raise RuntimeError("connection broken")
+
+        async def close(self):
+            closed.set()
+
+    client = RobotGatewayClient(
+        "ws://localhost:0",
+        robot_id="robot1",
+        robot_secret="secret1",
+        heartbeat_interval=0.01,
+    )
+    client._running = True
+    client._authenticated = True
+    client._ws = FakeWs()  # type: ignore[assignment]
+
+    await client._heartbeat_loop()
+
+    assert client._ws is None
+    assert closed.is_set()

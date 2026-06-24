@@ -176,8 +176,16 @@ class RobotGatewayClient:
             try:
                 raw = await self._ws.recv()
             except websockets.ConnectionClosed as exc:
-                close_code = getattr(exc, "rcvd", exc).code if hasattr(exc, "rcvd") else exc.code
-                close_reason = getattr(exc, "rcvd", exc).reason if hasattr(exc, "rcvd") else exc.reason
+                # exc.rcvd may be None when no close frame was received from the peer.
+                # Prefer the received close frame, then the sent one. ConnectionClosed.code
+                # is deprecated in websockets >= 14, so read from the frame directly.
+                close_frame = getattr(exc, "rcvd", None) or getattr(exc, "sent", None)
+                if close_frame is not None:
+                    close_code = close_frame.code
+                    close_reason = close_frame.reason
+                else:
+                    close_code = 1006
+                    close_reason = ""
                 logger.warning(
                     "robot-gateway connection closed: code=%s reason=%s",
                     close_code,
@@ -260,7 +268,11 @@ class RobotGatewayClient:
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Heartbeat error: %s", exc)
+                logger.warning("Heartbeat failed: %s", exc)
+                # A failed heartbeat usually means the connection is dead or
+                # the server is unresponsive. Force-close so the receive loop
+                # detects the disconnect and triggers automatic reconnect.
+                await self._close_ws()
                 break
 
     def _schedule_reconnect(self) -> None:

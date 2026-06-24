@@ -15,3 +15,4 @@ tests/test_adapter.py
 tests/test_client.py
 tests/test_config.py
 tests/test_message.py
+tests/test_plugin.py

@@ -20,61 +20,87 @@ Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.24; extra == "dev"
 Requires-Dist: ruff>=0.6; extra == "dev"
 
-# Hermes Wildfire IM Platform Adapter
+# Hermes 野火 IM 平台适配器
 
-A [Hermes Agent](https://github.com/NousResearch/hermes-agent) platform plugin that bridges Hermes with [Wildfire IM](https://www.wildfirechat.cn/) through the [robot-gateway](https://github.com/wildfirechat/robot-gateway) WebSocket protocol.
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) 平台插件，通过 [robot-gateway](https://github.com/wildfirechat/robot-gateway) WebSocket 协议将 Hermes 与[野火 IM](https://www.wildfirechat.cn/) 连接起来。
 
-## Features
+## 功能
 
-- **Bidirectional messaging**: receive messages from Wildfire IM users/groups and send Hermes replies back.
-- **Auto reconnect**: exponential-backoff reconnect to `robot-gateway`.
-- **Group filtering**: only reply in groups when @mentioned, the message ends with `?`, or it contains help keywords (configurable).
-- **Media support**: text, image, file, and video messages (files are uploaded via `robot-gateway` first).
-- **Session isolation**: one Hermes session per user DM and per group.
+- **双向消息桥接**：接收野火 IM 用户/群组消息，并将 Hermes 的回复发送回去。
+- **自动重连**：通过指数退避机制自动重连 `robot-gateway`。
+- **群组过滤**：仅在群聊中被 @、消息以 `?`/`？` 结尾，或包含帮助关键词时才回复（可配置）。
+- **媒体支持**：文本、图片、文件和视频消息（文件会先通过 `robot-gateway` 上传）。
+- **流式回复**：支持 Hermes draft streaming，实时更新同一条消息气泡。
+- **会话隔离**：每个私聊用户和每个群组都有独立的 Hermes 会话。
 
-## Architecture
+## 架构
 
 ```
 ┌─────────────┐     WebSocket      ┌──────────────┐     HTTP/RobotService     ┌──────────┐
-│  Hermes     │ ◀──robot-gateway──▶ │ robot-gateway │ ◀──────────────────────▶ │ Wildfire │
-│  Agent      │    protocol        │ (ws :8884)    │                         │   IM     │
-└─────────────┘                    └──────────────┘                         └──────────┘
+│  Hermes     │ ◀──robot-gateway──▶ │ robot-gateway │ ◀──────────────────────▶ │  野火 IM  │
+│  Agent      │    协议             │ (ws :8884)    │                         └──────────┘
+└─────────────┘                    └──────────────┘
 ```
 
-## Installation
+## 安装
 
-### Option 1: Directory plugin (recommended for development)
+### 方式一：目录插件（开发推荐）
 
 ```bash
-# Clone or copy this repo into the Hermes plugins directory
-git clone https://github.com/your-org/hermes-wildfire.git ~/.hermes/plugins/hermes-wildfire
+# 克隆本仓库
+git clone https://github.com/your-org/hermes-wildfire.git
 
-# Restart Hermes gateway
+# 安装到 Hermes 插件目录（目录名可任意，这里使用和插件 manifest 一致的 wildfire-platform）
+mkdir -p ~/.hermes/plugins
+rsync -av --exclude='.venv' --exclude='.git' --exclude='*.egg-info' \
+    hermes-wildfire/ ~/.hermes/plugins/wildfire-platform/
+
+# 启用插件并重启 gateway
+hermes plugins enable wildfire-platform
 hermes gateway restart
 ```
 
-### Option 2: pip package
+或者一键运行仓库里的安装脚本：
+
+```bash
+bash examples/install.sh
+```
+
+### 方式二：pip 包
 
 ```bash
 pip install -e .
-# Hermes will discover the plugin via the `hermes_agent.plugins` entry point.
+# Hermes 会通过 `hermes_agent.plugins` entry point 自动发现该插件
 hermes gateway restart
 ```
 
-## Configuration
+## 配置
 
-### Environment variables
+启用插件后，还需要配置机器人凭据。
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `WILDFIRE_GATEWAY_URL` | Yes | `ws://host:8884/robot/gateway` |
-| `WILDFIRE_ROBOT_ID` | Yes | Wildfire IM robot ID |
-| `WILDFIRE_ROBOT_SECRET` | Yes | Wildfire IM robot secret |
-| `WILDFIRE_HOME_CHANNEL` | No | Default `user:userId` or `group:groupId` for cron/notifications |
-| `WILDFIRE_REQUIRE_MENTION` | No | `true` to require @mention/help keywords in groups (default `true`) |
-| `WILDFIRE_HELP_KEYWORDS` | No | Comma-separated keywords, e.g. `帮,请,分析,总结` |
-| `WILDFIRE_ALLOWED_USERS` | No | Comma-separated user IDs allowed to DM the bot |
-| `WILDFIRE_ALLOWED_GROUPS` | No | Comma-separated group IDs the bot may join |
+### `plugins.enabled`
+
+确保 `~/.hermes/config.yaml` 包含：
+
+```yaml
+plugins:
+  enabled:
+    - wildfire-platform
+```
+
+### 环境变量
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `WILDFIRE_GATEWAY_URL` | 是 | `ws://host:8884/robot/gateway` |
+| `WILDFIRE_ROBOT_ID` | 是 | 野火 IM 机器人 ID |
+| `WILDFIRE_ROBOT_SECRET` | 是 | 野火 IM 机器人密钥 |
+| `WILDFIRE_HOME_CHANNEL` | 否 | **唯一**配置 home channel 的地方；`user:userId` 或 `group:groupId`，用于 cron 结果投递和跨平台消息 |
+| `WILDFIRE_REQUIRE_MENTION` | 否 | 群聊中是否需要 @ 或帮助关键词才回复，默认 `true` |
+| `WILDFIRE_HELP_KEYWORDS` | 否 | 逗号分隔的帮助关键词，例如 `帮,请,分析,总结` |
+| `WILDFIRE_ALLOWED_USERS` | 否 | 允许私聊机器人的用户 ID，逗号分隔 |
+| `WILDFIRE_ALLOWED_GROUPS` | 否 | 允许机器人加入的群组 ID，逗号分隔 |
+| `WILDFIRE_ALLOW_ALL_USERS` | 否 | 设为 `true` 时允许所有用户访问（开发环境使用，生产环境建议配置白名单） |
 
 ### `config.yaml`
 
@@ -88,25 +114,38 @@ wildfire:
   help_keywords: "帮,请,分析,总结,怎么,如何"
 ```
 
-## Usage
+### Home Channel
 
-After the gateway is running:
+Home channel 用于投递 cron 任务结果和跨平台消息，**只能通过 `.env` 文件配置**，保持单一来源：
+
+```bash
+# ~/.hermes/.env
+WILDFIRE_HOME_CHANNEL=user:alice
+# 或群聊
+WILDFIRE_HOME_CHANNEL=group:groupId
+```
+
+> 注意：本插件不接受 `config.yaml` 中的 `home_channel`，也不支持聊天里的 `/sethome` 命令。修改后需重启 gateway 生效。
+
+## 使用
+
+Gateway 启动后：
 
 ```bash
 hermes gateway status
 ```
 
-You should see **Wildfire IM** listed as a connected platform.
+你应该能看到 **Wildfire IM** 已作为已连接平台列出。
 
-In Wildfire IM, search for your robot ID and start a chat:
+在野火 IM 中搜索你的机器人 ID 并开始聊天：
 
-- **Private chat**: every message is forwarded to Hermes.
-- **Group chat**: the bot only responds when:
-  - It is @mentioned, **or**
-  - The message ends with `?` / `？`, **or**
-  - The message contains one of the configured help keywords.
+- **私聊**：每条消息都会转发给 Hermes。
+- **群聊**：机器人在以下情况才会回复：
+  - 被 @，**或**
+  - 消息以 `?` / `？` 结尾，**或**
+  - 消息包含配置的帮助关键词之一。
 
-## Development
+## 开发
 
 ```bash
 python -m venv .venv
@@ -115,6 +154,6 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## License
+## 许可证
 
 MIT
