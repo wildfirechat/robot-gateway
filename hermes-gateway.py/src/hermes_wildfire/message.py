@@ -283,7 +283,7 @@ def infer_message_type(payload_type: int, MessageTypeCls: Any) -> Any:
     """
     _MAPPING: dict[int, Any] = {
         CONTENT_TYPE_TEXT: MessageTypeCls.TEXT,
-        CONTENT_TYPE_IMAGE: MessageTypeCls.IMAGE,
+        CONTENT_TYPE_IMAGE: MessageTypeCls.PHOTO,
         CONTENT_TYPE_VOICE: MessageTypeCls.VOICE,
         CONTENT_TYPE_VIDEO: MessageTypeCls.VIDEO,
         CONTENT_TYPE_FILE: MessageTypeCls.DOCUMENT,

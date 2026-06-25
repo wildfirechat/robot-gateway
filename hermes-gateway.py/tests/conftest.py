@@ -60,7 +60,7 @@ class _MessageEvent:
 
 class _MessageType:
     TEXT = "text"
-    IMAGE = "image"
+    PHOTO = "photo"
     VOICE = "voice"
     VIDEO = "video"
     DOCUMENT = "document"
