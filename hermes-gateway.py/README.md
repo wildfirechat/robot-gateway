@@ -36,23 +36,25 @@
 
 ```bash
 # 克隆本仓库
-git clone https://github.com/your-org/hermes-wildfire.git
+git clone https://github.com/wildfirechat/robot-gateway.git
 
 # 安装到 Hermes 插件目录（目录名可任意，这里使用和插件 manifest 一致的 wildfire-platform）
 mkdir -p ~/.hermes/plugins
 rsync -av --exclude='.venv' --exclude='.git' --exclude='*.egg-info' \
-    hermes-wildfire/ ~/.hermes/plugins/wildfire-platform/
+    robot-gateway/hermes-gateway.py/ ~/.hermes/plugins/wildfire-platform/
 ```
 
 或者一键运行仓库里的安装脚本：
 
 ```bash
+cd robot-gateway/hermes-gateway.py
 bash scripts/install.sh
 ```
 
 ### 方式二：pip 包
 
 ```bash
+cd robot-gateway/hermes-gateway.py
 pip install -e .
 # Hermes 会通过 `hermes_agent.plugins` entry point 自动发现该插件
 ```
