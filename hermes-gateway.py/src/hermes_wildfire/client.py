@@ -157,6 +157,10 @@ class RobotGatewayClient:
     # ------------------------------------------------------------------
 
     async def _connect_and_auth(self) -> None:
+        # Cancel any stale background tasks from a previous connection so we
+        # never end up with two recv loops calling recv() on the same socket.
+        await self._cancel_tasks()
+
         self._connect_event.clear()
         self._auth_event.clear()
         self._auth_result = ConnectResult(success=False)
@@ -193,9 +197,13 @@ class RobotGatewayClient:
             self._schedule_reconnect()
 
     async def _receive_loop(self) -> None:
-        while self._running and self._ws is not None:
+        # Capture the WebSocket reference locally so cleanup never
+        # accidentally closes a *newer* connection if self._ws has
+        # been replaced by a concurrent reconnect.
+        ws = self._ws
+        while self._running and ws is not None and self._ws is ws:
             try:
-                raw = await self._ws.recv()
+                raw = await ws.recv()
             except websockets.ConnectionClosed as exc:
                 # exc.rcvd may be None when no close frame was received from the peer.
                 # Prefer the received close frame, then the sent one. ConnectionClosed.code
@@ -221,7 +229,14 @@ class RobotGatewayClient:
 
         # Loop exited: mark disconnected, fail pending futures, and schedule reconnect
         self._authenticated = False
-        await self._close_ws()
+        # Only close the ws *we* were reading from — self._ws may now point to a
+        # brand-new connection if a reconnect raced in.  Closing the new one here
+        # would create an infinite connect / disconnect loop.
+        if ws is not None and ws.state == State.OPEN:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
         self._fail_pending_futures("Connection lost")
         if self._running:
             self._schedule_reconnect()
