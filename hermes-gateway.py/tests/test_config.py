@@ -16,6 +16,7 @@ def _clean_env(monkeypatch):
         "WILDFIRE_HELP_KEYWORDS",
         "WILDFIRE_ALLOWED_USERS",
         "WILDFIRE_ALLOWED_GROUPS",
+        "WILDFIRE_RECONNECT_WAIT_TIMEOUT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -89,3 +90,32 @@ def test_config_home_channel_from_platform_config():
         SimpleNamespace(home_channel=home, extra={})
     )
     assert cfg.home_channel == "user:charlie"
+
+
+def test_config_reconnect_wait_timeout_from_extra():
+    cfg = WildfireConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "gateway_url": "ws://localhost:8884/robot/gateway",
+                "robot_id": "r1",
+                "robot_secret": "s1",
+                "reconnect_wait_timeout": 3.5,
+            }
+        )
+    )
+    assert cfg.reconnect_wait_timeout == 3.5
+
+
+def test_config_reconnect_wait_timeout_from_env(monkeypatch):
+    monkeypatch.setenv("WILDFIRE_RECONNECT_WAIT_TIMEOUT", "4.5")
+    cfg = WildfireConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "gateway_url": "ws://localhost:8884/robot/gateway",
+                "robot_id": "r1",
+                "robot_secret": "s1",
+                "reconnect_wait_timeout": 3.5,
+            }
+        )
+    )
+    assert cfg.reconnect_wait_timeout == 4.5

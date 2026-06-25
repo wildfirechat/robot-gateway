@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest
 
-from hermes_wildfire import _apply_yaml_config, _env_enablement
+from hermes_wildfire import _env_enablement
 from hermes_wildfire.__init__ import register
 
 
@@ -39,45 +38,6 @@ def test_env_enablement_seeds_extra_from_env(monkeypatch):
         "robot_secret": "s1",
         "home_channel": {"chat_id": "user:alice", "name": "Home"},
     }
-
-
-def test_apply_yaml_config_ignores_home_channel():
-    yaml_cfg = {
-        "wildfire": {
-            "enabled": True,
-            "gateway_url": "ws://localhost:8884/robot/gateway",
-            "robot_id": "r1",
-            "robot_secret": "s1",
-            "home_channel": "user:alice",
-        }
-    }
-    extra = _apply_yaml_config(yaml_cfg, SimpleNamespace(extra={}))
-    assert extra is not None
-    assert "home_channel" not in extra
-    assert "WILDFIRE_HOME_CHANNEL" not in os.environ
-
-
-def test_apply_yaml_config_sets_credentials():
-    yaml_cfg = {
-        "wildfire": {
-            "enabled": True,
-            "gateway_url": "ws://localhost:8884/robot/gateway",
-            "robot_id": "r1",
-            "robot_secret": "s1",
-            "require_mention": False,
-        }
-    }
-    extra = _apply_yaml_config(yaml_cfg, SimpleNamespace(extra={}))
-    assert extra is not None
-    assert extra["require_mention"] is False
-    assert os.environ["WILDFIRE_GATEWAY_URL"] == "ws://localhost:8884/robot/gateway"
-    assert os.environ["WILDFIRE_ROBOT_ID"] == "r1"
-    assert os.environ["WILDFIRE_ROBOT_SECRET"] == "s1"
-
-
-def test_apply_yaml_config_returns_none_for_unknown_shape():
-    assert _apply_yaml_config({}, SimpleNamespace(extra={})) is None
-    assert _apply_yaml_config({"other": {}}, SimpleNamespace(extra={})) is None
 
 
 class _FakeEvent:

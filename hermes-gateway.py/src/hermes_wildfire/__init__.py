@@ -44,69 +44,6 @@ def _env_enablement() -> dict[str, Any] | None:
     return extra
 
 
-def _apply_yaml_config(yaml_cfg: dict[str, Any], platform_cfg: Any) -> dict[str, Any] | None:
-    """Translate this plugin's config.yaml keys into PlatformConfig.extra.
-
-    Supported ``config.yaml`` shapes:
-
-        wildfire:
-          enabled: true
-          gateway_url: ws://localhost:8884/robot/gateway
-          ...
-
-        gateway:
-          platforms:
-            wildfire:
-              enabled: true
-              ...
-
-    Note: ``home_channel`` is intentionally NOT read from YAML. It must be set
-    via the ``WILDFIRE_HOME_CHANNEL`` environment variable (typically in
-    ``~/.hermes/.env``) to keep a single source of truth.
-    """
-    extra: dict[str, Any] = {}
-
-    cfg: Any = None
-    if isinstance(yaml_cfg, dict):
-        cfg = yaml_cfg.get("wildfire")
-        if cfg is None:
-            gateway = yaml_cfg.get("gateway", {})
-            if isinstance(gateway, dict):
-                platforms = gateway.get("platforms", {})
-                if isinstance(platforms, dict):
-                    cfg = platforms.get("wildfire")
-    if not isinstance(cfg, dict):
-        return None
-
-    for key in (
-        "gateway_url",
-        "robot_id",
-        "robot_secret",
-        "require_mention",
-        "help_keywords",
-        "allowed_users",
-        "allowed_groups",
-        "reconnect_interval",
-        "heartbeat_interval",
-        "request_timeout",
-    ):
-        if key in cfg:
-            extra[key] = cfg[key]
-
-    # Inject missing env vars so the rest of the adapter can read them via
-    # os.getenv while preserving env > YAML precedence.
-    env_map = {
-        "WILDFIRE_GATEWAY_URL": cfg.get("gateway_url", ""),
-        "WILDFIRE_ROBOT_ID": cfg.get("robot_id", ""),
-        "WILDFIRE_ROBOT_SECRET": cfg.get("robot_secret", ""),
-    }
-    for env_name, value in env_map.items():
-        if value and not os.getenv(env_name):
-            os.environ[env_name] = str(value)
-
-    return extra
-
-
 def register(ctx: Any) -> None:
     """Register the Wildfire IM platform adapter with Hermes."""
     if not check_wildfire_requirements():
@@ -165,7 +102,6 @@ def register(ctx: Any) -> None:
             allow_all_env="WILDFIRE_ALLOW_ALL_USERS",
             max_message_length=4096,
             env_enablement_fn=_env_enablement,
-            apply_yaml_config_fn=_apply_yaml_config,
             cron_deliver_env_var="WILDFIRE_HOME_CHANNEL",
             emoji="🔥",
             platform_hint="You are chatting via Wildfire IM. Keep responses concise.",

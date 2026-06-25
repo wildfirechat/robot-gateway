@@ -13,6 +13,6 @@ mkdir -p "${PLUGIN_DIR}"
 rsync -av --exclude='.venv' --exclude='.git' --exclude='*.egg-info' --exclude='__pycache__' \
     "${REPO_DIR}/" "${PLUGIN_DIR}/"
 
-echo "Plugin installed. Enable it and restart Hermes gateway:"
+echo "Plugin installed. Configure credentials in ~/.hermes/.env, then enable:"
 echo "  hermes plugins enable wildfire-platform"
 echo "  hermes gateway restart"

@@ -5,10 +5,11 @@
 ## 功能
 
 - **双向消息桥接**：接收野火 IM 用户/群组消息，并将 Hermes 的回复发送回去。
-- **自动重连**：通过指数退避机制自动重连 `robot-gateway`。
+- **自动重连**：通过固定间隔自动重连 `robot-gateway`（间隔可配置）。
 - **群组过滤**：仅在群聊中被 @、消息以 `?`/`？` 结尾，或包含帮助关键词时才回复（可配置）。
 - **媒体支持**：文本、图片、文件和视频消息（文件会先通过 `robot-gateway` 上传）。
 - **流式回复**：支持 Hermes draft streaming，实时更新同一条消息气泡。
+- **输入提示**：支持向对方发送“正在输入”状态提示。
 - **会话隔离**：每个私聊用户和每个群组都有独立的 Hermes 会话。
 
 ## 架构
@@ -41,7 +42,7 @@ hermes gateway restart
 或者一键运行仓库里的安装脚本：
 
 ```bash
-bash examples/install.sh
+bash scripts/install.sh
 ```
 
 ### 方式二：pip 包
@@ -53,6 +54,8 @@ hermes gateway restart
 ```
 
 ## 配置
+
+本插件的所有配置均通过**环境变量**读取，保持单一来源。推荐放在 `~/.hermes/.env` 中。
 
 启用插件后，还需要配置机器人凭据。
 
@@ -79,22 +82,13 @@ plugins:
 | `WILDFIRE_ALLOWED_USERS` | 否 | 允许私聊机器人的用户 ID，逗号分隔 |
 | `WILDFIRE_ALLOWED_GROUPS` | 否 | 允许机器人加入的群组 ID，逗号分隔 |
 | `WILDFIRE_ALLOW_ALL_USERS` | 否 | 设为 `true` 时允许所有用户访问（开发环境使用，生产环境建议配置白名单） |
-
-### `config.yaml`
-
-```yaml
-wildfire:
-  enabled: true
-  gateway_url: ws://localhost:8884/robot/gateway
-  robot_id: YourRobotId
-  robot_secret: YourRobotSecret
-  require_mention: true
-  help_keywords: "帮,请,分析,总结,怎么,如何"
-```
+| `WILDFIRE_RECONNECT_INTERVAL` | 否 | 自动重连间隔（秒），默认 `5.0` |
+| `WILDFIRE_RECONNECT_WAIT_TIMEOUT` | 否 | 发送超时后等待重连完成的最长时间（秒），默认 `2.0` |
+| `WILDFIRE_REQUEST_TIMEOUT` | 否 | robot-gateway 请求超时时间（秒），默认 `30.0` |
 
 ### Home Channel
 
-Home channel 用于投递 cron 任务结果和跨平台消息，**只能通过 `.env` 文件配置**，保持单一来源：
+Home channel 用于投递 cron 任务结果和跨平台消息，通过 `.env` 文件配置：
 
 ```bash
 # ~/.hermes/.env
@@ -103,7 +97,7 @@ WILDFIRE_HOME_CHANNEL=user:alice
 WILDFIRE_HOME_CHANNEL=group:groupId
 ```
 
-> 注意：本插件不接受 `config.yaml` 中的 `home_channel`，也不支持聊天里的 `/sethome` 命令。修改后需重启 gateway 生效。
+> 注意：本插件不支持聊天里的 `/sethome` 命令。修改 `.env` 后需重启 gateway 生效。
 
 ## 使用
 

@@ -42,7 +42,7 @@ class RobotGatewayClient:
     - request/response correlation via requestId
     - inbound push-message callback
     - keep-alive heartbeat
-    - automatic reconnect with exponential backoff
+    - automatic reconnect with configurable interval
     """
 
     def __init__(
@@ -53,7 +53,7 @@ class RobotGatewayClient:
         *,
         on_push_message: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         reconnect_interval: float = 5.0,
-        heartbeat_interval: float = 270.0,
+        heartbeat_interval: float = 180.0,
         request_timeout: float = 30.0,
         reconnect_wait_timeout: float = 2.0,
     ):

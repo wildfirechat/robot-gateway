@@ -75,7 +75,7 @@ class WildfireAdapter(BasePlatformAdapter):
                 robot_secret=self.wf_config.robot_secret,
                 on_push_message=self._on_push_message,
                 reconnect_interval=self.wf_config.reconnect_interval,
-                heartbeat_interval=self.wf_config.heartbeat_interval,
+                reconnect_wait_timeout=self.wf_config.reconnect_wait_timeout,
                 request_timeout=self.wf_config.request_timeout,
             )
             result = await self._client.start()

@@ -24,7 +24,7 @@ class WildfireConfig:
     allowed_groups: set[str] = field(default_factory=set)
     allow_all_users: bool = False
     reconnect_interval: float = 5.0
-    heartbeat_interval: float = 270.0
+    reconnect_wait_timeout: float = 2.0
     request_timeout: float = 30.0
 
     @classmethod
@@ -74,9 +74,9 @@ class WildfireConfig:
             "WILDFIRE_RECONNECT_INTERVAL",
             extra.get("reconnect_interval", 5.0),
         )
-        heartbeat_interval = _env_float(
-            "WILDFIRE_HEARTBEAT_INTERVAL",
-            extra.get("heartbeat_interval", 270.0),
+        reconnect_wait_timeout = _env_float(
+            "WILDFIRE_RECONNECT_WAIT_TIMEOUT",
+            extra.get("reconnect_wait_timeout", 2.0),
         )
         request_timeout = _env_float(
             "WILDFIRE_REQUEST_TIMEOUT",
@@ -94,7 +94,7 @@ class WildfireConfig:
             allowed_groups=allowed_groups,
             allow_all_users=allow_all_users,
             reconnect_interval=reconnect_interval,
-            heartbeat_interval=heartbeat_interval,
+            reconnect_wait_timeout=reconnect_wait_timeout,
             request_timeout=request_timeout,
         )
 
