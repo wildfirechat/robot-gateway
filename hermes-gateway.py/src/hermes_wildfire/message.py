@@ -274,6 +274,23 @@ def build_session_source(
     )
 
 
+def infer_message_type(payload_type: int, MessageTypeCls: Any) -> Any:
+    """Map a Wildfire payload content type to the corresponding Hermes MessageType.
+
+    Falls back to ``MessageTypeCls.TEXT`` for unknown/unsupported types so
+    the message is never dropped — a text placeholder is always better than
+    a silently swallowed message.
+    """
+    _MAPPING: dict[int, Any] = {
+        CONTENT_TYPE_TEXT: MessageTypeCls.TEXT,
+        CONTENT_TYPE_IMAGE: MessageTypeCls.IMAGE,
+        CONTENT_TYPE_VOICE: MessageTypeCls.VOICE,
+        CONTENT_TYPE_VIDEO: MessageTypeCls.VIDEO,
+        CONTENT_TYPE_FILE: MessageTypeCls.DOCUMENT,
+    }
+    return _MAPPING.get(payload_type, MessageTypeCls.TEXT)
+
+
 def build_message_event(
     MessageEventCls: Any,
     MessageTypeCls: Any,
@@ -282,11 +299,19 @@ def build_message_event(
     message_id: str | None,
     media_urls: list[str] | None = None,
     raw_message: dict[str, Any] | None = None,
+    message_type: Any = None,
 ) -> Any:
-    """Construct a Hermes MessageEvent from a Wildfire inbound message."""
+    """Construct a Hermes MessageEvent from a Wildfire inbound message.
+
+    When *message_type* is not provided the type is inferred from the
+    ``raw_message`` payload if available, defaulting to ``TEXT``.
+    """
+    if message_type is None and raw_message is not None:
+        payload = raw_message.get("payload") or {}
+        message_type = infer_message_type(payload.get("type", 0), MessageTypeCls)
     return MessageEventCls(
         text=text,
-        message_type=MessageTypeCls.TEXT,
+        message_type=message_type or MessageTypeCls.TEXT,
         source=source,
         message_id=message_id or "",
         media_urls=list(media_urls or []),

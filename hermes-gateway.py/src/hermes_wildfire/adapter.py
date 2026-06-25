@@ -10,10 +10,13 @@ from typing import Any, Dict, Optional
 
 from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.helpers import MessageDeduplicator
 
 from hermes_wildfire.client import RobotGatewayClient
 from hermes_wildfire.config import WildfireConfig
 from hermes_wildfire.message import (
+    CONTENT_TYPE_STREAMING_GENERATED,
+    CONTENT_TYPE_STREAMING_GENERATING,
     CONTENT_TYPE_TYPING,
     build_conversation,
     build_file_payload,
@@ -26,6 +29,7 @@ from hermes_wildfire.message import (
     build_typing_payload,
     build_video_payload,
     extract_message_text,
+    infer_message_type,
     is_group_conversation,
     parse_target,
     should_respond_to_group,
@@ -37,20 +41,25 @@ logger = logging.getLogger(__name__)
 class WildfireAdapter(BasePlatformAdapter):
     """Bridge between Hermes Agent and Wildfire IM via robot-gateway."""
 
-    MAX_MESSAGE_LENGTH = 4096
+    # Wildfire enforces its own allowlist (allowed_users / allowed_groups) at
+    # intake, so the gateway does not double-gate with the env-based allowlist.
+    enforces_own_access_policy = True
 
-    def __init__(self, config, **kwargs):
-        super().__init__(config=config, platform=Platform("wildfire"))
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config, Platform("wildfire"))
 
         self.wf_config = WildfireConfig.from_platform_config(config)
         self._client: RobotGatewayClient | None = None
         self._client_lock = asyncio.Lock()
-        self._running = False
 
         # Tracks chat_id -> stream_id for Hermes draft streaming. When a draft
         # stream is active, the next textual ``send()`` finalizes it using
         # Wildfire's StreamingTextGenerated content type.
         self._active_streams: dict[str, str] = {}
+
+        # Deduplicate inbound messages that may arrive multiple times across
+        # WebSocket reconnections or robot-gateway redeliveries.
+        self._dedup = MessageDeduplicator()
 
     @property
     def name(self) -> str:
@@ -134,6 +143,21 @@ class WildfireAdapter(BasePlatformAdapter):
         if payload_type <= 0 or payload_type > 200 or payload_type == CONTENT_TYPE_TYPING:
             return
 
+        # Skip streaming content types (echo from our own streaming sends)
+        if payload_type in (CONTENT_TYPE_STREAMING_GENERATING, CONTENT_TYPE_STREAMING_GENERATED):
+            return
+
+        # Skip self-messages to prevent echo loops
+        sender_id = str(sender)
+        if sender_id == self.wf_config.robot_id:
+            logger.debug("Ignoring self-message from robot_id=%s", sender_id)
+            return
+
+        # Deduplication — WebSocket reconnections may redeliver the same message
+        if message_id and self._dedup.is_duplicate(message_id):
+            logger.debug("Ignoring duplicate message %s", message_id)
+            return
+
         text, media_url = extract_message_text(payload)
         is_group = is_group_conversation(conv)
 
@@ -178,6 +202,7 @@ class WildfireAdapter(BasePlatformAdapter):
             message_id=message_id,
             media_urls=media_urls,
             raw_message=message_data,
+            message_type=infer_message_type(payload_type, MessageType),
         )
 
         await self.handle_message(event)
@@ -195,7 +220,11 @@ class WildfireAdapter(BasePlatformAdapter):
     # Sending
     # ------------------------------------------------------------------
 
-    def supports_draft_streaming(self) -> bool:
+    def supports_draft_streaming(
+        self,
+        chat_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Advertise streaming support via Wildfire IM streaming text types."""
         return True
 
@@ -452,6 +481,14 @@ class WildfireAdapter(BasePlatformAdapter):
             file_size = os.path.getsize(file_path)
         except OSError as exc:
             return SendResult(success=False, error=f"Cannot read file: {exc}")
+
+        # Safety limit: reject files over 50 MB before reading into memory
+        MAX_UPLOAD_SIZE = 50 * 1024 * 1024
+        if file_size > MAX_UPLOAD_SIZE:
+            return SendResult(
+                success=False,
+                error=f"File too large ({file_size} bytes, max {MAX_UPLOAD_SIZE})",
+            )
 
         name = os.path.basename(file_path)
         mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"

@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
+
+# Ensure the ``hermes_wildfire`` package is importable during tests.
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 
 class _Platform:
@@ -54,9 +60,28 @@ class _MessageEvent:
 
 class _MessageType:
     TEXT = "text"
+    IMAGE = "image"
+    VOICE = "voice"
+    VIDEO = "video"
+    DOCUMENT = "document"
+
+
+class _MessageDeduplicator:
+    """Mock MessageDeduplicator for tests — always returns False."""
+
+    def __init__(self, max_size: int = 2000, ttl_seconds: float = 300):
+        self._seen: dict[str, float] = {}
+
+    def is_duplicate(self, msg_id: str) -> bool:
+        return False
+
+    def clear(self) -> None:
+        self._seen.clear()
 
 
 class _BasePlatformAdapter:
+    enforces_own_access_policy = False
+
     def __init__(self, config: Any = None, platform: Any = None):
         self.config = config
         self.platform = platform
@@ -90,9 +115,15 @@ gateway_platforms_base_mod.MessageEvent = _MessageEvent
 gateway_platforms_base_mod.MessageType = _MessageType
 gateway_platforms_base_mod.SendResult = _SendResult
 gateway_platforms_pkg.base = gateway_platforms_base_mod
+
+gateway_platforms_helpers_mod = types.ModuleType("gateway.platforms.helpers")
+gateway_platforms_helpers_mod.MessageDeduplicator = _MessageDeduplicator
+gateway_platforms_pkg.helpers = gateway_platforms_helpers_mod
+
 gateway_pkg.platforms = gateway_platforms_pkg
 
 sys.modules["gateway"] = gateway_pkg
 sys.modules["gateway.config"] = gateway_config_mod
 sys.modules["gateway.platforms"] = gateway_platforms_pkg
 sys.modules["gateway.platforms.base"] = gateway_platforms_base_mod
+sys.modules["gateway.platforms.helpers"] = gateway_platforms_helpers_mod
