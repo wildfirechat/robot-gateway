@@ -260,6 +260,7 @@ async def test_send_request_timeout_closes_connection():
         robot_id="robot1",
         robot_secret="secret1",
         request_timeout=0.01,
+        reconnect_wait_timeout=0.01,
     )
     client._running = True
     client._authenticated = True
@@ -270,3 +271,40 @@ async def test_send_request_timeout_closes_connection():
 
     assert client._ws is None
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_send_request_timeout_triggers_immediate_reconnect():
+    """A timed-out request must trigger an immediate (no-delay) reconnect."""
+
+    class FakeWs:
+        state = websockets.protocol.State.OPEN
+
+        async def send(self, _data):
+            pass
+
+        async def recv(self):
+            await asyncio.Event().wait()  # never returns
+
+        async def close(self):
+            pass
+
+    client = RobotGatewayClient(
+        "ws://localhost:0",
+        robot_id="robot1",
+        robot_secret="secret1",
+        request_timeout=0.01,
+        reconnect_wait_timeout=0.01,
+    )
+    client._running = True
+    client._authenticated = True
+    client._ws = FakeWs()  # type: ignore[assignment]
+
+    scheduled_delays: list[float | None] = []
+    client._schedule_reconnect = lambda delay=None: scheduled_delays.append(delay)  # type: ignore[method-assign]
+    client._cancel_reconnect = lambda: None  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.TimeoutError):
+        await client.send_request("sendMessage", [])
+
+    assert scheduled_delays == [0]

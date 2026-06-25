@@ -131,3 +131,33 @@ def test_register_blocks_set_home_for_wildfire(monkeypatch):
     # Other platforms should not be affected.
     event = _FakeEvent("telegram", "/sethome")
     assert handler(event, None, None) is None
+
+
+def test_register_blocks_set_home_accepts_extra_hook_kwargs(monkeypatch):
+    """Future Hermes core versions may pass extra kwargs to the hook."""
+    calls = []
+
+    class _FakeCtx:
+        def register_platform(self, **kwargs):
+            calls.append(("register_platform", kwargs))
+
+        def register_hook(self, name, handler):
+            calls.append(("register_hook", (name, handler)))
+
+    monkeypatch.setattr(
+        "hermes_wildfire.__init__.check_wildfire_requirements", lambda: True
+    )
+
+    register(_FakeCtx())
+
+    _name, handler = calls[-1][1]
+    event = _FakeEvent("wildfire", "/sethome")
+    # Should not raise on unexpected keyword arguments.
+    result = handler(
+        event,
+        None,
+        None,
+        telemetry_schema_version=1,
+    )
+    assert result is not None
+    assert result["action"] == "rewrite"

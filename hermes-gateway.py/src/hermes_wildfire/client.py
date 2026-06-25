@@ -55,6 +55,7 @@ class RobotGatewayClient:
         reconnect_interval: float = 5.0,
         heartbeat_interval: float = 270.0,
         request_timeout: float = 30.0,
+        reconnect_wait_timeout: float = 2.0,
     ):
         self.gateway_url = gateway_url
         self.robot_id = robot_id
@@ -63,6 +64,7 @@ class RobotGatewayClient:
         self.reconnect_interval = reconnect_interval
         self.heartbeat_interval = heartbeat_interval
         self.request_timeout = request_timeout
+        self.reconnect_wait_timeout = reconnect_wait_timeout
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._pending: dict[str, asyncio.Future[ResponseMessage]] = {}
@@ -127,10 +129,25 @@ class RobotGatewayClient:
             return await asyncio.wait_for(future, timeout=self.request_timeout)
         except asyncio.TimeoutError:
             logger.warning("Request %s method=%s timed out", request_id, method)
-            # A timed-out request usually means the connection is dead or the
-            # server is not responding. Force-close so the next attempt will
-            # trigger a fresh connection instead of retrying on a dead socket.
+            # A timed-out request usually means the connection is dead. Force-close
+            # and reconnect immediately so the caller's retry can use a fresh
+            # connection instead of failing right away on a dead socket.
             await self._close_ws()
+            self._cancel_reconnect()
+            self._schedule_reconnect(delay=0)
+            # Wait briefly for reconnect/auth so the next retry has a chance to
+            # succeed. If reconnect is still in flight we still raise TimeoutError
+            # and let the caller decide whether to retry.
+            try:
+                await asyncio.wait_for(
+                    self._auth_event.wait(), timeout=self.reconnect_wait_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "Request %s reconnect did not complete within %.1fs",
+                    request_id,
+                    self.reconnect_wait_timeout,
+                )
             raise
         finally:
             self._pending.pop(request_id, None)
@@ -279,19 +296,19 @@ class RobotGatewayClient:
                 await self._close_ws()
                 break
 
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, delay: float | None = None) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return
         self._reconnect_task = asyncio.create_task(
-            self._reconnect_after_delay(), name="wf-reconnect"
+            self._reconnect_after_delay(delay), name="wf-reconnect"
         )
 
     def _cancel_reconnect(self) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():
             self._reconnect_task.cancel()
 
-    async def _reconnect_after_delay(self) -> None:
-        await asyncio.sleep(self.reconnect_interval)
+    async def _reconnect_after_delay(self, delay: float | None = None) -> None:
+        await asyncio.sleep(delay if delay is not None else self.reconnect_interval)
         if self._running and not self.is_connected:
             await self._connect_and_auth()
 

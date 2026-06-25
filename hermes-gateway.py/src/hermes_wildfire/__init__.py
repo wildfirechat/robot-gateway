@@ -120,8 +120,18 @@ def register(ctx: Any) -> None:
     # not yet loaded (e.g. pip entry-point scan at Hermes startup).
     from hermes_wildfire.adapter import WildfireAdapter
 
-    def _block_set_home(event: Any, gateway: Any, session_store: Any) -> dict[str, Any] | None:
-        """Disable /sethome for Wildfire; home channel must be edited in .env."""
+    def _block_set_home(
+        event: Any,
+        gateway: Any,
+        session_store: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        """Disable /sethome for Wildfire; home channel must be edited in .env.
+
+        Accepts **kwargs for forward compatibility with additional hook
+        arguments added by future Hermes core versions (e.g.
+        ``telemetry_schema_version``).
+        """
         source = getattr(event, "source", None)
         if source is None:
             return None
