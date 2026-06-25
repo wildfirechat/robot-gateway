@@ -11,6 +11,7 @@ from hermes_wildfire.message import (
     CONTENT_TYPE_STREAMING_GENERATED,
     CONTENT_TYPE_STREAMING_GENERATING,
     CONTENT_TYPE_TEXT,
+    CONTENT_TYPE_TYPING,
 )
 
 
@@ -117,3 +118,34 @@ async def test_send_finalizes_active_stream(adapter):
 async def test_adapter_advertises_draft_streaming(adapter):
     assert adapter.supports_draft_streaming() is True
     assert adapter.prefers_fresh_final_streaming() is False
+
+
+@pytest.mark.asyncio
+async def test_send_typing_uses_typing_content_type(adapter):
+    adapter._client.queue_success()
+    await adapter.send_typing("user:alice")
+
+    assert len(adapter._client.requests) == 1
+    method, params = adapter._client.requests[0]
+    assert method == "sendMessage"
+    assert params[0] == "robot1"
+    assert params[1] == {"type": 0, "target": "alice", "line": 0}
+    payload = params[2]
+    assert payload["type"] == CONTENT_TYPE_TYPING
+    assert payload["content"] == "0"
+    assert payload["persistFlag"] == 4
+
+
+@pytest.mark.asyncio
+async def test_send_typing_ignores_invalid_chat_id(adapter):
+    await adapter.send_typing("")
+    assert len(adapter._client.requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_send_typing_silently_absorbs_send_errors(adapter):
+    async def failing_send(_method, _params):
+        raise RuntimeError("connection lost")
+
+    adapter._client.send_request = failing_send
+    await adapter.send_typing("user:alice")  # should not raise

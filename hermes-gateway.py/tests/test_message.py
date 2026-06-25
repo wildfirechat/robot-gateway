@@ -4,10 +4,12 @@ from hermes_wildfire.message import (
     CONTENT_TYPE_STREAMING_GENERATED,
     CONTENT_TYPE_STREAMING_GENERATING,
     CONTENT_TYPE_TEXT,
+    CONTENT_TYPE_TYPING,
     CONTENT_TYPE_VIDEO,
     MEDIA_TYPE_FILE,
     MEDIA_TYPE_IMAGE,
     MEDIA_TYPE_VIDEO,
+    TYPING_VOICE,
     build_conversation,
     build_file_payload,
     build_image_payload,
@@ -15,6 +17,7 @@ from hermes_wildfire.message import (
     build_streaming_generated_payload,
     build_streaming_generating_payload,
     build_text_payload,
+    build_typing_payload,
     build_video_payload,
     extract_message_text,
     parse_target,
@@ -117,6 +120,20 @@ def test_build_streaming_generated_payload():
     assert p["searchableContent"] == "hello world"
     assert p["content"] == "stream-123"
     assert p["persistFlag"] == 3
+
+
+def test_build_typing_payload_defaults_to_text():
+    p = build_typing_payload()
+    assert p["type"] == CONTENT_TYPE_TYPING
+    assert p["content"] == "0"
+    assert p["persistFlag"] == 4
+
+
+def test_build_typing_payload_voice():
+    p = build_typing_payload(TYPING_VOICE)
+    assert p["type"] == CONTENT_TYPE_TYPING
+    assert p["content"] == "1"
+    assert p["persistFlag"] == 4
 
 
 def _fake_build_source(**kwargs):
