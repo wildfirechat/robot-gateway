@@ -163,7 +163,7 @@ class RobotGatewayClient:
 
         try:
             logger.info("Connecting to robot-gateway at %s", self.gateway_url)
-            self._ws = await websockets.connect(self.gateway_url, ping_interval=None)
+            self._ws = await websockets.connect(self.gateway_url, ping_interval=90)
             self._connect_event.set()
             self._recv_task = asyncio.create_task(self._receive_loop(), name="wf-recv")
             self._heartbeat_task = asyncio.create_task(
@@ -219,9 +219,10 @@ class RobotGatewayClient:
 
             await self._handle_message(raw)
 
-        # Loop exited: mark disconnected and schedule reconnect if still running
+        # Loop exited: mark disconnected, fail pending futures, and schedule reconnect
         self._authenticated = False
         await self._close_ws()
+        self._fail_pending_futures("Connection lost")
         if self._running:
             self._schedule_reconnect()
 
@@ -252,7 +253,7 @@ class RobotGatewayClient:
             return
 
         if msg_type == "heartbeat":
-            logger.debug("Heartbeat ack received")
+            logger.info("Heartbeat ack received from robot-gateway")
             return
 
         if msg_type == "message":
@@ -285,6 +286,7 @@ class RobotGatewayClient:
             try:
                 await asyncio.sleep(self.heartbeat_interval)
                 if self._authenticated and self.is_connected:
+                    logger.info("Sending heartbeat to robot-gateway")
                     await self.send_request("heartbeat", [])
             except asyncio.CancelledError:
                 break
@@ -297,8 +299,7 @@ class RobotGatewayClient:
                 break
 
     def _schedule_reconnect(self, delay: float | None = None) -> None:
-        if self._reconnect_task is not None and not self._reconnect_task.done():
-            return
+        self._cancel_reconnect()
         self._reconnect_task = asyncio.create_task(
             self._reconnect_after_delay(delay), name="wf-reconnect"
         )
@@ -320,6 +321,13 @@ class RobotGatewayClient:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _fail_pending_futures(self, message: str) -> None:
+        """Fail all pending request futures with the given error message."""
+        for request_id, future in list(self._pending.items()):
+            if not future.done():
+                future.set_exception(RuntimeError(message))
+        self._pending.clear()
 
     async def _cancel_tasks(self) -> None:
         tasks = [self._recv_task, self._heartbeat_task]
