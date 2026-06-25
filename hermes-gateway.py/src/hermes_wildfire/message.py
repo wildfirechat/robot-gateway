@@ -23,6 +23,16 @@ CONTENT_TYPE_VIDEO = 6
 CONTENT_TYPE_STREAMING_GENERATING = 14
 CONTENT_TYPE_STREAMING_GENERATED = 15
 
+# Wildfire IM typing indicator content type
+CONTENT_TYPE_TYPING = 91
+
+# Wildfire IM typing content sub-types
+TYPING_TEXT = 0
+TYPING_VOICE = 1
+TYPING_CAMERA = 2
+TYPING_LOCATION = 3
+TYPING_FILE = 4
+
 # Wildfire IM conversation types
 CONVERSATION_TYPE_SINGLE = 0
 CONVERSATION_TYPE_GROUP = 1
@@ -100,6 +110,19 @@ def build_streaming_generated_payload(text: str, stream_id: str) -> dict[str, An
         "searchableContent": text,
         "content": stream_id,
         "persistFlag": 3,
+    }
+
+
+def build_typing_payload(typing_type: int = TYPING_TEXT) -> dict[str, Any]:
+    """Build a Wildfire typing-indicator payload.
+
+    Matches ``cn.wildfirechat.sdk.messagecontent.TypingMessageContent``:
+    content type 91, persist flag 4, content field is the typing sub-type.
+    """
+    return {
+        "type": CONTENT_TYPE_TYPING,
+        "content": str(typing_type),
+        "persistFlag": 4,
     }
 
 

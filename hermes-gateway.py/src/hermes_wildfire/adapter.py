@@ -14,6 +14,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from hermes_wildfire.client import RobotGatewayClient
 from hermes_wildfire.config import WildfireConfig
 from hermes_wildfire.message import (
+    CONTENT_TYPE_TYPING,
     build_conversation,
     build_file_payload,
     build_image_payload,
@@ -22,6 +23,7 @@ from hermes_wildfire.message import (
     build_streaming_generated_payload,
     build_streaming_generating_payload,
     build_text_payload,
+    build_typing_payload,
     build_video_payload,
     extract_message_text,
     is_group_conversation,
@@ -129,7 +131,7 @@ class WildfireAdapter(BasePlatformAdapter):
 
         # Skip non-text-like content types for now
         payload_type = payload.get("type", 0)
-        if payload_type <= 0 or payload_type > 200:
+        if payload_type <= 0 or payload_type > 200 or payload_type == CONTENT_TYPE_TYPING:
             return
 
         text, media_url = extract_message_text(payload)
@@ -297,8 +299,30 @@ class WildfireAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc), retryable=True)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        # Wildfire IM has no typing indicator in the robot API.
-        pass
+        """Send a Wildfire typing indicator via ``sendMessage``.
+
+        The robot-gateway protocol does not expose a dedicated typing API, but
+        the underlying SDK supports ``TypingMessageContent`` (content type 91).
+        We send it as a normal message with a special payload.
+        """
+        target = parse_target(chat_id)
+        if target is None:
+            return
+
+        client = await self._get_client()
+        if client is None or not client.is_authenticated:
+            return
+
+        conversation = build_conversation(target)
+        payload = build_typing_payload()
+
+        try:
+            await client.send_request(
+                "sendMessage",
+                [self.wf_config.robot_id, conversation, payload],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to send Wildfire typing indicator: %s", exc)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         target = parse_target(chat_id)
