@@ -43,6 +43,15 @@ Requires-Dist: ruff>=0.6; extra == "dev"
 └─────────────┘                    └──────────────┘
 ```
 
+## 前提
+
+开始前请确保：
+
+1. 已成功安装并初始化 [Hermes Agent](https://github.com/NousResearch/hermes-agent)。
+2. 已配置好大模型（LLM provider、API key 等），并能在 `hermes tui` 窗口中正常对话。
+3. 已部署可访问的 [robot-gateway](https://github.com/wildfirechat/robot-gateway)（默认端口 `8884`）。
+4. 已在野火 IM 中创建机器人，并拿到 `robot_id` 和 `robot_secret`。
+
 ## 安装
 
 ### 方式一：目录插件（开发推荐）
@@ -55,10 +64,6 @@ git clone https://github.com/your-org/hermes-wildfire.git
 mkdir -p ~/.hermes/plugins
 rsync -av --exclude='.venv' --exclude='.git' --exclude='*.egg-info' \
     hermes-wildfire/ ~/.hermes/plugins/wildfire-platform/
-
-# 启用插件并重启 gateway
-hermes plugins enable wildfire-platform
-hermes gateway restart
 ```
 
 或者一键运行仓库里的安装脚本：
@@ -72,26 +77,15 @@ bash scripts/install.sh
 ```bash
 pip install -e .
 # Hermes 会通过 `hermes_agent.plugins` entry point 自动发现该插件
-hermes gateway restart
 ```
 
 ## 配置
 
-本插件的所有配置均通过**环境变量**读取，保持单一来源。推荐放在 `~/.hermes/.env` 中。
-
-启用插件后，还需要配置机器人凭据。
-
-### `plugins.enabled`
-
-确保 `~/.hermes/config.yaml` 包含：
-
-```yaml
-plugins:
-  enabled:
-    - wildfire-platform
-```
+本插件的所有配置均通过**环境变量**读取，保持单一来源。写入 `~/.hermes/.env` 文件。
 
 ### 环境变量
+
+所有配置项都通过环境变量读取，请写入 `~/.hermes/.env` 文件。
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
@@ -108,18 +102,45 @@ plugins:
 | `WILDFIRE_RECONNECT_WAIT_TIMEOUT` | 否 | 发送超时后等待重连完成的最长时间（秒），默认 `2.0` |
 | `WILDFIRE_REQUEST_TIMEOUT` | 否 | robot-gateway 请求超时时间（秒），默认 `30.0` |
 
-### Home Channel
-
-Home channel 用于投递 cron 任务结果和跨平台消息，通过 `.env` 文件配置：
+### `~/.hermes/.env` 示例
 
 ```bash
-# ~/.hermes/.env
+# Wildfire IM robot-gateway endpoint
+WILDFIRE_GATEWAY_URL=ws://localhost:8884/robot/gateway
+WILDFIRE_ROBOT_ID=YourRobotId
+WILDFIRE_ROBOT_SECRET=YourRobotSecret
+
+# Home channel for cron results / cross-platform notifications
+# user:userId or group:groupId
 WILDFIRE_HOME_CHANNEL=user:alice
-# 或群聊
-WILDFIRE_HOME_CHANNEL=group:groupId
+
+# Group behavior
+WILDFIRE_REQUIRE_MENTION=true
+WILDFIRE_HELP_KEYWORDS="帮,请,分析,总结,怎么,如何"
+
+# Access control (empty = allow all)
+WILDFIRE_ALLOWED_USERS=""
+WILDFIRE_ALLOWED_GROUPS=""
+# WILDFIRE_ALLOW_ALL_USERS=true  # dev only
+
+# Connection tuning (seconds)
+WILDFIRE_RECONNECT_INTERVAL=5.0
+WILDFIRE_RECONNECT_WAIT_TIMEOUT=2.0
+WILDFIRE_REQUEST_TIMEOUT=30.0
 ```
 
-> 注意：本插件不支持聊天里的 `/sethome` 命令。修改 `.env` 后需重启 gateway 生效。
+> 注意：本插件不支持聊天里的 `/sethome` 命令。
+
+## 启用并重启
+
+安装并配置好 `.env` 后，启用插件并**重启 gateway**：
+
+```bash
+hermes plugins enable wildfire-platform
+hermes gateway restart
+```
+
+> `hermes plugins enable` 只修改 `~/.hermes/config.yaml` 中的 `plugins.enabled` 列表；必须重启 gateway 进程才会加载插件并读取 `.env` 中的配置。
 
 ## 使用
 
