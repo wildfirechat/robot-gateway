@@ -260,11 +260,11 @@ class RobotGatewayClient:
             )
             self._authenticated = self._auth_result.success
             self._auth_event.set()
-            if not self._authenticated:
+            if self._authenticated:
+                logger.info("Authenticated with robot-gateway as %s", self.robot_id)
+            else:
                 logger.error("Authentication failed: %s", self._auth_result.message)
                 self._running = False
-            else:
-                logger.info("Authenticated with robot-gateway as %s", self.robot_id)
             return
 
         if msg_type == "heartbeat":

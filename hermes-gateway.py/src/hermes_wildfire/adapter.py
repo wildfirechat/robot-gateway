@@ -97,6 +97,28 @@ class WildfireAdapter(BasePlatformAdapter):
                 )
                 return False
 
+            # Fetch the robot profile and auto-add the owner to the
+            # allowed-users list so the robot owner is never locked out.
+            try:
+                resp = await self._client.send_request(
+                    "getProfile", [self.wf_config.robot_id]
+                )
+                if resp.is_success and isinstance(resp.result, dict):
+                    im_result = resp.result
+                    if im_result.get("code") == 0:
+                        profile = im_result.get("result") or {}
+                        owner = profile.get("owner")
+                        if owner:
+                            self.wf_config.allowed_users.add(str(owner))
+                            logger.info(
+                                "Auto-added robot owner %s to Wildfire allowed users",
+                                owner,
+                            )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to fetch robot profile for owner, continuing without",
+                )
+
         self._mark_connected()
         logger.info(
             "Wildfire IM connected: robot=%s gateway=%s",
