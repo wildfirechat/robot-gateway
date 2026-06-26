@@ -45,6 +45,11 @@ class WildfireAdapter(BasePlatformAdapter):
     # intake, so the gateway does not double-gate with the env-based allowlist.
     enforces_own_access_policy = True
 
+    # Signal to gateway that we use allowlist-based DM policy so it trusts our
+    # _is_authorized decision when no env allowlist is configured.
+    _dm_policy = "allowlist"
+    _group_policy = "allowlist"
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("wildfire"))
 
@@ -127,17 +132,19 @@ class WildfireAdapter(BasePlatformAdapter):
                         )
                         if owner:
                             self.wf_config.allowed_users.add(str(owner))
+                            # Also set owner as home_channel fallback in extra
+                            if not self.wf_config.home_channel:
+                                self.config.extra = getattr(self.config, "extra", {}) or {}
+                                self.config.extra["owner"] = str(owner)
+                                self.wf_config.home_channel = str(owner)
+                                logger.info(
+                                    "Auto-set robot owner %s as Wildfire home_channel fallback",
+                                    owner,
+                                )
                             logger.info(
                                 "Auto-added robot owner %s to Wildfire allowed users",
                                 owner,
                             )
-                            # If no home_channel is configured, use owner as fallback
-                            if not self.wf_config.home_channel:
-                                self.wf_config.home_channel = f"user:{owner}"
-                                logger.info(
-                                    "Auto-set home_channel to user:%s via robot owner",
-                                    owner,
-                                )
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "Failed to fetch robot profile for owner, continuing without",

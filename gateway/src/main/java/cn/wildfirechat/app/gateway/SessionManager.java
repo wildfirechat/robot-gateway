@@ -1,9 +1,11 @@
 package cn.wildfirechat.app.gateway;
 
 import cn.wildfirechat.sdk.RobotService;
+import cn.wildfirechat.sdk.model.IMResult;
 import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
@@ -18,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executor;
 
 /**
  * WebSocket会话管理器
@@ -49,6 +52,12 @@ public class SessionManager {
 
     // 未鉴权会话超时时间（毫秒）- 1分钟
     private static final long UNAUTHENTICATED_TIMEOUT = 60 * 1000;
+
+    // 机器人在线状态对应的平台号
+    private static final int ROBOT_ONLINE_PLATFORM = 7;
+
+    @Autowired
+    private Executor asyncExecutor;
 
     @PostConstruct
     public void init() {
@@ -84,10 +93,23 @@ public class SessionManager {
 
         if (info != null && info.getRobotId() != null) {
             Set<String> robotSessions = robotSessionMap.get(info.getRobotId());
+            boolean isLastSession = false;
             if (robotSessions != null) {
                 robotSessions.remove(sessionId);
                 if (robotSessions.isEmpty()) {
                     robotSessionMap.remove(info.getRobotId());
+                    isLastSession = true;
+                }
+            }
+            // 如果是最后一个会话，先同步通知 IMSDK 设置机器人下线，避免 RobotService 关闭后无法发送
+            if (isLastSession && info.getRobotService() != null) {
+                try {
+                    IMResult<Void> result = info.getRobotService().setOnline(ROBOT_ONLINE_PLATFORM, false);
+                    LOG.info("Set robot {} online status to false on platform {}: {}",
+                            info.getRobotId(), ROBOT_ONLINE_PLATFORM,
+                            result != null ? result.getErrorCode() : "null");
+                } catch (Exception e) {
+                    LOG.error("Failed to set robot {} online status to false: {}", info.getRobotId(), e.getMessage());
                 }
             }
             // 关闭RobotService
@@ -127,6 +149,9 @@ public class SessionManager {
         info.setRobotService(robotService);
 
         robotSessionMap.computeIfAbsent(robotId, k -> new CopyOnWriteArraySet<>()).add(sessionId);
+
+        // 通知 IMSDK 设置机器人在线
+        setRobotOnlineAsync(robotService, robotId, true);
 
         LOG.info("Session {} authenticated as robot {}", sessionId, robotId);
         return true;
@@ -305,6 +330,35 @@ public class SessionManager {
      */
     public String getRobotIdBySession(String sessionId) {
         return getRobotId(sessionId);
+    }
+
+    /**
+     * 异步设置机器人在线状态
+     */
+    private void setRobotOnlineAsync(RobotService robotService, String robotId, boolean online) {
+        if (robotService == null || asyncExecutor == null) {
+            return;
+        }
+        asyncExecutor.execute(() -> {
+            try {
+                IMResult<Void> result = robotService.setOnline(ROBOT_ONLINE_PLATFORM, online);
+                LOG.info("Set robot {} online status to {} on platform {}: {}",
+                        robotId, online, ROBOT_ONLINE_PLATFORM,
+                        result != null ? result.getErrorCode() : "null");
+            } catch (Exception e) {
+                LOG.error("Failed to set robot {} online status to {}: {}", robotId, online, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * 更新指定会话的机器人在线状态
+     */
+    public void updateRobotOnlineStatus(String sessionId, boolean online) {
+        SessionInfo info = sessionInfos.get(sessionId);
+        if (info != null && info.getRobotService() != null) {
+            setRobotOnlineAsync(info.getRobotService(), info.getRobotId(), online);
+        }
     }
 
     /**

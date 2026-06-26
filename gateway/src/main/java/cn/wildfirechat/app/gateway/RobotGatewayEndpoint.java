@@ -171,6 +171,8 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
         if (result.isSuccess()) {
             // 鉴权成功
             sessionManager.authenticateSession(sessionId, robotId, result.getRobotService());
+            // 通知 IMSDK 设置机器人在线
+            sessionManager.updateRobotOnlineStatus(sessionId, true);
             ConnectMessage success = ConnectMessage.success();
             sessionManager.sendMessage(session, success);
             LOG.info("Session {} authenticated as robot {}", sessionId, robotId);
@@ -191,6 +193,9 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
 
         // 更新心跳时间
         sessionManager.updateHeartbeatTime(sessionId);
+
+        // 心跳时通知 IMSDK 设置机器人在线
+        sessionManager.updateRobotOnlineStatus(sessionId, true);
 
         // 返回心跳响应（检查session是否仍然打开）
         if (session.isOpen()) {
