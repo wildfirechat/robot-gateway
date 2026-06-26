@@ -131,6 +131,13 @@ class WildfireAdapter(BasePlatformAdapter):
                                 "Auto-added robot owner %s to Wildfire allowed users",
                                 owner,
                             )
+                            # If no home_channel is configured, use owner as fallback
+                            if not self.wf_config.home_channel:
+                                self.wf_config.home_channel = f"user:{owner}"
+                                logger.info(
+                                    "Auto-set home_channel to user:%s via robot owner",
+                                    owner,
+                                )
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "Failed to fetch robot profile for owner, continuing without",
