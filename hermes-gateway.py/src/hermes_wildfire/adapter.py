@@ -103,11 +103,28 @@ class WildfireAdapter(BasePlatformAdapter):
                 resp = await self._client.send_request(
                     "getProfile", [self.wf_config.robot_id]
                 )
+                logger.info(
+                    "getProfile response: code=%s msg=%s result=%s",
+                    resp.code,
+                    resp.message,
+                    resp.result,
+                )
                 if resp.is_success and isinstance(resp.result, dict):
                     im_result = resp.result
+                    logger.info(
+                        "getProfile IMResult: code=%s msg=%s result=%s",
+                        im_result.get("code"),
+                        im_result.get("msg"),
+                        im_result.get("result"),
+                    )
                     if im_result.get("code") == 0:
                         profile = im_result.get("result") or {}
                         owner = profile.get("owner")
+                        logger.info(
+                            "getProfile robot profile: %s, owner=%s",
+                            profile,
+                            owner,
+                        )
                         if owner:
                             self.wf_config.allowed_users.add(str(owner))
                             logger.info(
