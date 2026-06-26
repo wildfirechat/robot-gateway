@@ -101,7 +101,7 @@ class WildfireAdapter(BasePlatformAdapter):
             # allowed-users list so the robot owner is never locked out.
             try:
                 resp = await self._client.send_request(
-                    "getProfile", [self.wf_config.robot_id]
+                    "getProfile", []
                 )
                 logger.info(
                     "getProfile response: code=%s msg=%s result=%s",
