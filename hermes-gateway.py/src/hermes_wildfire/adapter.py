@@ -8,7 +8,7 @@ import mimetypes
 import os
 from typing import Any, Dict, Optional
 
-from gateway.config import Platform
+from gateway.config import HomeChannel, Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import MessageDeduplicator
 
@@ -135,9 +135,13 @@ class WildfireAdapter(BasePlatformAdapter):
                             # Also set owner as home_channel fallback
                             if not self.wf_config.home_channel:
                                 self.wf_config.home_channel = str(owner)
-                                # Also update the underlying config so gateway sees it
-                                self.config.extra = getattr(self.config, "extra", {}) or {}
-                                self.config.extra["home_channel"] = {"chat_id": str(owner), "name": "Home"}
+                                # Also update the underlying PlatformConfig.home_channel
+                                # so gateway's get_home_channel() can find it
+                                self.config.home_channel = HomeChannel(
+                                    platform=Platform("wildfire"),
+                                    chat_id=str(owner),
+                                    name="Home",
+                                )
                                 logger.info(
                                     "Auto-set robot owner %s as Wildfire home_channel fallback",
                                     owner,
