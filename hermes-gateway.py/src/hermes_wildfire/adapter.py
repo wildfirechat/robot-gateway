@@ -132,11 +132,12 @@ class WildfireAdapter(BasePlatformAdapter):
                         )
                         if owner:
                             self.wf_config.allowed_users.add(str(owner))
-                            # Also set owner as home_channel fallback in extra
+                            # Also set owner as home_channel fallback
                             if not self.wf_config.home_channel:
-                                self.config.extra = getattr(self.config, "extra", {}) or {}
-                                self.config.extra["owner"] = str(owner)
                                 self.wf_config.home_channel = str(owner)
+                                # Also update the underlying config so gateway sees it
+                                self.config.extra = getattr(self.config, "extra", {}) or {}
+                                self.config.extra["home_channel"] = {"chat_id": str(owner), "name": "Home"}
                                 logger.info(
                                     "Auto-set robot owner %s as Wildfire home_channel fallback",
                                     owner,

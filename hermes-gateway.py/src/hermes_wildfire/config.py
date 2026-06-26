@@ -110,7 +110,7 @@ class WildfireConfig:
 
 
 def _resolve_home_channel(platform_config: Any, extra: dict[str, Any]) -> str | None:
-    """Resolve home channel chat_id from env > PlatformConfig.home_channel > extra > owner fallback."""
+    """Resolve home channel chat_id from env > PlatformConfig.home_channel > extra."""
     env_value = os.getenv("WILDFIRE_HOME_CHANNEL", "").strip()
     if env_value:
         return env_value
@@ -128,11 +128,6 @@ def _resolve_home_channel(platform_config: Any, extra: dict[str, Any]) -> str | 
             return str(chat_id).strip() or None
     if extra_home:
         return str(extra_home).strip() or None
-
-    # Fallback: if owner is available in extra, use it as home_channel
-    owner = extra.get("owner")
-    if owner:
-        return str(owner).strip() or None
 
     return None
 
