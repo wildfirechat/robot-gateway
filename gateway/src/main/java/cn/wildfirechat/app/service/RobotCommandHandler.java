@@ -47,33 +47,42 @@ public class RobotCommandHandler {
                 return handleCreate(userId);
             }
 
-            // ========== 移除了 /create <callback_url> 命令支持 ==========
-            // 用户无法自定义回调地址，回调地址由系统配置统一管理
-            // ==========================================================
-
-            // Info命令
-            if (command.equals("/info") || command.equals("/my")) {
-                return handleInfo(userId);
+            // /info 无参数 - 列出所有机器人
+            if (command.equals("/info") || command.equals("/list")) {
+                return handleListAll(userId);
             }
 
-            // List命令
-            if (command.equals("/list")) {
-                return handleList(userId);
+            // /info <robotId> - 查看指定机器人详情
+            if (command.startsWith("/info ")) {
+                String robotId = command.substring(5).trim();
+                if (robotId.isEmpty()) {
+                    return handleListAll(userId);
+                }
+                return handleInfoForRobot(userId, robotId);
             }
 
-            // Delete命令
-            if (command.equals("/delete")) {
-                return handleDelete(userId);
+            // /delete <robotId>
+            if (command.startsWith("/delete ")) {
+                String robotId = command.substring(7).trim();
+                if (robotId.isEmpty()) {
+                    return "❌ 请指定要删除的机器人ID\n\n正确格式：/delete <robotId>";
+                }
+                return handleDelete(userId, robotId);
             }
 
-            // Reset命令 - 重置机器人密钥
-            if (command.equals("/reset")) {
-                return handleReset(userId);
+            // /reset <robotId>
+            if (command.startsWith("/reset ")) {
+                String robotId = command.substring(6).trim();
+                if (robotId.isEmpty()) {
+                    return "❌ 请指定要重置密钥的机器人ID\n\n正确格式：/reset <robotId>";
+                }
+                return handleReset(userId, robotId);
             }
 
-            // Update命令
+            // /update <robotId> <type> <value>
             if (command.startsWith("/update ")) {
-                return handleUpdate(userId, command.substring(7).trim());
+                String params = command.substring(8).trim();
+                return handleUpdate(userId, params);
             }
 
             // 未知命令
@@ -86,6 +95,35 @@ public class RobotCommandHandler {
     }
 
     /**
+     * 校验 robotId 是否属于当前用户，验证失败返回错误提示
+     * @param userId 用户ID
+     * @param robotId 机器人ID
+     * @return 验证通过返回 null，否则返回错误提示字符串
+     */
+    private String getRobotAndVerifyOwnershipOrError(String userId, String robotId) {
+        if (robotId == null || robotId.isEmpty()) {
+            return "❌ 请指定机器人ID";
+        }
+
+        try {
+            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotId);
+            if (result == null || result.getErrorCode() != ErrorCode.ERROR_CODE_SUCCESS || result.getResult() == null) {
+                return "❌ 机器人不存在: " + robotId;
+            }
+
+            OutputRobot robot = result.getResult();
+            if (!userId.equals(robot.getOwner())) {
+                return "❌ 无权操作该机器人";
+            }
+
+            return null; // 验证通过
+        } catch (Exception e) {
+            LOG.error("Failed to verify robot ownership: robotId={}, userId={}", robotId, userId, e);
+            return "❌ 验证机器人所有权失败：" + e.getMessage();
+        }
+    }
+
+    /**
      * 获取帮助信息
      */
     private String getHelpMessage() {
@@ -93,19 +131,23 @@ public class RobotCommandHandler {
                 "━━━━━━━━━━━━━━━━━━━\n" +
                 "📋 命令列表：\n\n" +
                 "📌 /create - 创建机器人\n" +
-                "   创建新机器人或获取已有机器人信息\n\n" +
-                "📌 /info - 查看机器人信息\n" +
-                "   查看当前机器人的详细信息\n\n" +
+                "   创建新机器人\n\n" +
+                "📌 /info - 列出所有机器人\n" +
+                "   显示您拥有的所有机器人\n\n" +
+                "📌 /info <robotId> - 查看机器人详情\n" +
+                "   查看指定机器人的详细信息\n\n" +
                 "📌 /list - 列出所有机器人\n" +
                 "   显示您拥有的所有机器人\n\n" +
-                "📌 /delete - 删除机器人\n" +
-                "   删除当前机器人\n\n" +
-                "📌 /reset - 重置密钥\n" +
-                "   重置机器人的密钥（重置后旧密钥将失效）\n\n" +
-                "📌 /update name <名称> - 更新名称\n" +
-                "   修改机器人的显示名称\n\n" +
-                "📌 /update portrait <URL> - 更新头像\n" +
-                "   修改机器人的头像URL\n\n" +
+                "📌 /delete <robotId> - 删除机器人\n" +
+                "   删除指定的机器人\n\n" +
+                "📌 /reset <robotId> - 重置密钥\n" +
+                "   重置指定机器人的密钥（重置后旧密钥将失效）\n\n" +
+                "📌 /update <robotId> name <名称> - 更新名称\n" +
+                "   修改指定机器人的显示名称\n\n" +
+                "📌 /update <robotId> portrait <URL> - 更新头像\n" +
+                "   修改指定机器人的头像URL\n\n" +
+                "📌 /update <robotId> extra <备注> - 更新备注\n" +
+                "   修改指定机器人的额外信息\n\n" +
                 "📌 /help - 显示帮助信息\n" +
                 "   显示本帮助内容\n\n" +
                 "💡 提示：回调地址由系统统一配置，创建后不可修改";
@@ -115,6 +157,20 @@ public class RobotCommandHandler {
      * 创建或获取机器人
      */
     private String handleCreate(String userId) {
+        // 提前检查是否达到数量上限
+        try {
+            IMResult<OutputStringList> result = UserAdmin.getUserRobots(userId);
+            if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
+                OutputStringList robotList = result.getResult();
+                java.util.List<String> robots = (robotList != null && robotList.getList() != null) ? robotList.getList() : java.util.Collections.emptyList();
+                if (robots.size() >= botFatherConfig.getMaxRobotsPerUser()) {
+                    return "❌ 已达到机器人数量上限（" + botFatherConfig.getMaxRobotsPerUser() + "个）\n\n发送 /list 查看您的机器人";
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Failed to check robot count for user: {}", userId, e);
+        }
+
         RobotFatherService.RobotInfo robotInfo = robotFatherService.getOrCreateRobot(userId);
         if (robotInfo == null) {
             return "❌ 创建机器人失败，请稍后重试";
@@ -135,44 +191,9 @@ public class RobotCommandHandler {
     }
 
     /**
-     * 查看机器人信息
+     * 列出用户所有机器人
      */
-    private String handleInfo(String userId) {
-        RobotFatherService.RobotInfo robotInfo = robotFatherService.getUserCurrentRobot(userId);
-        if (robotInfo == null) {
-            return "💡 您还没有机器人\n\n发送 /create 创建一个";
-        }
-
-        // 获取详细信息
-        try {
-            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotInfo.getRobotId());
-            if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
-                OutputRobot robot = result.getResult();
-                if (robot != null) {
-                    return "🤖 机器人详细信息：\n" +
-                            "━━━━━━━━━━━━━━━\n" +
-                            "🆔 ID: " + robot.getUserId() + "\n" +
-                            "🔑 密钥: " + robotInfo.getRobotSecret() + "\n" +
-                            "👤 名称: " + (robot.getDisplayName() != null ? robot.getDisplayName() : "未设置") + "\n" +
-                            "🖼️ 头像: " + (robot.getPortrait() != null ? robot.getPortrait() : "未设置") + "\n" +
-                            "👤 拥有者: " + robot.getOwner() + "\n" +
-                            "📝 备注: " + (robot.getRobotExtra() != null ? robot.getRobotExtra() : "无");
-                }
-            }
-        } catch (Exception e) {
-            LOG.error("Failed to get robot info", e);
-        }
-
-        return "🤖 机器人基本信息：\n" +
-                "━━━━━━━━━━━━━━━\n" +
-                "🆔 ID: " + robotInfo.getRobotId() + "\n" +
-                "🔑 密钥: " + robotInfo.getRobotSecret();
-    }
-
-    /**
-     * 列出所有机器人
-     */
-    private String handleList(String userId) {
+    private String handleListAll(String userId) {
         try {
             IMResult<OutputStringList> result = UserAdmin.getUserRobots(userId);
             if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
@@ -184,7 +205,8 @@ public class RobotCommandHandler {
                     for (int i = 0; i < robots.size(); i++) {
                         sb.append((i + 1)).append(". ").append(robots.get(i)).append("\n");
                     }
-                    sb.append("\n💡 共 ").append(robots.size()).append(" 个机器人");
+                    sb.append("\n💡 共 ").append(robots.size()).append(" 个机器人\n");
+                    sb.append("发送 /info <robotId> 查看机器人详情");
                     return sb.toString();
                 }
             }
@@ -198,53 +220,119 @@ public class RobotCommandHandler {
     }
 
     /**
-     * 删除机器人
+     * 查看指定机器人的详细信息
      */
-    private String handleDelete(String userId) {
-        RobotFatherService.RobotInfo robotInfo = robotFatherService.getUserCurrentRobot(userId);
-        if (robotInfo == null) {
-            return "💡 您还没有机器人";
+    private String handleInfoForRobot(String userId, String robotId) {
+        // 校验所有权
+        String error = getRobotAndVerifyOwnershipOrError(userId, robotId);
+        if (error != null) {
+            return error;
         }
 
+        // 获取详细信息
         try {
-            IMResult<Void> result = UserAdmin.destroyRobot(robotInfo.getRobotId());
+            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotId);
             if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
-                // 清除缓存
-                robotFatherService.clearUserCache(userId);
-                return "✅ 机器人已删除\n\n机器人ID: " + robotInfo.getRobotId();
-            } else {
-                return "❌ 删除失败\n错误码: " + (result != null ? result.getCode() : "未知");
+                OutputRobot robot = result.getResult();
+                if (robot != null) {
+                    // 尝试从缓存获取密钥
+                    RobotFatherService.RobotInfo cachedInfo = robotFatherService.getCachedRobotInfo(robotId);
+                    String secret = cachedInfo != null ? cachedInfo.getRobotSecret() : robot.getSecret();
+
+                    return "🤖 机器人详细信息：\n" +
+                            "━━━━━━━━━━━━━━━\n" +
+                            "🆔 ID: " + robot.getUserId() + "\n" +
+                            "🔑 密钥: " + (secret != null && !secret.isEmpty() ? secret : "不可见") + "\n" +
+                            "👤 名称: " + (robot.getDisplayName() != null ? robot.getDisplayName() : "未设置") + "\n" +
+                            "🖼️ 头像: " + (robot.getPortrait() != null ? robot.getPortrait() : "未设置") + "\n" +
+                            "👤 拥有者: " + robot.getOwner() + "\n" +
+                            "📝 备注: " + (robot.getRobotExtra() != null ? robot.getRobotExtra() : "无")
+                            ;
+                }
             }
         } catch (Exception e) {
-            LOG.error("Failed to delete robot for user: {}", userId, e);
-            return "❌ 删除机器人失败：" + e.getMessage();
+            LOG.error("Failed to get robot info for robotId: {}", robotId, e);
+            return "❌ 获取机器人信息失败：" + e.getMessage();
         }
+
+        return "❌ 机器人不存在: " + robotId;
+    }
+
+    /**
+     * 删除指定机器人
+     */
+    private String handleDelete(String userId, String robotId) {
+        // 校验所有权
+        String error = getRobotAndVerifyOwnershipOrError(userId, robotId);
+        if (error != null) {
+            return error;
+        }
+
+        boolean deleted = robotFatherService.deleteRobot(robotId);
+        if (deleted) {
+            return "✅ 机器人已删除\n\n机器人ID: " + robotId;
+        } else {
+            return "❌ 删除失败\n机器人ID: " + robotId;
+        }
+    }
+
+    /**
+     * 重置指定机器人的密钥
+     */
+    private String handleReset(String userId, String robotId) {
+        // 校验所有权
+        String error = getRobotAndVerifyOwnershipOrError(userId, robotId);
+        if (error != null) {
+            return error;
+        }
+
+        RobotFatherService.RobotInfo newInfo = robotFatherService.resetRobotSecret(robotId);
+        if (newInfo == null) {
+            return "❌ 重置密钥失败，请稍后重试";
+        }
+
+        return "✅ 密钥已重置\n" +
+                "━━━━━━━━━━━━━━━\n" +
+                "🆔 机器人ID: " + newInfo.getRobotId() + "\n" +
+                "🔑 新密钥: " + newInfo.getRobotSecret() + "\n\n" +
+                "⚠️ 注意：旧密钥已失效，请使用新密钥连接机器人";
     }
 
     /**
      * 更新机器人信息
      */
     private String handleUpdate(String userId, String params) {
-        RobotFatherService.RobotInfo robotInfo = robotFatherService.getUserCurrentRobot(userId);
-        if (robotInfo == null) {
-            return "💡 您还没有机器人\n\n发送 /create 创建一个";
-        }
-
-        String[] parts = params.split("\\s+", 2);
+        String[] parts = params.split("\\s+", 3);
         if (parts.length < 2) {
             return "❌ 命令格式错误\n\n" +
                     "正确格式：\n" +
-                    "/update name <名称>\n" +
-                    "/update portrait <URL>";
+                    "/update <robotId> name <名称>\n" +
+                    "/update <robotId> portrait <URL>\n" +
+                    "/update <robotId> extra <备注>";
         }
 
-        String type = parts[0];
-        String value = parts[1];
+        String robotId = parts[0];
+        String type = parts[1];
+        String value = parts.length >= 3 ? parts[2] : "";
+
+        if (value.isEmpty()) {
+            return "❌ 命令格式错误\n\n" +
+                    "正确格式：\n" +
+                    "/update <robotId> name <名称>\n" +
+                    "/update <robotId> portrait <URL>\n" +
+                    "/update <robotId> extra <备注>";
+        }
+
+        // 校验所有权
+        String error = getRobotAndVerifyOwnershipOrError(userId, robotId);
+        if (error != null) {
+            return error;
+        }
 
         try {
             // 构建用户信息对象
             InputOutputUserInfo userInfo = new InputOutputUserInfo();
-            userInfo.setUserId(robotInfo.getRobotId());
+            userInfo.setUserId(robotId);
 
             int updateType;
             switch (type) {
@@ -267,34 +355,13 @@ public class RobotCommandHandler {
             IMResult<Void> result = UserAdmin.updateUserInfo(userInfo, updateType);
             if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
                 String typeName = type.equals("name") ? "名称" : (type.equals("portrait") ? "头像" : "备注");
-                return "✅ 更新成功\n\n" + typeName + ": " + value;
+                return "✅ " + robotId + " 更新成功\n\n" + typeName + ": " + value;
             } else {
                 return "❌ 更新失败\n错误码: " + (result != null ? result.getCode() : "未知");
             }
         } catch (Exception e) {
-            LOG.error("Failed to update robot for user: {}", userId, e);
+            LOG.error("Failed to update robot: {}", robotId, e);
             return "❌ 更新失败：" + e.getMessage();
         }
-    }
-
-    /**
-     * 重置机器人密钥
-     */
-    private String handleReset(String userId) {
-        RobotFatherService.RobotInfo robotInfo = robotFatherService.getUserCurrentRobot(userId);
-        if (robotInfo == null) {
-            return "💡 您还没有机器人\n\n发送 /create 创建一个";
-        }
-
-        RobotFatherService.RobotInfo newInfo = robotFatherService.resetRobotSecret(userId);
-        if (newInfo == null) {
-            return "❌ 重置密钥失败，请稍后重试";
-        }
-
-        return "✅ 密钥已重置\n" +
-                "━━━━━━━━━━━━━━━\n" +
-                "🆔 机器人ID: " + newInfo.getRobotId() + "\n" +
-                "🔑 新密钥: " + newInfo.getRobotSecret() + "\n\n" +
-                "⚠️ 注意：旧密钥已失效，请使用新密钥连接机器人";
     }
 }

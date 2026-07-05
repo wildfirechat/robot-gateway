@@ -26,6 +26,9 @@ public class BotFatherConfig {
     // 公网地址（可选）
     private String publicAddr;
 
+    // 每个用户最大机器人数量（默认1）
+    private int maxRobotsPerUser = 1;
+
     // Getters and Setters
 
     public boolean isEnabled() {
@@ -66,6 +69,14 @@ public class BotFatherConfig {
 
     public void setPublicAddr(String publicAddr) {
         this.publicAddr = publicAddr;
+    }
+
+    public int getMaxRobotsPerUser() {
+        return maxRobotsPerUser;
+    }
+
+    public void setMaxRobotsPerUser(int maxRobotsPerUser) {
+        this.maxRobotsPerUser = maxRobotsPerUser;
     }
 
     /**

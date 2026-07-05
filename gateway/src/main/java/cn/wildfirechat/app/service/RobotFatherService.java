@@ -8,7 +8,6 @@ import cn.wildfirechat.sdk.RobotService;
 import cn.wildfirechat.sdk.UserAdmin;
 import cn.wildfirechat.sdk.model.IMResult;
 import cn.wildfirechat.sdk.utilities.AdminHttpUtils;
-import io.netty.util.internal.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,7 +18,6 @@ import javax.annotation.PostConstruct;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 
 /**
  * RobotFather 服务类
@@ -35,8 +33,8 @@ public class RobotFatherService {
     @Value("${im.url}")
     private String imUrl;
 
-    // 内存缓存：用户ID -> 机器人信息（线程安全）
-    private final Map<String, RobotInfo> userRobotCache = new ConcurrentHashMap<>();
+    // 内存缓存：robotId -> 机器人信息（线程安全）
+    private final Map<String, RobotInfo> robotInfoCache = new ConcurrentHashMap<>();
     // 缓存过期时间：30分钟
     private final Map<String, Long> cacheTimestamp = new ConcurrentHashMap<>();
     private static final long CACHE_EXPIRY_MS = 30 * 60 * 1000;
@@ -63,66 +61,32 @@ public class RobotFatherService {
 
     /**
      * 获取或创建用户的机器人
+     * 检查用户当前机器人数量是否达到上限（maxRobotsPerUser），未达上限则创建新机器人
      * @param userId 用户ID
-     * @return 机器人信息
+     * @return 机器人信息，如果已达上限则返回 null
      */
     public RobotInfo getOrCreateRobot(String userId) {
-        // 先从缓存查找（自动处理过期）
-        RobotInfo cached = getCachedRobotInfo(userId);
-        if (cached != null) {
-            LOG.info("Found cached robot for user: {}, robotId: {}", userId, cached.getRobotId());
-            return cached;
-        }
-
         try {
-//            // 调用SDK查询用户的机器人列表
+            // 调用SDK查询用户的机器人列表
             IMResult<OutputStringList> result = UserAdmin.getUserRobots(userId);
             if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
                 OutputStringList robotList = result.getResult();
-                if (robotList != null && robotList.getList() != null && !robotList.getList().isEmpty()) {
-                    // 用户已有机器人，获取第一个机器人的详细信息
-                    String robotId = robotList.getList().get(0);
-                    LOG.info("User {} already has robot: {}", userId, robotId);
+                List<String> robots = (robotList != null && robotList.getList() != null) ? robotList.getList() : Collections.emptyList();
 
-                    // 获取机器人详细信息
-                    IMResult<OutputRobot> robotResult = UserAdmin.getRobotInfo(robotId);
-                    if (robotResult != null && robotResult.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
-                        OutputRobot robot = robotResult.getResult();
-                        if (robot != null) {
-                            if(!StringUtil.isNullOrEmpty(botFatherConfig.getCallbackUrl()) && botFatherConfig.getCallbackUrl().equals(robot.getCallback())) {
-                                robot.setCallback(botFatherConfig.getCallbackUrl());
-                                InputCreateRobot createRobot = new InputCreateRobot();
-                                createRobot.setUserId(robot.getUserId());
-                                createRobot.setName(robot.getName());
-                                createRobot.setPassword(robot.getPassword());
-                                createRobot.setDisplayName(robot.getDisplayName());
-                                createRobot.setPortrait(robot.getPortrait());
-                                createRobot.setGender(robot.getGender());
-                                createRobot.setMobile(robot.getMobile());
-                                createRobot.setEmail(robot.getEmail());
-                                createRobot.setAddress(robot.getAddress());
-                                createRobot.setCompany(robot.getCompany());
-                                createRobot.setSocial(robot.getSocial());
-                                createRobot.setExtra(robot.getExtra());
-                                createRobot.setOwner(robot.getOwner());
-                                createRobot.setSecret(robot.getSecret());
-                                createRobot.setCallback(robot.getCallback());
-                                createRobot.setRobotExtra(robot.getRobotExtra());
-                                UserAdmin.createRobot(createRobot);
-                            }
-                            RobotInfo info = new RobotInfo(robot.getUserId(), robot.getSecret());
-                            // 缓存机器人信息
-                            cacheRobotInfo(userId, info);
-                            addRobotFriend(userId, robot.getUserId());
-                            // 发送欢迎消息
-                            sendWelcomeMessage(userId, robot.getUserId(), robot.getSecret(), robot.getDisplayName());
-                            return info;
-                        }
-                    }
+                // 检查是否达到最大数量限制
+                if (robots.size() >= botFatherConfig.getMaxRobotsPerUser()) {
+                    LOG.info("User {} has reached the max robot limit ({})", userId, botFatherConfig.getMaxRobotsPerUser());
+                    return null;
+                }
+
+                // 用户已有机器人但未达上限
+                if (!robots.isEmpty()) {
+                    String robotId = robots.get(robots.size() - 1);
+                    LOG.info("User {} has {} robot(s), creating new robot", userId, robots.size());
                 }
             }
 
-            // 用户没有机器人，创建新机器人
+            // 创建新机器人
             return createRobot(userId);
 
         } catch (Exception e) {
@@ -186,7 +150,6 @@ public class RobotFatherService {
         } catch (Exception e) {
             LOG.error("Exception when sending welcome message from {} to {}", robotId, userId, e);
         } finally {
-            // 确保关闭 RobotService 资源
             if (robotService != null) {
                 try {
                     robotService.close();
@@ -242,15 +205,15 @@ public class RobotFatherService {
                 OutputCreateRobot output = result.getResult();
                 if (output != null) {
                     RobotInfo info = new RobotInfo(output.getUserId(), output.getSecret());
-                    // 缓存机器人信息
-                    cacheRobotInfo(userId, info);
+                    // 缓存机器人信息，以 robotId 为 key
+                    cacheRobotInfo(info.getRobotId(), info);
                     LOG.info("Robot created successfully for user: {}, robotId: {}", userId, output.getUserId());
                     addRobotFriend(userId, info.getRobotId());
-                    
+
                     // ========== 发送欢迎消息给用户 ==========
                     sendWelcomeMessage(userId, info.getRobotId(), info.getRobotSecret(), input.getDisplayName());
                     // ======================================
-                    
+
                     return info;
                 }
             } else {
@@ -277,7 +240,7 @@ public class RobotFatherService {
      * @return 6位随机数字字符串
      */
     private String generate6DigitRandom() {
-        int num = 100000 + ThreadLocalRandom.current().nextInt(900000); // 100000 ~ 999999
+        int num = 100000 + ThreadLocalRandom.current().nextInt(900000);
         return String.valueOf(num);
     }
 
@@ -301,7 +264,6 @@ public class RobotFatherService {
             }
         }
 
-        // 如果所有尝试仍然重复，使用UUID作为后备
         LOG.warn("Failed to generate unique robot ID with random suffix, falling back to UUID");
         return baseId + UUID.randomUUID().toString().replace("-", "").substring(0, 6);
     }
@@ -322,78 +284,95 @@ public class RobotFatherService {
     }
 
     /**
-     * 获取用户当前的机器人
-     * 如果缓存为空，会从 IM 服务器重新加载
-     *
-     * @param userId 用户ID
-     * @return 机器人信息，如果用户没有机器人则返回null
+     * 通过 robotId 获取机器人信息（带缓存）
+     * @param robotId 机器人ID
+     * @return 机器人信息，如果不存在返回 null
      */
-    public RobotInfo getUserCurrentRobot(String userId) {
-        // 先从缓存查找（自动处理过期）
-        RobotInfo cached = getCachedRobotInfo(userId);
+    public RobotInfo getRobotById(String robotId) {
+        // 先从缓存查找
+        RobotInfo cached = getCachedRobotInfo(robotId);
         if (cached != null) {
+            LOG.debug("Found cached robot info for robotId: {}", robotId);
             return cached;
         }
 
-        // 缓存为空，从服务器重新加载
-        LOG.info("Cache is empty for user: {}, reloading from server", userId);
-        return reloadRobotFromServer(userId);
+        try {
+            // 从服务器获取机器人详细信息
+            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotId);
+            if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
+                OutputRobot robot = result.getResult();
+                if (robot != null) {
+                    RobotInfo info = new RobotInfo(robot.getUserId(), robot.getSecret());
+                    cacheRobotInfo(robotId, info);
+                    return info;
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Failed to get robot info for robotId: {}", robotId, e);
+        }
+
+        return null;
     }
 
     /**
-     * 从 IM 服务器重新加载机器人信息
-     *
-     * @param userId 用户ID
-     * @return 机器人信息，如果用户没有机器人则返回null
+     * 删除指定机器人并清理缓存
+     * @param robotId 机器人ID
+     * @return true 删除成功，false 删除失败
      */
-    private RobotInfo reloadRobotFromServer(String userId) {
+    public boolean deleteRobot(String robotId) {
         try {
-            // 调用SDK查询用户的机器人列表
-            IMResult<OutputStringList> result = UserAdmin.getUserRobots(userId);
+            LOG.info("Deleting robot: {}", robotId);
+            IMResult<Void> result = UserAdmin.destroyRobot(robotId);
             if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
-                OutputStringList robotList = result.getResult();
-                if (robotList != null && robotList.getList() != null && !robotList.getList().isEmpty()) {
-                    // 用户已有机器人，获取第一个机器人的详细信息
-                    String robotId = robotList.getList().get(0);
-                    LOG.info("Found robot on server for user: {}, robotId: {}", userId, robotId);
+                clearCache(robotId);
+                LOG.info("Robot deleted successfully: {}", robotId);
+                return true;
+            } else {
+                LOG.error("Failed to delete robot: {}, error: {}", robotId,
+                    result != null ? result.getCode() : "null");
+                return false;
+            }
+        } catch (Exception e) {
+            LOG.error("Exception when deleting robot: {}", robotId, e);
+            return false;
+        }
+    }
 
-                    // 获取机器人详细信息
-                    IMResult<OutputRobot> robotResult = UserAdmin.getRobotInfo(robotId);
-                    if (robotResult != null && robotResult.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
-                        OutputRobot robot = robotResult.getResult();
-                        if (robot != null) {
-                            RobotInfo info = new RobotInfo(robot.getUserId(), robot.getSecret());
-                            // 缓存机器人信息
-                            cacheRobotInfo(userId, info);
-                            return info;
-                        }
-                    }
+    /**
+     * 校验 robotId 是否属于指定用户
+     * @param robotId 机器人ID
+     * @param userId 用户ID
+     * @return true 属于该用户，false 不属于或机器人不存在
+     */
+    public boolean verifyRobotOwnership(String robotId, String userId) {
+        try {
+            IMResult<OutputRobot> result = UserAdmin.getRobotInfo(robotId);
+            if (result != null && result.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
+                OutputRobot robot = result.getResult();
+                if (robot != null && userId.equals(robot.getOwner())) {
+                    return true;
                 }
             }
-
-            // 用户没有机器人
-            LOG.info("No robot found on server for user: {}", userId);
-            return null;
-
+            return false;
         } catch (Exception e) {
-            LOG.error("Failed to reload robot from server for user: {}", userId, e);
-            return null;
+            LOG.error("Failed to verify robot ownership: robotId={}, userId={}", robotId, userId, e);
+            return false;
         }
     }
 
     /**
      * 缓存机器人信息（带时间戳）
      */
-    private void cacheRobotInfo(String userId, RobotInfo info) {
-        userRobotCache.put(userId, info);
-        cacheTimestamp.put(userId, System.currentTimeMillis());
+    private void cacheRobotInfo(String robotId, RobotInfo info) {
+        robotInfoCache.put(robotId, info);
+        cacheTimestamp.put(robotId, System.currentTimeMillis());
     }
 
     /**
      * 检查缓存是否过期
      */
-    private boolean isCacheExpired(String userId) {
-        Long timestamp = cacheTimestamp.get(userId);
+    private boolean isCacheExpired(String robotId) {
+        Long timestamp = cacheTimestamp.get(robotId);
         if (timestamp == null) {
             return true;
         }
@@ -403,22 +382,22 @@ public class RobotFatherService {
     /**
      * 获取缓存的机器人信息，自动处理过期
      */
-    private RobotInfo getCachedRobotInfo(String userId) {
-        if (isCacheExpired(userId)) {
-            userRobotCache.remove(userId);
-            cacheTimestamp.remove(userId);
+    public RobotInfo getCachedRobotInfo(String robotId) {
+        if (isCacheExpired(robotId)) {
+            robotInfoCache.remove(robotId);
+            cacheTimestamp.remove(robotId);
             return null;
         }
-        return userRobotCache.get(userId);
+        return robotInfoCache.get(robotId);
     }
 
     /**
-     * 清除用户缓存
-     * @param userId 用户ID
+     * 清除指定 robotId 的缓存
+     * @param robotId 机器人ID
      */
-    public void clearUserCache(String userId) {
-        userRobotCache.remove(userId);
-        cacheTimestamp.remove(userId);
+    public void clearCache(String robotId) {
+        robotInfoCache.remove(robotId);
+        cacheTimestamp.remove(robotId);
     }
 
     /**
@@ -429,7 +408,7 @@ public class RobotFatherService {
         int count = 0;
         for (Map.Entry<String, Long> entry : cacheTimestamp.entrySet()) {
             if (now - entry.getValue() > CACHE_EXPIRY_MS) {
-                userRobotCache.remove(entry.getKey());
+                robotInfoCache.remove(entry.getKey());
                 cacheTimestamp.remove(entry.getKey());
                 count++;
             }
@@ -441,32 +420,25 @@ public class RobotFatherService {
 
     /**
      * 更新机器人密钥（仅更新缓存）
-     * @param userId 用户ID
+     * @param robotId 机器人ID
      * @param newSecret 新密钥
      */
-    public void updateRobotSecret(String userId, String newSecret) {
-        RobotInfo info = userRobotCache.get(userId);
+    public void updateRobotSecret(String robotId, String newSecret) {
+        RobotInfo info = robotInfoCache.get(robotId);
         if (info != null) {
             RobotInfo newInfo = new RobotInfo(info.getRobotId(), newSecret);
-            cacheRobotInfo(userId, newInfo);
+            cacheRobotInfo(robotId, newInfo);
         }
     }
 
     /**
      * 重置机器人密钥
      * 生成新密钥并更新到 IM 服务器
-     * @param userId 用户ID
+     * @param robotId 机器人ID
      * @return 包含新密钥的机器人信息，失败返回 null
      */
-    public RobotInfo resetRobotSecret(String userId) {
-        RobotInfo robotInfo = getUserCurrentRobot(userId);
-        if (robotInfo == null) {
-            LOG.warn("Cannot reset secret: user {} has no robot", userId);
-            return null;
-        }
-
+    public RobotInfo resetRobotSecret(String robotId) {
         try {
-            String robotId = robotInfo.getRobotId();
             LOG.info("Resetting secret for robot: {}", robotId);
 
             // 获取当前机器人详细信息
@@ -511,7 +483,7 @@ public class RobotFatherService {
                 if (output != null) {
                     RobotInfo newInfo = new RobotInfo(output.getUserId(), output.getSecret());
                     // 更新缓存
-                    cacheRobotInfo(userId, newInfo);
+                    cacheRobotInfo(robotId, newInfo);
                     LOG.info("Robot secret reset successfully for: {}", robotId);
                     return newInfo;
                 }
@@ -520,7 +492,7 @@ public class RobotFatherService {
             }
 
         } catch (Exception e) {
-            LOG.error("Exception when resetting robot secret for user: {}", userId, e);
+            LOG.error("Exception when resetting robot secret for robotId: {}", robotId, e);
         }
 
         return null;
