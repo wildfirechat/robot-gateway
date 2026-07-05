@@ -1,0 +1,1 @@
+/Users/rain/.nvm/versions/node/v20.17.0/lib/node_modules/@anthropic-ai/claude-code/cli.js

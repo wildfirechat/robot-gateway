@@ -1,0 +1,35 @@
+{
+  "wildfire": {
+    "gatewayUrl": "ws://localhost:8884/robot/gateway",
+    "robotId": "FireRobot",
+    "robotSecret": "123456"
+  },
+  "ccconnect": {
+    "transport": "websocket",
+    "url": "ws://localhost:9810/bridge/ws",
+    "token": "your-cc-connect-token",
+    "platform": "wildfire",
+    "project": "",
+    "capabilities": ["text", "image", "file", "audio", "typing", "update_message", "preview", "delete_message", "reconstruct_reply"],
+    "reconnectInterval": 5000,
+    "heartbeatInterval": 30000
+  },
+  "filter": {
+    "whitelist": {
+      "enabled": true,
+      "allowedUsers": [],
+      "allowedGroups": [],
+      "deniedMessage": "未授权使用"
+    },
+    "group": {
+      "enabled": true,
+      "requireMention": true,
+      "respondOnQuestion": true,
+      "helpKeywords": "帮,请,分析,总结,怎么,如何",
+      "allowedGroupIds": []
+    }
+  },
+  "server": {
+    "port": 8090
+  }
+}

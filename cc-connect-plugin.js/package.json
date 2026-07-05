@@ -1,0 +1,45 @@
+{
+  "name": "@wildfirechat/cc-connect-plugin",
+  "version": "1.0.0",
+  "description": "野火IM与cc-connect的桥接插件 (Node.js版)",
+  "license": "MIT",
+  "author": "WildfireChat",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wildfirechat/robot-gateway.git"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "exports": "./src/index.js",
+  "bin": {
+    "cc-connect-plugin": "./bin/cc-connect-plugin.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "config.example.json",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/cc-connect-plugin.js",
+    "dev": "node bin/cc-connect-plugin.js -config ./config.json",
+    "postinstall": "node bin/setup.js"
+  },
+  "keywords": [
+    "wildfirechat",
+    "cc-connect",
+    "robot",
+    "gateway",
+    "im",
+    "websocket",
+    "bridge"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@wildfirechat/robot-gateway-client-sdk": "^1.0.5",
+    "@wildfirechat/server-sdk": "^1.0.3",
+    "ws": "^8.16.0"
+  }
+}
