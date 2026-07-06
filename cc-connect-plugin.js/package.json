@@ -22,8 +22,9 @@
   ],
   "scripts": {
     "start": "node bin/cc-connect-plugin.js",
+    "predev": "node -e \"const fs=require('fs');if(!fs.existsSync('config.json')){fs.copyFileSync('config.example.json','config.json');console.log('[predev] created config.json from config.example.json')}\"",
     "dev": "node bin/cc-connect-plugin.js -config ./config.json",
-    "postinstall": "node bin/setup.js"
+    "setup": "node bin/setup.js"
   },
   "keywords": [
     "wildfirechat",
