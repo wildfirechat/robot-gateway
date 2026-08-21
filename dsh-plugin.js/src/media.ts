@@ -96,8 +96,11 @@ export async function prepareInboundMedia(params: {
   attachments: any; // ctx.attachments
   logger?: any;
   transcript?: string; // ASR result for voice
+  /** Whether the current model accepts image content blocks. When false,
+   * images are exposed as a local path note instead (agent reads with tools). */
+  supportsImage?: boolean;
 }): Promise<PreparedMedia> {
-  const { mediaUrl, payloadType, downloadDir, attachments, logger, transcript } = params;
+  const { mediaUrl, payloadType, downloadDir, attachments, logger, transcript, supportsImage = true } = params;
 
   // Voice with an ASR transcript: text only, no download needed.
   if (payloadType === 2 && transcript) {
@@ -111,6 +114,13 @@ export async function prepareInboundMedia(params: {
 
   try {
     if (payloadType === 3 && isImageExt(downloaded.path)) {
+      // 模型不支持视觉：给本地路径，agent 用文件工具读取/分析（不走图片内容块）
+      if (!supportsImage) {
+        return {
+          text: `[图片] 本地路径: ${downloaded.path}`,
+          tempPath: downloaded.path,
+        };
+      }
       const data = await readFile(downloaded.path);
       const mediaType = mimeFromExt(downloaded.path, "image/jpeg");
       try {

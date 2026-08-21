@@ -25,7 +25,7 @@ export const name = "wildfire";
 // (`cannot get property "x" without inject`), so every service used must be
 // injected. `userQuestions` / `attachments` / `sessionPersistence` / `goals`
 // are provided by the base bundle.
-export const inject = ["agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals"];
+export const inject = ["agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals", "systemPrompt"];
 
 /**
  * Plugin entry.
@@ -33,6 +33,26 @@ export const inject = ["agents", "sessions", "agentDefaultModel", "userQuestions
  * @param config - config from the profile patch row (`config` field).
  */
 export function apply(ctx: any, config: any): void {
+  // Outbound-media convention: tell every agent that files it creates in its
+  // workspace can be handed to the IM user via [image:path]/[file:path] markers
+  // (the plugin uploads them and strips the marker; paths outside the workspace
+  // fence are rejected). Mirrors the sandbox-policy systemPrompt.context hook.
+  try {
+    ctx.inject?.(["systemPrompt"], (scope: any) => {
+      scope.systemPrompt.context({
+        name: "wildfire:media",
+        order: 220,
+        text: () =>
+          "你通过野火IM机器人与用户对话。需要把本机文件/图片发给用户时，" +
+          "在回复文本中插入标记（支持多个）：[image:绝对路径]（图片）、[file:绝对路径]（任意文件）。" +
+          "路径必须是绝对路径且位于当前工作区内（工作区外的文件会被拒绝，请先复制到工作区）。" +
+          "插件会把标记对应的文件作为图片/文件消息发送，并从回复文本中移除标记。",
+      });
+    });
+  } catch {
+    // systemPrompt service unavailable — the convention still works if the
+    // model is told about the markers in-conversation.
+  }
   // dsh's default logger only buffers messages (no console sink), so in a
   // GUI-less profile nothing would be visible. Export to stderr ourselves.
   try {

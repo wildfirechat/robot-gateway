@@ -45,6 +45,16 @@ declare module "@wildfirechat/server-sdk" {
     content: string;
   }
 
+  export const MessageContentMediaType: {
+    General: 0;
+    Image: 1;
+    Voice: 2;
+    Video: 3;
+    File: 4;
+    Portrait: 5;
+    Sticker: 7;
+  };
+
   export class ImageMessageContent extends MessageContent {
     constructor(mediaType: any, remoteUrl: string | null, localPath: string | null);
   }

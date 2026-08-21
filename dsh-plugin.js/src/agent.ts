@@ -194,12 +194,21 @@ export class AgentSessionManager {
       if (message.includes("not found")) {
         handle = await agents.create(createOptions);
       } else {
-        // Resume failed for another reason (corrupt log, ...) — try a fresh
-        // session; create may still reject on the persisted id, which surfaces.
+        // Resume failed for another reason (corrupt/torn log, incompatible
+        // metadata, ...). Creating with the SAME deterministic id would
+        // collide with the damaged on-disk log, so bump the epoch and create
+        // under a fresh id — the old log is abandoned.
         this.logger?.warn?.(
-          `[wildfire-agent] resume failed for ${sessionId}, creating fresh: ${message}`
+          `[wildfire-agent] resume failed for ${sessionId}, bumping epoch & creating fresh: ${message}`
         );
-        handle = await agents.create(createOptions);
+        const nextEpoch = (this.epochs.get(key) ?? 0) + 1;
+        this.epochs.set(key, nextEpoch);
+        const freshSessionId = sessionIdForConversation(key, nextEpoch);
+        const freshOptions = {
+          ...createOptions,
+          sessionId: SessionId(freshSessionId),
+        };
+        handle = await agents.create(freshOptions);
       }
     }
 

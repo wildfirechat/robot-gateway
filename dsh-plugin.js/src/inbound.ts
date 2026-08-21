@@ -15,6 +15,7 @@ import {
   FileMessageContent,
   StreamingTextGeneratingMessageContent,
   StreamingTextGeneratedMessageContent,
+  MessageContentMediaType,
 } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
 import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConfig, getWhitelistConfig } from "./config.js";
@@ -25,6 +26,7 @@ import {
   CONV_TYPE_GROUP,
   CONV_TYPE_CHANNEL,
   MESSAGE_TYPE_FILE,
+  MESSAGE_TYPE_IMAGE,
   MESSAGE_TYPE_VOICE,
   conversationKey,
   extractPayloadInfo,
@@ -101,6 +103,31 @@ class ThrottledStream {
   }
 }
 
+/** Recent inbound fingerprints (messageId or content signature) → timestamp. */
+const recentInbound = new Map<string, number>();
+const DEDUP_WINDOW_MS = 5000;
+const DEDUP_MAX_ENTRIES = 500;
+
+/**
+ * Whether this inbound message is a duplicate delivery within the dedup
+ * window. Keyed on the server message id when present, else a signature of
+ * sender + conversation + payload type/content (test webhooks carry no id).
+ */
+function dedupInfo(data: any): { key: string; isDuplicate: boolean } {
+  const msgId = data?.messageId ?? data?.messageUid;
+  const key = msgId
+    ? `id:${msgId}`
+    : `sig:${String(data?.sender ?? "")}|${String(data?.conv?.type ?? "")}|${String(data?.conv?.target ?? "")}|${String(data?.payload?.type ?? "")}|${String(data?.payload?.content ?? "")}`;
+  const now = Date.now();
+  const prev = recentInbound.get(key);
+  if (prev !== undefined && now - prev < DEDUP_WINDOW_MS) {
+    return { key, isDuplicate: true };
+  }
+  recentInbound.set(key, now);
+  if (recentInbound.size > DEDUP_MAX_ENTRIES) recentInbound.clear();
+  return { key, isDuplicate: false };
+}
+
 export async function handleIncomingMessage(
   api: any,
   message: any,
@@ -118,6 +145,20 @@ export async function handleIncomingMessage(
   const conv = data.conv;
   const payload = data.payload;
   if (!sender || !conv || !payload) return;
+
+  // Dedup guard: the gateway delivers one message to EVERY WebSocket session
+  // the robot holds, so stale/duplicate connections re-deliver the same
+  // message (observed up to 4×). Concurrent duplicates corrupt the session
+  // log, so drop repeats within a short window. Prefer the server message id;
+  // fall back to a content signature when it is missing (test webhooks).
+  const dupInfo = dedupInfo(data);
+  if (dupInfo.isDuplicate) {
+    api.logger?.info?.(
+      `[wildfire] duplicate message dropped: sender=${sender}, convType=${conv.type}, target=${conv.target}, key=${dupInfo.key}`
+    );
+    return;
+  }
+  api.logger?.info?.(`[wildfire] inbound dedup key: ${dupInfo.key} (msgId=${String(data?.messageId ?? data?.messageUid)})`);
 
   // Skip non-content messages, but keep the DSH interaction segment (200-209)
   // and the group-notification segment (104-125) flowing so they can be
@@ -378,15 +419,22 @@ export async function handleIncomingMessage(
       );
     }
 
-    // Inbound media: images become content blocks; other files become path notes.
+    // Inbound media: images become content blocks (when the model supports
+    // vision); other files become path notes.
     if (mediaUrl) {
+      let supportsImage = true;
+      if (payloadType === MESSAGE_TYPE_IMAGE) {
+        const supports = await modelSupportsImage(api, key);
+        if (supports !== null) supportsImage = supports;
+      }
       const prepared = await prepareInboundMedia({
         mediaUrl,
         payloadType,
         downloadDir: getMediaConfig(config).downloadDir,
-        attachments: api.ctx?.attachments,
+        attachments: api.ctx?.get?.("attachments"),
         logger,
         transcript,
+        supportsImage,
       });
       media = prepared;
     }
@@ -453,7 +501,7 @@ export async function handleIncomingMessage(
       logger
     );
   } catch (err: any) {
-    logger?.error?.(`[wildfire] dispatch failed: ${err.message}`);
+    logger?.error?.(`[wildfire] dispatch failed: ${err.message}\n${err.stack?.slice(0, 1200) ?? ""}`);
     try {
       const errorText = `Processing failed: ${err.message.slice(0, 80)}`;
       await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger);
@@ -498,7 +546,10 @@ async function sendOutboundMedia(
     const remoteUrl = await uploadToWildfire(
       safePath,
       async (data, fileName) => {
-        const result = await client.uploadFile(data, fileName, 4, "application/octet-stream");
+        // 图片用 Image(1) 媒体类型、文件用 File(4)，让媒体服务端正确归类
+        const mediaType = item.isImage ? MessageContentMediaType.Image : MessageContentMediaType.File;
+        const mime = item.isImage ? "image/png" : "application/octet-stream";
+        const result = await client.uploadFile(data, fileName, mediaType, mime);
         return result?.isSuccess?.() ? (result.getResult?.() ?? null) : null;
       },
       api.logger
@@ -1684,6 +1735,35 @@ async function resolveEffortInfo(
     };
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Whether the conversation's current model accepts image content blocks
+ * (`ctx.llm.resolveModelInfo(...).inputModalities` includes 'image').
+ * Returns null when unknown (caller keeps the default behavior).
+ */
+async function modelSupportsImage(api: any, key: string): Promise<boolean | null> {
+  let llm: any;
+  try {
+    llm = api.ctx?.get?.("llm");
+  } catch {
+    return null;
+  }
+  if (!llm) return null;
+  try {
+    const sel = await api.models?.peek?.(key);
+    if (!sel) return null;
+    const info = await llm.resolveModelInfo(sel.provider, sel.model);
+    const modalities = info?.inputModalities;
+    api.logger?.info?.(
+      `[wildfire] modelSupportsImage: ${sel.provider}/${sel.model} modalities=${JSON.stringify(modalities)}`
+    );
+    if (!Array.isArray(modalities) || modalities.length === 0) return null; // unknown
+    return modalities.includes("image");
+  } catch (err: any) {
+    api.logger?.warn?.(`[wildfire] modelSupportsImage lookup failed: ${err?.message}`);
+    return null;
   }
 }
 

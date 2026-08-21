@@ -10,6 +10,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.CloseStatus;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
@@ -142,6 +143,28 @@ public class SessionManager {
         if (info == null) {
             LOG.warn("Session {} not found for authentication", sessionId);
             return false;
+        }
+
+        // 单连接语义：机器人重连即接管——先踢掉该机器人残留的旧会话。
+        // 否则每条消息会被投递给每个存活会话（重复投递，可并发写坏会话日志）。
+        Set<String> existing = robotSessionMap.get(robotId);
+        if (existing != null) {
+            for (String oldSessionId : new ArrayList<>(existing)) {
+                if (oldSessionId.equals(sessionId)) {
+                    continue;
+                }
+                WebSocketSession oldSession = sessions.get(oldSessionId);
+                removeSessionById(oldSessionId);
+                if (oldSession != null && oldSession.isOpen()) {
+                    try {
+                        oldSession.close(CloseStatus.NORMAL.withReason("replaced by new robot connection"));
+                    } catch (IOException e) {
+                        LOG.warn("Failed to close stale session {} for robot {}: {}",
+                                oldSessionId, robotId, e.getMessage());
+                    }
+                }
+                LOG.info("Evicted stale session {} for robot {} (reconnected)", oldSessionId, robotId);
+            }
         }
 
         info.setAuthenticated(true);
