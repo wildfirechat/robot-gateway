@@ -179,6 +179,14 @@ func (c *RobotServiceClient) UpdateMessage(messageID int64, payload *protocol.Me
 	return invoke[struct{}](c, "updateMessage", params)
 }
 
+// UpdateConversationUserSetting 设置会话级用户设置（scope=31），会话内所有用户（机器人除外）
+// 都会收到 key 为 convType-line-target_type 的用户设置变更。
+// conv 为会话（私聊 target 为对方 uid，群聊 target 为 groupId）；settingType 为设置类型；value 为 JSON 字符串。
+func (c *RobotServiceClient) UpdateConversationUserSetting(conv *protocol.Conversation, settingType int, value string) (*protocol.IMResult[struct{}], error) {
+	params := []interface{}{conv, settingType, value}
+	return invoke[struct{}](c, "updateConversationUserSetting", params)
+}
+
 // ==================== User Related ====================
 
 // GetUserInfo gets user information.

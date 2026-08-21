@@ -172,6 +172,19 @@ public class RobotServiceClient {
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 
+    /**
+     * 设置会话级用户设置（scope=31），会话内所有用户（机器人除外）都会收到
+     * key为convType-line-target_type的用户设置变更
+     * @param conversation 会话；私聊target为对方用户uid，群聊target为groupId
+     * @param type 设置类型
+     * @param value 设置值，JSON字符串
+     * @return 设置结果
+     */
+    public IMResult<Void> updateConversationUserSetting(Conversation conversation, int type, String value) {
+        return invoke("updateConversationUserSetting", Arrays.asList(conversation, type, value),
+                new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
+    }
+
     // ==================== 用户相关 ====================
 
     public IMResult<InputOutputUserInfo> getUserInfo(String userId) {

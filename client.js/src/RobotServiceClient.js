@@ -143,6 +143,18 @@ export class RobotServiceClient {
         return this.invoke('updateMessage', [messageId, payload]);
     }
 
+    /**
+     * 设置会话级用户设置（scope=31），会话内所有用户（机器人除外）都会收到
+     * key 为 convType-line-target_type 的用户设置变更（服务端 im 新接口）。
+     * @param {object} conversation 会话 {type, target, line}；私聊 target 为对方用户 uid，群聊 target 为 groupId
+     * @param {number} type 设置类型（业务约定：1=状态, 2=权限, 3=模型, 4=推理等级等）
+     * @param {string} value 设置值（JSON 字符串）
+     * @returns {Promise<IMResult>}
+     */
+    async updateConversationUserSetting(conversation, type, value) {
+        return this.invoke('updateConversationUserSetting', [conversation, type, value]);
+    }
+
     // ==================== 用户相关 API ====================
 
     /**

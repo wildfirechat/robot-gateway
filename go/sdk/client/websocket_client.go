@@ -61,6 +61,12 @@ func (c *RobotGatewayClient) Connect() error {
 		return fmt.Errorf("already connected")
 	}
 
+	// 建立新连接之前，先彻底拆除旧连接（重连竞态保护）：关闭并清理，
+	// 避免旧连接迟到的读事件/close 事件干扰新连接。
+	if c.conn != nil {
+		c.teardownLocked()
+	}
+
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
@@ -74,8 +80,8 @@ func (c *RobotGatewayClient) Connect() error {
 	atomic.StoreInt32(&c.isOpen, 1)
 
 	// Start goroutines for reading and writing
-	go c.readLoop()
-	go c.writeLoop()
+	go c.readLoop(conn, c.stopChan)
+	go c.writeLoop(c.stopChan)
 
 	// Notify connection manager
 	if c.connManager != nil {
@@ -83,6 +89,25 @@ func (c *RobotGatewayClient) Connect() error {
 	}
 
 	return nil
+}
+
+// teardownLocked tears down the current connection without notifying the
+// connection manager. The caller must hold c.mu.
+func (c *RobotGatewayClient) teardownLocked() {
+	atomic.StoreInt32(&c.isOpen, 0)
+	c.responseHandler.Clear()
+
+	// Signal close
+	close(c.stopChan)
+
+	if c.conn != nil {
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		c.conn.Close()
+		c.conn = nil
+	}
+
+	// Reset channels
+	c.stopChan = make(chan struct{})
 }
 
 // Reconnect reconnects to the gateway.
@@ -181,24 +206,19 @@ func (c *RobotGatewayClient) send(data []byte) {
 }
 
 // readLoop reads messages from the WebSocket.
-func (c *RobotGatewayClient) readLoop() {
+// conn and stop are captured at connect time so that a stale loop torn down
+// by a reconnect never interferes with the new connection.
+func (c *RobotGatewayClient) readLoop(conn *websocket.Conn, stop <-chan struct{}) {
 	defer func() {
-		c.Close()
+		// 只关闭自己负责的连接：若连接已被重建，迟到的读错误不应关闭新连接
+		c.closeIfCurrent(conn)
 	}()
 
 	for {
 		select {
-		case <-c.stopChan:
+		case <-stop:
 			return
 		default:
-		}
-
-		c.mu.RLock()
-		conn := c.conn
-		c.mu.RUnlock()
-
-		if conn == nil {
-			return
 		}
 
 		_, data, err := conn.ReadMessage()
@@ -213,8 +233,23 @@ func (c *RobotGatewayClient) readLoop() {
 	}
 }
 
+// closeIfCurrent closes the client only if conn is still the current connection.
+func (c *RobotGatewayClient) closeIfCurrent(conn *websocket.Conn) {
+	c.mu.Lock()
+	if c.conn != conn || c.isOpen == 0 {
+		c.mu.Unlock()
+		return
+	}
+	c.teardownLocked()
+	c.mu.Unlock()
+
+	if c.connManager != nil {
+		c.connManager.onDisconnected()
+	}
+}
+
 // writeLoop writes messages to the WebSocket.
-func (c *RobotGatewayClient) writeLoop() {
+func (c *RobotGatewayClient) writeLoop(stop <-chan struct{}) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -245,7 +280,7 @@ func (c *RobotGatewayClient) writeLoop() {
 				}
 			}
 
-		case <-c.stopChan:
+		case <-stop:
 			return
 		}
 	}
@@ -295,7 +330,7 @@ func (c *RobotGatewayClient) handleConnectResponse(msg *protocol.ConnectMessage)
 	} else {
 		c.setAuthenticated(false)
 		if c.connManager != nil {
-			c.connManager.onAuthenticationFailed()
+			c.connManager.onAuthenticationFailed(msg.Msg)
 		}
 		select {
 		case authChan <- false:
@@ -307,28 +342,14 @@ func (c *RobotGatewayClient) handleConnectResponse(msg *protocol.ConnectMessage)
 // Close closes the WebSocket connection.
 func (c *RobotGatewayClient) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.isOpen == 0 {
+		c.mu.Unlock()
 		return
 	}
-
-	atomic.StoreInt32(&c.isOpen, 0)
-	c.responseHandler.Clear()
-
-	// Signal close
-	close(c.stopChan)
-
-	if c.conn != nil {
-		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.conn.Close()
-		c.conn = nil
-	}
+	c.teardownLocked()
+	c.mu.Unlock()
 
 	if c.connManager != nil {
 		c.connManager.onDisconnected()
 	}
-
-	// Reset channels
-	c.stopChan = make(chan struct{})
 }

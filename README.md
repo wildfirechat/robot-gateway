@@ -27,6 +27,7 @@
 - demo 使用客户端SDK的Demo，演示如何使用SDK。
 - openclaw-adapter OpenClaw的转换器，使用客户端SDK，实现了野火IM和OpenClaw的对接。
 - openclaw-plugin OpenClaw的野火IM，使用 js 版客户端SDK，实现了野火IM和OpenClaw的对接，支持会话隔离，文件上传，建议使用。
+- dsh-plugin.js DeepSeek Harness（dsh）的野火IM渠道插件，使用 js 版客户端SDK，把野火IM接入 DSH Agent，支持会话隔离与流式回复，建议使用。
 
 ### 特性
 
@@ -161,6 +162,8 @@ nohup java -jar gateway/target/gateway-1.0.0.jar 2>&1 &
 ### 5. 安装OpenClaw野火IM插件
 
 具体请参考[插件说明](./openclaw-plugin.js/README.md)
+
+> 对接 DeepSeek Harness（dsh）请参考 [dsh-plugin.js](./dsh-plugin.js/README.md) 与 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)
 
 ### 6. 开始使用
 现在，打开野火IM客户端，找到你的机器人（搜索**机器人ID**, 不是名字），开始对话吧！
@@ -513,6 +516,7 @@ robot.connect("机器人ID", "密钥");
 - [ARCHITECTURE.md](ARCHITECTURE.md) - 详细设计文档，包含架构设计、通信协议、技术实现等
 - [BOTFATHER_INTEGRATION.md](BOTFATHER_INTEGRATION.md) - BotFather 功能集成文档，包含自动创建机器人的实现细节
 - [OPENCLAW_INTEGRATION.md](OPENCLAW_INTEGRATION.md) - OpenClaw 适配器集成文档
+- [DSH_INTEGRATION.md](DSH_INTEGRATION.md) - DeepSeek Harness（dsh）集成设计文档
 
 ## 许可证
 MIT。

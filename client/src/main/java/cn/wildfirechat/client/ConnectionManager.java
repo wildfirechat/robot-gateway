@@ -12,6 +12,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -38,6 +39,11 @@ class ConnectionManager {
     private ScheduledExecutorService heartbeatExecutor;
     private ScheduledExecutorService reconnectExecutor;
     private volatile ScheduledFuture<?> reconnectFuture;
+    // 重连去重：同一时刻最多一个重连任务、一个重连定时器（reconnectFuture），
+    // 避免 onDisconnected 被多次触发时开出多个并发重连
+    // （并发连接互相抢鉴权，会触发 "Already authenticated" 并
+    // 让重连被关闭，导致客户端永久假死）。
+    private final AtomicBoolean reconnecting = new AtomicBoolean(false);
     private volatile long lastHeartbeatTime;
     private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
 
@@ -131,21 +137,26 @@ class ConnectionManager {
         // 发送鉴权请求
         CompletableFuture<Boolean> authFuture = new CompletableFuture<>();
 
-        // 注意：这里暂时不保存robotId和robotSecret
-        // 只有鉴权成功后才保存，避免首次鉴权失败触发重连
+        // 发送鉴权请求时即保存鉴权信息（与JS版sendConnect一致）。
+        // 真正的鉴权失败（密钥错误等）会走onAuthenticationFailed清空凭据并停止重连，
+        // 因此提前保存不会导致错误凭据的无限重试；而瞬态失败（"Already authenticated"）
+        // 需要凭据来完成自动重试。
+        this.robotId = robotId;
+        this.robotSecret = secret;
         client.sendConnect(robotId, secret, authFuture);
 
         try {
             boolean result = authFuture.get(timeoutSeconds, TimeUnit.SECONDS);
             if (result) {
-                // 鉴权成功，保存鉴权信息
-                this.robotId = robotId;
-                this.robotSecret = secret;
                 LOG.info("Authentication successful, credentials saved for reconnect");
-            } else {
-                // 鉴权失败，不保存鉴权信息，避免重连
-                LOG.warn("Authentication failed, credentials not saved");
+            } else if (!running) {
+                // 真正的鉴权失败（onAuthenticationFailed已清空凭据并置running=false）
+                LOG.warn("Authentication failed, stop connecting");
                 stop(); // 鉴权失败，停止连接
+            } else {
+                // 瞬态鉴权失败（"Already authenticated"，并发socket竞态），
+                // 重连已由onAuthenticationTransientFailure安排，凭据保留
+                LOG.warn("Authentication transiently failed, reconnect scheduled for retry");
             }
             return result;
         } catch (Exception e) {
@@ -189,6 +200,9 @@ class ConnectionManager {
 
         try {
             LOG.info("Connecting to gateway: {}", gatewayUrl);
+            // 先彻底拆除旧 socket（重连竞态保护），避免旧 socket 迟到的
+            // close/message/auth 事件干扰新连接，触发 "Already authenticated" 竞态
+            teardownClient();
             client.connect();
         } catch (Exception e) {
             LOG.error("Failed to connect: {}", e.getMessage());
@@ -204,24 +218,51 @@ class ConnectionManager {
             return;
         }
 
-        // 检查是否超过最大重试次数
-        if (maxReconnectAttempts > 0 && reconnectAttempts.get() >= maxReconnectAttempts) {
-            LOG.error("Max reconnect attempts ({}) reached, giving up", maxReconnectAttempts);
-            running = false;
-            if (messageHandler != null) {
-                messageHandler.onConnectionChanged(false);
-            }
+        // 防重入：重连进行中，忽略并发触发
+        if (!reconnecting.compareAndSet(false, true)) {
+            LOG.debug("Reconnect already in progress, skip");
             return;
         }
 
-        int currentAttempt = reconnectAttempts.incrementAndGet();
-        LOG.info("Reconnecting to gateway: {} (attempt {})", gatewayUrl, currentAttempt);
-
         try {
-            client.reconnect();
+            // 检查是否超过最大重试次数
+            if (maxReconnectAttempts > 0 && reconnectAttempts.get() >= maxReconnectAttempts) {
+                LOG.error("Max reconnect attempts ({}) reached, giving up", maxReconnectAttempts);
+                running = false;
+                if (messageHandler != null) {
+                    messageHandler.onConnectionChanged(false);
+                }
+                return;
+            }
+
+            int currentAttempt = reconnectAttempts.incrementAndGet();
+            LOG.info("Reconnecting to gateway: {} (attempt {})", gatewayUrl, currentAttempt);
+
+            try {
+                // 先彻底拆除旧 socket（重连竞态保护），避免旧 socket 迟到的
+                // close/message/auth 事件干扰新连接，触发 "Already authenticated" 竞态
+                teardownClient();
+                client.reconnect();
+            } catch (Exception e) {
+                LOG.error("Failed to reconnect: {}", e.getMessage());
+                // 重连失败后的再次调度（scheduleReconnect内有定时器去重）
+                scheduleReconnect();
+            }
+        } finally {
+            reconnecting.set(false);
+        }
+    }
+
+    /**
+     * 拆除当前socket（如果还处于打开/半关闭状态）
+     */
+    private void teardownClient() {
+        try {
+            if (client.isOpen() || client.isClosing()) {
+                client.close();
+            }
         } catch (Exception e) {
-            LOG.error("Failed to reconnect: {}", e.getMessage());
-            scheduleReconnect();
+            LOG.warn("Error tearing down stale socket: {}", e.getMessage());
         }
     }
 
@@ -319,15 +360,16 @@ class ConnectionManager {
                         LOG.info("Auto re-authentication successful");
                     } else {
                         LOG.warn("Auto re-authentication failed");
-                        // 鉴权失败，清空鉴权信息，避免无限重试
-                        robotId = null;
-                        robotSecret = null;
+                        // 鉴权失败的处理已在RobotGatewayClient中区分：
+                        // 真正的鉴权失败（密钥错误等）走onAuthenticationFailed（已清空凭据、停止重连），
+                        // 瞬态失败（"Already authenticated"）走onAuthenticationTransientFailure（保留凭据、已安排重连），
+                        // 这里不再清空鉴权信息，避免瞬态错误导致永久假死
                     }
                 } catch (Exception e) {
                     LOG.error("Auto re-authentication error: {}", e.getMessage(), e);
-                    // 鉴权异常，清空鉴权信息
-                    robotId = null;
-                    robotSecret = null;
+                    // 鉴权异常（如超时）属于瞬态问题，保留凭据，拆除当前socket并安排重连重试
+                    teardownClient();
+                    scheduleReconnect();
                 }
             }, "ReAuthThread").start();
         }
@@ -367,6 +409,23 @@ class ConnectionManager {
         if (messageHandler != null) {
             messageHandler.onConnectionChanged(false);
         }
+    }
+
+    /**
+     * 处理瞬态鉴权失败（"Already authenticated"）
+     * 这是并发 socket 竞态的瞬态错误，不是真正的鉴权失败（密钥错误）：
+     * 保留鉴权信息、不停止自动重连，拆除当前 socket 并安排一次（去重后的）重连，
+     * 等服务端清理掉旧的连接后再重新鉴权。
+     * @param msg 服务端返回的失败消息
+     */
+    public void onAuthenticationTransientFailure(String msg) {
+        LOG.warn("Transient authentication failure ({}), keeping credentials and scheduling reconnect", msg);
+        authenticated = false;
+
+        // 拆除当前 socket，其onClose会触发onDisconnected安排重连；
+        // 这里再兜底安排一次（scheduleReconnect内有定时器去重，只保留一个重连任务）
+        teardownClient();
+        scheduleReconnect();
     }
 
     /**
@@ -499,6 +558,13 @@ class ConnectionManager {
 
                 // 发送心跳（这里不需要响应，只是保活）
                 CompletableFuture<ResponseMessage> future = client.sendRequest("heartbeat", null);
+                // 必须吞掉异步失败：请求会一直挂起直到下一个响应，断线时
+                // ResponseHandler.clear() 会以异常完成该future，
+                // 未观察的异常不应影响宿主进程
+                future.exceptionally(e -> {
+                    LOG.warn("Heartbeat request failed: {}", e.getMessage());
+                    return null;
+                });
                 lastHeartbeatTime = System.currentTimeMillis();
 
                 // 心跳不期望响应，只是保活

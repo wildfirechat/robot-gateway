@@ -23,6 +23,12 @@ export class RobotGatewayClient {
         this.heartbeatInterval = options.heartbeatInterval || 270000; // 4.5分钟
         this.heartbeatTimer = null;
         this.shouldReconnect = false;
+        // 重连去重：同一时刻最多一个重连任务、一个重连定时器，
+        // 避免 handleDisconnect 被多次触发时开出多个并发 WebSocket
+        // （并发 socket 互相抢鉴权，会触发 "Already authenticated" 并
+        // 让 shouldReconnect 被置 false，导致客户端永久假死）。
+        this._reconnecting = false;
+        this._reconnectTimer = null;
         
         // 鉴权信息
         this.robotId = null;
@@ -42,6 +48,19 @@ export class RobotGatewayClient {
     connect() {
         return new Promise((resolve, reject) => {
             try {
+                // 先彻底拆除旧 socket（重连竞态保护）：移除监听并关闭，
+                // 否则旧 socket 的迟到事件（close/message/auth）会与
+                // 新 socket 互相干扰，触发 "Already authenticated" 竞态。
+                if (this.ws) {
+                    this.ws.removeAllListeners();
+                    try {
+                        this.ws.terminate();
+                    } catch (e) {
+                        /* ignore */
+                    }
+                    this.ws = null;
+                }
+
                 this.ws = new WebSocket(this.gatewayUrl);
 
                 this.ws.on('open', () => {
@@ -185,7 +204,31 @@ export class RobotGatewayClient {
         } else {
             this.authenticated = false;
             console.error('Authentication failed:', json.msg);
-            this.shouldReconnect = false; // 鉴权失败不重连
+            // "Already authenticated" 是并发 socket 竞态的瞬态错误，不是真正的
+            // 鉴权失败（密钥错误）。瞬态错误绝不关闭自动重连，否则网关重启后
+            // 客户端会永久假死。做法：拆除当前 socket 并安排一次重连，等服务端
+            // 清理掉旧的连接后再重新鉴权。
+            const transient = String(json.msg || '').includes('Already authenticated');
+            if (transient) {
+                this.shouldReconnect = true;
+                this.connected = false;
+                if (this.ws) {
+                    this.ws.removeAllListeners();
+                    try {
+                        this.ws.terminate();
+                    } catch (e) {
+                        /* ignore */
+                    }
+                    this.ws = null;
+                }
+                if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = setTimeout(() => {
+                    this._reconnectTimer = null;
+                    this.reconnect();
+                }, this.reconnectInterval);
+                return;
+            }
+            this.shouldReconnect = false; // 真正的鉴权失败（密钥错误等）不重连
             if (this.onAuthFailed) {
                 this.onAuthFailed(json.code, json.msg);
             }
@@ -214,9 +257,11 @@ export class RobotGatewayClient {
             this.onDisconnected();
         }
 
-        // 自动重连
+        // 自动重连（定时器去重：多次 handleDisconnect 只安排一个重连任务）
         if (this.shouldReconnect && this.robotId && this.robotSecret) {
-            setTimeout(() => {
+            if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = setTimeout(() => {
+                this._reconnectTimer = null;
                 this.reconnect();
             }, this.reconnectInterval);
         }
@@ -226,6 +271,8 @@ export class RobotGatewayClient {
      * 重新连接
      */
     async reconnect() {
+        if (this._reconnecting) return; // 重连进行中，忽略并发触发
+        this._reconnecting = true;
         console.log('Attempting to reconnect...');
         try {
             await this.connect();
@@ -233,9 +280,13 @@ export class RobotGatewayClient {
         } catch (error) {
             console.error('Reconnect failed:', error.message);
             // 重连失败，继续尝试
-            setTimeout(() => {
+            if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = setTimeout(() => {
+                this._reconnectTimer = null;
                 this.reconnect();
             }, this.reconnectInterval);
+        } finally {
+            this._reconnecting = false;
         }
     }
 
@@ -246,7 +297,13 @@ export class RobotGatewayClient {
         this.heartbeatTimer = setInterval(() => {
             if (this.authenticated) {
                 try {
-                    this.sendRequest('heartbeat');
+                    // Must swallow the rejection: the request stays pending until
+                    // the next response, and on disconnect ResponseHandler.clearAll()
+                    // rejects it — an unhandled rejection crashes the host process
+                    // (dsh fail-loud exits on unhandledRejection).
+                    this.sendRequest('heartbeat').catch((error) => {
+                        console.error('Failed to send heartbeat:', error.message);
+                    });
                 } catch (error) {
                     console.error('Failed to send heartbeat:', error.message);
                 }
@@ -270,8 +327,17 @@ export class RobotGatewayClient {
     close() {
         this.shouldReconnect = false;
         this.stopHeartbeat();
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
         if (this.ws) {
-            this.ws.close();
+            this.ws.removeAllListeners();
+            try {
+                this.ws.close();
+            } catch (e) {
+                /* ignore */
+            }
             this.ws = null;
         }
     }

@@ -73,6 +73,11 @@ class RobotGatewayClient:
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
+        # 重连去重：同一时刻最多一个进行中的重连任务、一个已排程的重连
+        # 定时器，避免断线处理被多次触发时开出多个并发 WebSocket（并发
+        # socket 互相抢鉴权，触发服务端 "Already authenticated" 错误，
+        # 进而让自动重连被永久关闭，客户端假死）。
+        self._reconnecting = False
         self._connect_event = asyncio.Event()
         self._auth_event = asyncio.Event()
         self._auth_result = ConnectResult(success=False)
@@ -160,6 +165,9 @@ class RobotGatewayClient:
         # Cancel any stale background tasks from a previous connection so we
         # never end up with two recv loops calling recv() on the same socket.
         await self._cancel_tasks()
+        # 建立新连接之前先彻底拆除旧连接（重连竞态保护）：关闭旧 ws 并清理
+        # 引用，避免旧连接迟到的 close/消息事件干扰新连接的鉴权。
+        await self._close_ws()
 
         self._connect_event.clear()
         self._auth_event.clear()
@@ -264,7 +272,15 @@ class RobotGatewayClient:
                 logger.info("Authenticated with robot-gateway as %s", self.robot_id)
             else:
                 logger.error("Authentication failed: %s", self._auth_result.message)
-                self._running = False
+                # "Already authenticated" 是并发连接竞态的瞬态错误，不是真正的
+                # 鉴权失败（密钥错误）。瞬态错误绝不停止自动重连，否则客户端会
+                # 永久假死：拆除当前连接并安排一次（去重后的）重连，等服务端
+                # 清理掉旧连接后再重新鉴权。
+                if "Already authenticated" in self._auth_result.message:
+                    await self._close_ws()
+                    self._schedule_reconnect()
+                    return
+                self._running = False  # 真正的鉴权失败（密钥错误等）不重连
             return
 
         if msg_type == "heartbeat":
@@ -314,7 +330,17 @@ class RobotGatewayClient:
                 break
 
     def _schedule_reconnect(self, delay: float | None = None) -> None:
-        self._cancel_reconnect()
+        # 定时器去重：取消还在等待的定时器，多次触发只保留一个排程任务。
+        # 正在建立连接的重连任务不取消（防重入由 _reconnecting 入口守卫保证），
+        # 这里仍允许新排一个定时器——它触发时会因 _reconnecting 被忽略，
+        # 而若进行中的重连被瞬态的 "Already authenticated" 打断，这个定时器
+        # 就是下一次重试，不会被丢掉。
+        if (
+            self._reconnect_task is not None
+            and not self._reconnect_task.done()
+            and not self._reconnecting
+        ):
+            self._reconnect_task.cancel()
         self._reconnect_task = asyncio.create_task(
             self._reconnect_after_delay(delay), name="wf-reconnect"
         )
@@ -322,11 +348,18 @@ class RobotGatewayClient:
     def _cancel_reconnect(self) -> None:
         if self._reconnect_task is not None and not self._reconnect_task.done():
             self._reconnect_task.cancel()
+        self._reconnect_task = None
 
     async def _reconnect_after_delay(self, delay: float | None = None) -> None:
         await asyncio.sleep(delay if delay is not None else self.reconnect_interval)
-        if self._running and not self.is_connected:
+        # 防重入：重连进行中忽略并发触发
+        if not self._running or self.is_connected or self._reconnecting:
+            return
+        self._reconnecting = True
+        try:
             await self._connect_and_auth()
+        finally:
+            self._reconnecting = False
 
     async def _close_ws(self) -> None:
         ws = self._ws

@@ -101,7 +101,19 @@ class RobotGatewayClient extends WebSocketClient {
                 authFuture.complete(true);
             } else {
                 LOG.error("Authentication failed: {}", msg.getMsg());
-                // 鉴权失败，通知ConnectionManager清空鉴权信息
+                // "Already authenticated" 是并发 socket 竞态的瞬态错误，不是真正的
+                // 鉴权失败（密钥错误）。瞬态错误绝不关闭自动重连，否则网关重启后
+                // 客户端会永久假死。做法：保留鉴权信息，拆除当前 socket 并安排一次
+                // （去重后的）重连，等服务端清理掉旧的连接后再重新鉴权。
+                if (msg.getMsg() != null && msg.getMsg().contains("Already authenticated")) {
+                    authFuture.complete(false);
+                    authFuture = null;
+                    if (connectionManager != null) {
+                        connectionManager.onAuthenticationTransientFailure(msg.getMsg());
+                    }
+                    return;
+                }
+                // 真正的鉴权失败（密钥错误等），通知ConnectionManager清空鉴权信息并停止重连
                 if (connectionManager != null) {
                     connectionManager.onAuthenticationFailed();
                 }

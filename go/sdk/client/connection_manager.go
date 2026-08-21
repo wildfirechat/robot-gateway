@@ -1,6 +1,7 @@
 package client
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,14 @@ type ConnectionManager struct {
 	authenticated int32
 	robotID       string
 	robotSecret   string
+
+	// 重连去重：同一时刻最多一个重连任务、一个重连定时器，
+	// 避免断线处理被多次触发时开出多个并发 WebSocket
+	// （并发 socket 互相抢鉴权，会触发服务端 "Already authenticated"
+	// 并让自动重连被关闭，导致客户端永久假死）。
+	reconnecting   int32
+	reconnectTimer *time.Timer
+	reconnectMu    sync.Mutex
 	
 	// Configuration
 	reconnectInterval time.Duration
@@ -78,6 +87,15 @@ func (cm *ConnectionManager) Stop() {
 	cm.clearCredentials()
 
 	cm.stopHeartbeat()
+
+	// 清理重连定时器
+	cm.reconnectMu.Lock()
+	if cm.reconnectTimer != nil {
+		cm.reconnectTimer.Stop()
+		cm.reconnectTimer = nil
+	}
+	cm.reconnectMu.Unlock()
+
 	cm.client.Close()
 }
 
@@ -179,7 +197,14 @@ func (cm *ConnectionManager) reconnect() {
 		return
 	}
 
+	// 重连入口防重入：重连进行中忽略并发触发
+	if !atomic.CompareAndSwapInt32(&cm.reconnecting, 0, 1) {
+		return
+	}
+	defer atomic.StoreInt32(&cm.reconnecting, 0)
+
 	if err := cm.client.Reconnect(); err != nil {
+		// 重连失败后的再次调度同样走定时器去重
 		cm.scheduleReconnect()
 	}
 }
@@ -189,12 +214,23 @@ func (cm *ConnectionManager) scheduleReconnect() {
 		return
 	}
 
-	go func() {
-		time.Sleep(cm.reconnectInterval)
+	cm.reconnectMu.Lock()
+	defer cm.reconnectMu.Unlock()
+
+	// 定时器去重：多次触发只保留一个重连任务
+	if cm.reconnectTimer != nil {
+		return
+	}
+
+	cm.reconnectTimer = time.AfterFunc(cm.reconnectInterval, func() {
+		cm.reconnectMu.Lock()
+		cm.reconnectTimer = nil
+		cm.reconnectMu.Unlock()
+
 		if cm.IsRunning() && !cm.IsConnected() {
 			cm.reconnect()
 		}
-	}()
+	})
 }
 
 func (cm *ConnectionManager) onConnected() {
@@ -231,8 +267,19 @@ func (cm *ConnectionManager) onAuthenticated() {
 	}
 }
 
-func (cm *ConnectionManager) onAuthenticationFailed() {
-	// Clear credentials to prevent infinite retry
+func (cm *ConnectionManager) onAuthenticationFailed(msg string) {
+	// "Already authenticated" 是并发连接竞态的瞬态错误，不是真正的鉴权失败
+	// （密钥错误）。瞬态错误绝不关闭自动重连，否则网关重启后客户端会永久
+	// 假死。做法：保持自动重连开启，拆除当前连接并安排一次（去重后的）重连，
+	// 等服务端清理掉旧的连接后再重新鉴权。
+	if strings.Contains(msg, "Already authenticated") {
+		atomic.StoreInt32(&cm.authenticated, 0)
+		cm.client.Close()
+		cm.scheduleReconnect()
+		return
+	}
+
+	// 真正的鉴权失败（密钥错误等）：清除凭据并停止重连
 	cm.clearCredentials()
 	atomic.StoreInt32(&cm.authenticated, 0)
 	atomic.StoreInt32(&cm.running, 0)
