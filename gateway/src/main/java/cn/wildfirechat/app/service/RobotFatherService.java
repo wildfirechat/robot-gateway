@@ -123,7 +123,7 @@ public class RobotFatherService {
             // 构建会话（私聊）
             Conversation conversation = new Conversation();
             conversation.setType(0); // 私聊
-            conversation.setLine(0);
+            conversation.setLine(botFatherConfig.getAiLine()); // AI消息使用配置的line（默认2）
             conversation.setTarget(userId); // 发送给创建者
 
             // 构建消息内容

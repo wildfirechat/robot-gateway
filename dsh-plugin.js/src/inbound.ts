@@ -18,7 +18,7 @@ import {
   MessageContentMediaType,
 } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
-import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConfig, getWhitelistConfig } from "./config.js";
+import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConfig, getWhitelistConfig, getAiLine } from "./config.js";
 import { getClient } from "./clients.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
@@ -147,7 +147,7 @@ export async function handleIncomingMessage(
   const data = message?.data;
   if (!data) return;
   const sender: string = data.sender;
-  const conv = data.conv;
+  let conv = data.conv;
   const payload = data.payload;
   if (!sender || !conv || !payload) return;
 
@@ -195,6 +195,29 @@ export async function handleIncomingMessage(
     return;
   }
 
+  // AI line 归一化：无论消息来自哪条线路（普通消息 line 0、朋友圈 line 1 等），
+  // 都【正常进入 AI 处理，不丢弃】；回复统一通过 AI line（默认 2）发出
+  // （sendDirectReply / sendStreamingReply / 媒体消息已按 AI line 发送）。
+  // 同时给用户发一条提醒（发到原消息所在线路），引导去 AI line 查看回复。
+  const aiLine = getAiLine(config);
+  if (conv.line !== aiLine) {
+    api.logger?.info?.(
+      `[wildfire] message from non-AI line: line=${conv.line}, aiLine=${aiLine}, sender=${sender}, convTarget=${conv.target}, processing normally (reply via AI line)`
+    );
+    try {
+      await sendDirectReply(
+        sender,
+        { type: conv.type, target: conv.target, line: conv.line },
+        `AI回复将通过线路${aiLine}回复`,
+        api,
+        conv.line // 提醒发到原消息所在线路
+      );
+    } catch (e: any) {
+      api.logger?.warn?.(`[wildfire] AI-line notice failed: ${e?.message ?? e}`);
+    }
+    conv = { ...conv, line: aiLine };
+  }
+
   // Whitelist (owner + static + dynamic /allow list).
   const whitelist: WhitelistFilter = api.whitelist ?? new WhitelistFilter(config);
   if (!whitelist.shouldProcess(String(sender), String(conv.target), isGroup)) {
@@ -218,7 +241,7 @@ export async function handleIncomingMessage(
   }
 
   // Remember the conversation target for interactive seams (ask_user / approval).
-  api.interactions?.remember(key, String(sender), { type: conv.type, target: String(conv.target), line: conv.line });
+  api.interactions?.remember(key, String(sender), { type: conv.type, target: String(conv.target), line: getAiLine(api.config) });
 
   // Structured DSH replies (201 DSH_Answer / 203 DSH_ApprovalResult).
   if (isDshType) {
@@ -446,7 +469,7 @@ export async function handleIncomingMessage(
 
     // Immediate placeholder so the client shows a waiting state.
     try {
-      await sendStreamingReply(sender, conv, streaming.initialPlaceholder, streamId, "generating", logger);
+      await sendStreamingReply(sender, conv, streaming.initialPlaceholder, streamId, "generating", logger, getAiLine(config));
     } catch (e: any) {
       logger?.warn?.(`[wildfire] placeholder failed: ${e.message}`);
     }
@@ -454,7 +477,7 @@ export async function handleIncomingMessage(
     const stream = new ThrottledStream(
       async (fullText: string) => {
         if (fullText.includes("NO_REPLY")) return;
-        await sendStreamingReply(sender, conv, fullText, streamId, "generating", logger);
+        await sendStreamingReply(sender, conv, fullText, streamId, "generating", logger, getAiLine(config));
       },
       streaming.throttleMs
     );
@@ -501,17 +524,17 @@ export async function handleIncomingMessage(
     // 占位；完全无产出（无文本且无媒体）→ 发送"生成取消"(17)，客户端显示取消态，
     // 不再把 "(no response)" 当作正常完成消息发出。
     if (finalText.trim()) {
-      await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
+      await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger, getAiLine(config));
     } else if (extracted?.media?.length) {
-      await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
+      await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger, getAiLine(config));
     } else {
-      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
+      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger, getAiLine(config));
     }
   } catch (err: any) {
     logger?.error?.(`[wildfire] dispatch failed: ${err.message}\n${err.stack?.slice(0, 1200) ?? ""}`);
     try {
       const errorText = `Processing failed: ${err.message.slice(0, 80)}`;
-      await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger);
+      await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger, getAiLine(config));
     } catch {
       // ignore secondary send errors
     }
@@ -542,7 +565,7 @@ async function sendOutboundMedia(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    line: conv.line,
+    line: getAiLine(api?.config ?? {}), // 媒体消息也走 AI line（默认 2）
   };
 
   for (const item of mediaList) {
@@ -1873,7 +1896,8 @@ async function sendStreamingReply(
   text: string,
   streamId: string,
   state: "generating" | "completed" | "cancelled",
-  logger?: any
+  logger?: any,
+  aiLine?: number
 ): Promise<void> {
   const client = getClient();
   if (!client) throw new Error("Wildfire client not connected");
@@ -1881,7 +1905,7 @@ async function sendStreamingReply(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    line: conv.line,
+    line: aiLine ?? conv.line, // AI 回复统一使用 AI line（默认 2）
   };
 
   let payload: any;
@@ -1920,7 +1944,8 @@ async function sendDirectReply(
   sender: string,
   conv: { type: number; target: string; line: number },
   text: string,
-  api?: any
+  api?: any,
+  targetLine?: number
 ): Promise<void> {
   const client = getClient();
   if (!client) throw new Error("Wildfire client not connected");
@@ -1928,7 +1953,8 @@ async function sendDirectReply(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    line: conv.line,
+    // 默认走 AI line；提醒等场景可显式指定目标线路（如 line 0）
+    line: targetLine ?? getAiLine(api?.config ?? {}),
   };
   const content = new TextMessageContent();
   content.content = text;

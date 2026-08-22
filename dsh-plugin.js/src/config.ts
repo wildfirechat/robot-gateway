@@ -185,6 +185,11 @@ export interface WildfireConfig {
   robotId?: string;
   /** Wildfire robot secret */
   robotSecret?: string;
+  /**
+   * AI 消息使用的 line（默认 2）。收到消息后，所有回复（文本/流式/卡片/媒体）
+   * 都发送到该 line 上，与普通消息（line 0）、朋友圈（line 1）隔离。
+   */
+  aiLine?: number;
   /** Optional ASR endpoint; voice messages are transcribed before dispatch. */
   asrServer?: string;
   /** Group chats: require @mention (or question/keyword) to trigger. Default false = every group message triggers. */
@@ -220,6 +225,11 @@ export function validateConfig(config: WildfireConfig): string | null {
   if (!config.robotId) return "robotId is required";
   if (!config.robotSecret) return "robotSecret is required";
   return null;
+}
+
+/** Effective AI line for outbound replies. Default 2. */
+export function getAiLine(config: WildfireConfig): number {
+  return config.aiLine ?? 2;
 }
 
 /** Effective whitelist settings with defaults applied. */

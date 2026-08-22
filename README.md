@@ -86,6 +86,7 @@ insert into t_robot (`_uid`,`_owner`,`_secret`,`_callback`,`_state`,`_dt`) value
 | botfather.admin.secret | IM服务API密钥        | -                      |
 | botfather.callbackUrl  | 机器人回调地址          | -                      |
 | botfather.publicAddr   | 网关公网地址           | -                      |
+| botfather.aiLine       | AI消息使用的line（欢迎语）| 2                     |
 
 配置示例：
 

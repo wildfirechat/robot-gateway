@@ -29,6 +29,9 @@ public class BotFatherConfig {
     // 每个用户最大机器人数量（默认1）
     private int maxRobotsPerUser = 1;
 
+    // AI消息使用的line（默认2，普通消息line为0，朋友圈为1）
+    private int aiLine = 2;
+
     // Getters and Setters
 
     public boolean isEnabled() {
@@ -77,6 +80,14 @@ public class BotFatherConfig {
 
     public void setMaxRobotsPerUser(int maxRobotsPerUser) {
         this.maxRobotsPerUser = maxRobotsPerUser;
+    }
+
+    public int getAiLine() {
+        return aiLine;
+    }
+
+    public void setAiLine(int aiLine) {
+        this.aiLine = aiLine;
     }
 
     /**

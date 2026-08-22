@@ -7,7 +7,7 @@
 
 import { startClient, stopClient, getConnectedClient, isClientConnected } from "./clients.js";
 import { turnOwners } from "./inbound.js";
-import { getConfig, getSessionConfig, validateConfig } from "./config.js";
+import { getConfig, getSessionConfig, getAiLine, validateConfig } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { AgentSessionManager } from "./agent.js";
 import { WorkspaceResolver } from "./workspace.js";
@@ -123,7 +123,7 @@ export function apply(ctx: any, config: any): void {
           const conversation = {
             type: target.conv.type,
             target: target.conv.type === 0 ? target.sender : target.conv.target,
-            line: target.conv.line,
+            line: getAiLine(cfg), // AI 回复统一使用 AI line（默认 2）
           };
           const result = await client.sendMessage(conversation, content.encode());
           if (!result?.isSuccess?.()) {
@@ -143,7 +143,7 @@ export function apply(ctx: any, config: any): void {
           const conversation = {
             type: target.conv.type,
             target: target.conv.type === 0 ? target.sender : target.conv.target,
-            line: target.conv.line,
+            line: getAiLine(cfg), // AI 卡片统一使用 AI line（默认 2）
           };
           const result = await client.sendMessage(conversation, payload);
           if (!result?.isSuccess?.()) {
@@ -170,8 +170,8 @@ export function apply(ctx: any, config: any): void {
           // user; group → target = groupId. type=1 = 状态 (business convention).
           const conversation =
             target.conv.type === 0
-              ? { type: 0, target: target.sender, line: 0 }
-              : { type: target.conv.type, target: target.conv.target, line: target.conv.line };
+              ? { type: 0, target: target.sender, line: getAiLine(cfg) }
+              : { type: target.conv.type, target: target.conv.target, line: getAiLine(cfg) };
           const result = await client.updateConversationUserSetting(
             conversation,
             1,
