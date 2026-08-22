@@ -220,10 +220,11 @@ export function apply(ctx: any, config: any): void {
       // web profile the Host apiproxy has already claimed the userQuestions
       // provider, and registering first would crash ITS activation instead.
       api.interactions.register(ctx);
-      // Load persisted state (workspace bindings + dynamic allowlist + DSH registry).
+      // Load persisted state (workspace bindings + dynamic allowlist + DSH registry + session epochs).
       await api.workspace.init();
       await api.whitelist.init();
       await api.registry.init();
+      await api.wildfireAgents.init();
 
       // Connect with retry: the gateway may be briefly down (restart, network).
       // The SDK auto-reconnects once connected; a failed FIRST connect needs

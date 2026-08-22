@@ -85,10 +85,14 @@ class ThrottledStream {
     }, wait);
   }
 
+  /**
+   * 野火流式协议是【全量】语义：客户端按 streamId 用新消息整体替换旧消息，
+   * 所以每次发送的必须是到当前为止的全部文本（不能是增量），否则客户端
+   * 覆盖后只剩最后一段。这里发送全量累积，fullText 保留不清空。
+   */
   private async flushNow(): Promise<void> {
     if (!this.fullText) return;
     const text = this.fullText;
-    this.fullText = "";
     this.lastFlush = Date.now();
     await this.flush(text);
   }
@@ -100,6 +104,7 @@ class ThrottledStream {
       this.timer = undefined;
     }
     await this.flushNow();
+    this.fullText = "";
   }
 }
 
@@ -472,14 +477,15 @@ export async function handleIncomingMessage(
     );
     await stream.finish();
 
-    let finalText = outcome.text || "(no response)";
+    let finalText = outcome.text ?? "";
     logger.info?.(
-      `[wildfire] turn finished: key=${key}, text="${finalText.slice(0, 100)}", reason=${JSON.stringify(outcome.reason)?.slice(0, 300)}, sending reply`
+      `[wildfire] turn finished: key=${key}, text="${finalText.slice(0, 100) || "(empty)"}", reason=${JSON.stringify(outcome.reason)?.slice(0, 300)}, sending reply`
     );
 
     // Outbound media: extract [image:path] / [media:path] markers and send them.
+    let extracted: ReturnType<typeof extractOutboundMedia> | undefined;
     if (getMediaConfig(config).outboundEnabled) {
-      const extracted = extractOutboundMedia(finalText);
+      extracted = extractOutboundMedia(finalText);
       if (extracted.media.length > 0) {
         // Fence: only files inside the conversation workspace or the
         // configured allowedRoots may leave the machine.
@@ -490,16 +496,17 @@ export async function handleIncomingMessage(
         finalText = extracted.text.trim();
       }
     }
-    // Always finalize the stream: without the completed message the client
-    // keeps showing the typing state forever (media-only replies included).
-    await sendStreamingReply(
-      sender,
-      conv,
-      finalText || "📎",
-      streamId,
-      "completed",
-      logger
-    );
+    // Always finalize the stream: without the terminal message the client
+    // keeps showing the typing state forever. 有媒体产出但无正文 → completed 兜底
+    // 占位；完全无产出（无文本且无媒体）→ 发送"生成取消"(17)，客户端显示取消态，
+    // 不再把 "(no response)" 当作正常完成消息发出。
+    if (finalText.trim()) {
+      await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
+    } else if (extracted?.media?.length) {
+      await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
+    } else {
+      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
+    }
   } catch (err: any) {
     logger?.error?.(`[wildfire] dispatch failed: ${err.message}\n${err.stack?.slice(0, 1200) ?? ""}`);
     try {
@@ -1497,6 +1504,8 @@ async function bindWorkspacePath(
     workspace.setOverride(key, canon);
     await agents.resetSession(key);
     api.logger?.info?.(`[wildfire] /cwd bound: key=${key} -> ${canon}`);
+    // 群聊：把群名改成目录的最后一段名字（/a/b/c → 群名 c）
+    await renameGroupToDirname(api, conv, canon);
     await sendDirectReply(sender, conv, `${label} 工作目录已绑定: ${canon}（已持久化，会话上下文已重置）`, api);
     return;
   }
@@ -1542,6 +1551,8 @@ async function bindWorkspacePath(
     workspace.setOverride(key, info.resolved);
     await agents.resetSession(key);
     api.logger?.info?.(`[wildfire] /cwd created+bound: key=${key} -> ${info.resolved}`);
+    // 群聊：把群名改成目录的最后一段名字
+    await renameGroupToDirname(api, conv, info.resolved);
     await sendDirectReply(sender, conv, `${label} 目录已创建并绑定: ${info.resolved}（已持久化，会话上下文已重置）`, api);
     return;
   }
@@ -1556,6 +1567,35 @@ async function bindWorkspacePath(
     return;
   }
   await sendDirectReply(sender, conv, `未识别选择，已取消: ${info.resolved}`, api);
+}
+
+/**
+ * Group chats only: rename the IM group to the last path segment of the bound
+ * workspace directory (`/a/b/c` → group name `c`). The robot is the group
+ * owner (it created the group), so it may modify the group info. Best effort —
+ * a rename failure is logged and never fails the `/cwd` flow.
+ */
+async function renameGroupToDirname(
+  api: any,
+  conv: { type: number; target: string; line: number },
+  dir: string
+): Promise<void> {
+  if (conv.type !== CONV_TYPE_GROUP) return; // 仅群聊有群名
+  const client = getClient();
+  if (!client) return;
+  const name = path.basename(dir);
+  if (!name || name === "/" || name === ".") return;
+  try {
+    // ModifyGroupInfoType.Modify_Group_Name = 0
+    const result = await client.modifyGroupInfo(String(conv.target), 0, name);
+    api.logger?.info?.(
+      `[wildfire] group renamed: ${conv.target} -> "${name}", success=${result?.isSuccess?.()}`
+    );
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[wildfire] group rename failed for ${conv.target}: ${err?.message ?? String(err)}`
+    );
+  }
 }
 
 /** Human-readable file size. */
@@ -1832,7 +1872,7 @@ async function sendStreamingReply(
   conv: { type: number; target: string; line: number },
   text: string,
   streamId: string,
-  state: "generating" | "completed",
+  state: "generating" | "completed" | "cancelled",
   logger?: any
 ): Promise<void> {
   const client = getClient();
@@ -1850,6 +1890,15 @@ async function sendStreamingReply(
     generating.text = text;
     generating.streamId = streamId;
     payload = generating.encode();
+  } else if (state === "cancelled") {
+    // 流式文本取消消息（type=20）：生成无产出/失败时发送，客户端按 streamId
+    // 删除 generating(14)/generated(15) 气泡。server-sdk 无对应类，直接构造 payload。
+    // 注：17 已被接龙 Collection 占用，取消消息用 20（与多端协议一致）。
+    payload = {
+      type: 20,
+      searchableContent: text || "生成已取消",
+      content: streamId,
+    };
   } else {
     const generated = new StreamingTextGeneratedMessageContent();
     generated.text = text;
@@ -1859,7 +1908,7 @@ async function sendStreamingReply(
 
   const result = await client.sendMessage(conversation, payload);
   logger?.info?.(
-    `[wildfire] sendStreamingReply(${state}) sent: textLen=${text.length}, success=${result?.isSuccess?.()}${result?.getMsg?.() ? `, msg=${result.getMsg()}` : ""}`
+    `[wildfire] sendStreamingReply(${state}) sent: stream=${streamId.slice(-8)}, textLen=${text.length}, success=${result?.isSuccess?.()}${result?.getMsg?.() ? `, msg=${result.getMsg()}` : ""}`
   );
   if (!result.isSuccess()) {
     throw new Error(result.getMsg?.() ?? "send failed");

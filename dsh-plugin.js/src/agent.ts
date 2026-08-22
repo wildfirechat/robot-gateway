@@ -14,6 +14,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import path from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
@@ -97,6 +100,54 @@ export class AgentSessionManager {
   private sessionIdToKey = new Map<string, string>();
   private sweepTimer: NodeJS.Timeout | undefined;
   private disposed = false;
+  // epoch 持久化：epoch 递增由 /cwd 切换、reset、resume 失败触发，落盘后
+  // 进程重启不再归零 —— 否则重启后从 epoch 0 重新 resume 旧 cwd 的日志，
+  // 会撞上"同一 sessionId 已持久化在不同 cwd"的 id collision。
+  private epochFile = "";
+  private epochSaveTimer: NodeJS.Timeout | undefined;
+  private epochLoaded = false;
+
+  /** Load persisted session epochs (call once at startup). */
+  async init(): Promise<void> {
+    if (this.epochLoaded) return;
+    this.epochLoaded = true;
+    this.epochFile = path.join(homedir(), ".dsh", "wildfire-sessions.json");
+    try {
+      const raw = await readFile(this.epochFile, "utf8");
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object" && data.epochs) {
+        for (const [key, ep] of Object.entries<number>(data.epochs)) {
+          this.epochs.set(key, ep);
+        }
+        this.logger?.info?.(
+          `[wildfire-agent] loaded ${this.epochs.size} persisted session epochs from ${this.epochFile}`
+        );
+      }
+    } catch (err: any) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.logger?.warn?.(`[wildfire-agent] failed to load session epochs: ${err.message}`);
+      }
+    }
+  }
+
+  /** Persist epochs to disk (debounced). */
+  private persistEpochs(): void {
+    if (this.epochSaveTimer) return;
+    this.epochSaveTimer = setTimeout(() => {
+      this.epochSaveTimer = undefined;
+      this.flushEpochs().catch(() => {});
+    }, 500);
+  }
+
+  /** Write the epoch map now (debounce flush / plugin stop). */
+  async flushEpochs(): Promise<void> {
+    if (!this.epochFile) return;
+    await mkdir(path.dirname(this.epochFile), { recursive: true });
+    await writeFile(
+      this.epochFile,
+      JSON.stringify({ epochs: Object.fromEntries(this.epochs) }, null, 2)
+    );
+  }
 
   constructor(
     ctx: any,
@@ -135,8 +186,8 @@ export class AgentSessionManager {
    * agent is created with the workspace resolved by `cwdProvider`.
    */
   async getAgent(key: string): Promise<any> {
-    const epoch = this.epochs.get(key) ?? 0;
-    const sessionId = sessionIdForConversation(key, epoch);
+    let epoch = this.epochs.get(key) ?? 0;
+    let sessionId = sessionIdForConversation(key, epoch);
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.lastActivity = Date.now();
@@ -194,21 +245,46 @@ export class AgentSessionManager {
       if (message.includes("not found")) {
         handle = await agents.create(createOptions);
       } else {
-        // Resume failed for another reason (corrupt/torn log, incompatible
-        // metadata, ...). Creating with the SAME deterministic id would
-        // collide with the damaged on-disk log, so bump the epoch and create
-        // under a fresh id — the old log is abandoned.
+        // Resume failed for another reason (corrupt/torn log, cwd mismatch, ...).
+        // Bump the epoch and create under a fresh id; the deterministic id may
+        // already be persisted at a different cwd (id collision), so keep
+        // bumping until create succeeds (bounded).
         this.logger?.warn?.(
           `[wildfire-agent] resume failed for ${sessionId}, bumping epoch & creating fresh: ${message}`
         );
-        const nextEpoch = (this.epochs.get(key) ?? 0) + 1;
-        this.epochs.set(key, nextEpoch);
-        const freshSessionId = sessionIdForConversation(key, nextEpoch);
-        const freshOptions = {
-          ...createOptions,
-          sessionId: SessionId(freshSessionId),
-        };
-        handle = await agents.create(freshOptions);
+        let created = false;
+        let attempts = 0;
+        while (!created && attempts < 20) {
+          attempts += 1;
+          const nextEpoch = (this.epochs.get(key) ?? 0) + 1;
+          this.epochs.set(key, nextEpoch);
+          const freshSessionId = sessionIdForConversation(key, nextEpoch);
+          const freshOptions = {
+            ...createOptions,
+            sessionId: SessionId(freshSessionId),
+          };
+          try {
+            handle = await agents.create(freshOptions);
+            created = true;
+          } catch (createErr: any) {
+            const m = String(createErr?.message ?? createErr);
+            if (m.includes("collision") || m.includes("persisted")) {
+              this.logger?.warn?.(
+                `[wildfire-agent] session id ${freshSessionId} collides (${m.slice(0, 100)}), bumping again`
+              );
+              continue;
+            }
+            throw createErr;
+          }
+        }
+        if (!created) {
+          throw new Error(`unable to create a fresh session for ${key} after ${attempts} epoch bumps`);
+        }
+        this.persistEpochs();
+        // 实际创建的 session 以最新 epoch 为准：managed 表必须以它登记，
+        // 否则 dispatch 的 subscribe(session.id) 会查不到（"no managed session"）
+        epoch = this.epochs.get(key) ?? 0;
+        sessionId = sessionIdForConversation(key, epoch);
       }
     }
 
@@ -276,6 +352,7 @@ export class AgentSessionManager {
     this.sessions.delete(sessionId);
     this.sessionIdToKey.delete(sessionId);
     this.epochs.set(key, epoch + 1);
+    this.persistEpochs();
     if (managed) {
       await managed.handle.dispose().catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire-agent] reset ${sessionId}: ${String(err)}`)
@@ -303,6 +380,7 @@ export class AgentSessionManager {
     this.sessions.delete(sessionId);
     this.sessionIdToKey.delete(sessionId);
     this.epochs.delete(key);
+    this.persistEpochs();
     if (managed) {
       await managed.handle.dispose().catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire-agent] disposeWorkspace ${sessionId}: ${String(err)}`)
@@ -405,6 +483,24 @@ export class AgentSessionManager {
         })
       );
       await agent.whenIdle();
+    } catch (err: any) {
+      const m = String(err?.message ?? err);
+      // cwd 碰撞：DSH 对 session log 的 cwd 校验是懒的（followup/写日志时才抛
+      // "already persisted at a different cwd"）。create 阶段的 bump 循环抓不到，
+      // 这里在 turn 提交失败时按同样模式重建（bump epoch 后重试一次）。
+      if (
+        (m.includes("persisted at a different cwd") || (m.includes("collision") && m.includes("persisted"))) &&
+        !(handlers as any)?.__cwdRetried
+      ) {
+        this.logger?.warn?.(
+          `[wildfire-agent] turn failed with cwd collision (${m.slice(0, 120)}), bumping epoch & retrying once`
+        );
+        const retryHandlers = { ...handlers, __cwdRetried: true } as any;
+        await this.resetSession(key);
+        unsubscribe();
+        return this.dispatch(key, text, onDelta, extras, retryHandlers);
+      }
+      throw err;
     } finally {
       unsubscribe();
       this.logger?.debug?.(
@@ -427,6 +523,7 @@ export class AgentSessionManager {
     if (this.disposed) return;
     this.disposed = true;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
+    if (this.epochSaveTimer) clearTimeout(this.epochSaveTimer);
     const entries = [...this.sessions.values()];
     this.sessions.clear();
     this.sessionIdToKey.clear();
@@ -437,6 +534,7 @@ export class AgentSessionManager {
         )
       )
     );
+    await this.flushEpochs().catch(() => {});
   }
 
   /** Evict the least recently used session when over the cap. */

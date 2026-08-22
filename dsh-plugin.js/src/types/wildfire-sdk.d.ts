@@ -27,6 +27,8 @@ declare module "@wildfirechat/robot-gateway-client-sdk" {
     getGroupInfo(groupId: string): Promise<{ code: number; msg?: string; result?: any }>;
     getProfile(): Promise<{ code: number; msg?: string; result?: { owner?: string } & Record<string, any> }>;
     createGroup(groupInfo: any, members: any[], to: string, lines: number[], payload: any): Promise<{ code: number; msg?: string; result?: { group_id?: string } }>;
+    /** Modify group info: type 0 = group name (ModifyGroupInfoType.Modify_Group_Name). */
+    modifyGroupInfo(groupId: string, type: number, value: string, lines?: number[], payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
     updateConversationUserSetting(conversation: any, type: number, value: string): Promise<{ code: number; msg?: string }>;
     dismissGroup(groupId: string): Promise<{ code: number; msg?: string }>;
     updateMessage(messageId: string, payload: any): Promise<{ code: number; msg?: string }>;

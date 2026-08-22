@@ -251,7 +251,8 @@ Agent 的工作目录在 **DSH 会话创建时写入会话头（`meta.cwd`）**�
 - **项目根目录** `workspace.root`：所有项目都在此目录下。未配置时回退链 `autoRoot` → 第一个 `allowedRoot` → `path`。`/create-group auto` 的自动目录与 `/ls` 默认列表也基于它
 - **目录不存在**：发 **DSH_Question 确认卡片**——`✅ 创建`（`mkdir -p` 后绑定）/ `❌ 取消`；卡片自定义回答可直接输入**新路径**重新选择（深度保护最多 3 轮）；60s 未应答自动取消
 - 路径须位于 `allowedRoots` 内（已存在目录 realpath 比较；不存在目录词法比较）
-- 切换/绑定后销毁该会话的旧 Agent，用新 cwd 重建（新 session id，epoch 递增），**多轮上下文因切换而重置**
+- 切换/绑定后销毁该会话的旧 Agent，用新 cwd 重建（新 session id，epoch 递增），**多轮上下文因切换而重置**（切回旧目录也不复用旧会话，见 INTERACTION_DESIGN.md §7 决策 17）
+- **群聊绑定成功后自动改群名**：机器人调用 `modifyGroupInfo(type=0)` 把群名改为目录**最后一段**（`/a/b/c` → 群名 `c`），私聊不生效；改名为尽力而为，失败不影响 `/cwd` 流程
 - 绑定持久化到 `workspace.persistFile`（默认 `~/.dsh/wildfire-workspaces.json`，`workspace.persist=false` 关闭），**重启不丢失**
 
 ### 多群多工作区（推荐用法）
