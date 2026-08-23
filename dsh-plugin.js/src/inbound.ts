@@ -15,6 +15,7 @@ import {
   FileMessageContent,
   StreamingTextGeneratingMessageContent,
   StreamingTextGeneratedMessageContent,
+  TipNotificationMessageContent,
   MessageContentMediaType,
 } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
@@ -47,6 +48,7 @@ import {
   parseContent,
   type DSHAnswerPayload,
   type DSHApprovalResultPayload,
+  type DSHCommandPayload,
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
@@ -272,6 +274,19 @@ export async function handleIncomingMessage(
         api.logger?.info?.(`[wildfire] DSH_ApprovalResult consumed: key=${key}`);
         return;
       }
+    } else if (payloadType === DSH_TYPE.COMMAND) {
+      // 207 DSH_Command：AI 面板静默指令（透明消息，不显示）。query=组合查询
+      // 写 type=3；set=更新（执行命令，变更写 type=1 lastChange + 刷新 type=3）。
+      // [诊断] error 级日志：GUI-less profile 隐藏 debug，用 error 确认 payload 是否完整到达
+      api.logger?.error?.(
+        `[wildfire] DSH_Command received: content=${String(payload?.content).slice(0, 200)}, searchable=${String(payload?.searchableContent).slice(0, 80)}`
+      );
+      const command = parseContent<DSHCommandPayload>(payload);
+      if (command) {
+        await handleDshCommand(api, key, command, String(sender), conv);
+        return;
+      }
+      api.logger?.error?.("[wildfire] DSH_Command parse failed: content is not valid JSON or empty");
     }
     // An unmatched DSH_* message is not for this plugin — drop it.
     api.logger?.debug?.(`[wildfire] unmatched DSH_* message type=${payloadType}, key=${key}`);
@@ -329,7 +344,7 @@ export async function handleIncomingMessage(
 
   // Management commands: `/cwd` works in private and group chat; the rest are
   // private-chat only. All are admin-gated when admins are configured.
-  const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
+  const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
   if (!cmdMatch && trimmed.startsWith("/")) {
@@ -394,7 +409,7 @@ export async function handleIncomingMessage(
 
       // Workspace lifecycle commands (create/destroy/list/reset-by-id), jobs
       // and goal management are single-chat control-panel commands, admin-gated.
-      if (cmd === "create" || cmd === "create-group" || cmd === "destroy-group" || cmd === "workspaces" || cmd === "goal" || cmd === "jobs" || cmd === "new") {
+      if (cmd === "create" || cmd === "create-group" || cmd === "destroy" || cmd === "destroy-group" || cmd === "workspaces" || cmd === "goal" || cmd === "jobs" || cmd === "new") {
         if (isGroup) {
           await sendDirectReply(sender, conv, `/${cmd} 仅支持私聊（控制面板）`, api);
           return;
@@ -578,13 +593,18 @@ export async function handleIncomingMessage(
         finalText = extracted.text.trim();
       }
     }
-    // 回合结果推送：reason（completed/cancelled）+ token 计量（usage/turn/context/cacheHitRatePct/speed）。
+    // 回合结果推送：reason（completed/cancelled）走 type=1 状态；
+    // Token 统计（usage/turn/context/cacheHitRatePct/speed）走 type=2 独立通道。
     // 与下方最终消息一致：无文本且无媒体 = cancelled（type 20）。
     const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0);
     api.interactions?.pushStatus(key, {
       state: "done",
       reason: noOutput ? "cancelled" : "completed",
+    });
+    // 统计独立于状态推送：即使无文本产出/出错也推当轮统计（有值才推）
+    api.interactions?.pushMetrics(key, {
       ...(outcome.metrics ?? {}),
+      sessionId: agents.peekSessionId(key),
     });
 
     // Always finalize the stream: without the terminal message the client
@@ -742,7 +762,7 @@ function isDshGroupCreator(api: any, groupId: string, senderId: string): boolean
 /**
  * Dispatch a management command (`/help`, `/cwd`, `/model`, `/effort`, `/reset`,
  * `/plan`, `/compact`, `/sandbox`, `/allow`, `/disallow`, `/allowlist`,
- * `/create`（原 /create-group）, `/destroy-group`, `/workspaces`, `/goal`, `/jobs`, `/new`).
+ * `/create`（原 /create-group）, `/destroy`, `/workspaces`, `/goal`, `/jobs`, `/new`).
  * Callers must have already checked the feature gate and permissions.
  */
 async function handleCommand(
@@ -754,7 +774,7 @@ async function handleCommand(
   conv: { type: number; target: string; line: number },
   isGroup: boolean
 ): Promise<void> {
-  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\s*/, "").trim();
+  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\s*/, "").trim();
   switch (cmd) {
     case "help":
       await handleHelpCommand(api, sender, conv, isGroup);
@@ -797,13 +817,14 @@ async function handleCommand(
       return;
     case "reset":
       await api.wildfireAgents.resetSession(key);
-      await sendDirectReply(sender, conv, "会话已重置（上下文清空）", api);
+      api.interactions?.resetTaskCards(key);
+      await sendTip(sender, conv, "会话已重置（上下文清空，重新开始）", api);
       return;
     case "create":
     case "create-group":
       await handleCreateGroupCommand(api, arg, sender, conv);
       return;
-    case "destroy-group":
+    case "destroy":
       await handleDestroyGroupCommand(api, arg, sender, conv);
       return;
     case "workspaces":
@@ -887,7 +908,7 @@ async function handleHelpCommand(
   }
   if (!isGroup && isAdmin) {
     lines.push("/create [工作区] — 创建 DSH 工作区群（/create-group 兼容）");
-    lines.push("/destroy-group <groupId> — 销毁工作区群（删除目录）");
+    lines.push("/destroy <groupId> — 销毁工作区（解散群组 + 销毁会话 + 删除目录）");
     lines.push("/new <groupId> — 重置指定群的会话");
     lines.push("/workspaces — 列出所有 DSH 工作区群");
     lines.push("/goal <groupId> [pause|resume|目标描述] — 查看/创建/暂停/恢复目标");
@@ -953,7 +974,7 @@ async function handleJobsCommand(
     jobs = undefined;
   }
   if (!jobs) {
-    await sendDirectReply(sender, conv, "jobs 服务不可用（当前 profile 未加载后台任务服务）", api);
+    await sendTip(sender, conv, "jobs 服务不可用（当前 profile 未加载后台任务服务）", api);
     return;
   }
   try {
@@ -988,12 +1009,12 @@ async function handleJobsCommand(
       }
     }
     if (lines.length === 0) {
-      await sendDirectReply(sender, conv, "当前没有后台任务", api);
+      await sendTip(sender, conv, "当前没有后台任务", api);
       return;
     }
-    await sendDirectReply(sender, conv, `📋 后台任务（${lines.length}）:\n${lines.join("\n")}`, api);
+    await sendTip(sender, conv, `📋 后台任务（${lines.length}）:\n${lines.join("\n")}`, api);
   } catch (err: any) {
-    await sendDirectReply(sender, conv, `查询后台任务失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `查询后台任务失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1010,15 +1031,15 @@ async function handleNewCommand(
 ): Promise<void> {
   const groupId = arg.trim();
   if (!groupId) {
-    await sendDirectReply(sender, conv, "用法: /new <groupId>", api);
+    await sendTip(sender, conv, "用法: /new <groupId>", api);
     return;
   }
   if (!api.registry?.isDshGroup?.(groupId)) {
-    await sendDirectReply(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
+    await sendTip(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
     return;
   }
   await api.wildfireAgents.resetSession(`wildfire:group:${groupId}`);
-  await sendDirectReply(sender, conv, `🔄 群 ${groupId} 的会话已重置（上下文清空，工作区保留）`, api);
+  await sendTip(sender, conv, `🔄 群 ${groupId} 的会话已重置（上下文清空，工作区保留）`, api);
 }
 
 /**
@@ -1041,20 +1062,20 @@ async function handlePlanCommand(
     planMode = undefined;
   }
   if (!planMode) {
-    await sendDirectReply(sender, conv, "plan 服务不可用（当前 profile 未加载 plan-mode）", api);
+    await sendTip(sender, conv, "plan 服务不可用（当前 profile 未加载 plan-mode）", api);
     return;
   }
   const agents = api.ctx?.get?.("agents");
   const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
   if (!agent) {
-    await sendDirectReply(sender, conv, "会话未激活（请先发送一条消息）", api);
+    await sendTip(sender, conv, "会话未激活（请先发送一条消息）", api);
     return;
   }
   try {
     if (!arg) {
       const current = planMode.get(agent);
       const pending = current.pending !== undefined ? `，待生效: ${current.pending ? "开启" : "关闭"}` : "";
-      await sendDirectReply(
+      await sendTip(
         sender,
         conv,
         `当前计划模式: ${current.active ? "已开启" : "已关闭"}${pending}\n用法: /plan on|off`,
@@ -1065,7 +1086,7 @@ async function handlePlanCommand(
     const on = arg === "on" || arg === "开";
     const off = arg === "off" || arg === "关";
     if (!on && !off) {
-      await sendDirectReply(sender, conv, "用法: /plan on|off", api);
+      await sendTip(sender, conv, "用法: /plan on|off", api);
       return;
     }
     const result = planMode.set(agent, on);
@@ -1078,9 +1099,9 @@ async function handlePlanCommand(
           : result === "cancelled"
             ? `已取消待生效的切换，计划模式保持${on ? "关闭" : "开启"}`
             : `计划模式已经是${on ? "开启" : "关闭"}状态`;
-    await sendDirectReply(sender, conv, text, api);
+    await sendTip(sender, conv, text, api);
   } catch (err: any) {
-    await sendDirectReply(sender, conv, `计划模式操作失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `计划模式操作失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1102,22 +1123,22 @@ async function handleCompactCommand(
     compaction = undefined;
   }
   if (!compaction) {
-    await sendDirectReply(sender, conv, "compaction 服务不可用（当前 profile 未加载压缩服务）", api);
+    await sendTip(sender, conv, "compaction 服务不可用（当前 profile 未加载压缩服务）", api);
     return;
   }
   const agents = api.ctx?.get?.("agents");
   const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
   if (!agent) {
-    await sendDirectReply(sender, conv, "会话未激活（请先发送一条消息）", api);
+    await sendTip(sender, conv, "会话未激活（请先发送一条消息）", api);
     return;
   }
   try {
     const result = await compaction.compactNow(agent, new AbortController().signal);
     if (!result) {
-      await sendDirectReply(sender, conv, "当前没有可压缩的历史内容", api);
+      await sendTip(sender, conv, "当前没有可压缩的历史内容", api);
       return;
     }
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       `✅ 上下文已压缩：折叠 ${result.shadowedSeqs?.length ?? 0} 个节点（约 ${result.shadowedTokenCount ?? 0} tokens）`,
@@ -1125,10 +1146,10 @@ async function handleCompactCommand(
     );
   } catch (err: any) {
     if (err?.code === "busy") {
-      await sendDirectReply(sender, conv, "当前会话正在运行任务，请稍后再试（或先 /stop）", api);
+      await sendTip(sender, conv, "当前会话正在运行任务，请稍后再试（或先 /stop）", api);
       return;
     }
-    await sendDirectReply(sender, conv, `压缩失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `压缩失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1159,7 +1180,7 @@ async function handleSandboxCommand(
     policy = undefined;
   }
   if (!policy) {
-    await sendDirectReply(sender, conv, "sandbox 服务不可用（当前 profile 未加载 sandbox-policy）", api);
+    await sendTip(sender, conv, "sandbox 服务不可用（当前 profile 未加载 sandbox-policy）", api);
     return;
   }
   const modeLabel = (m: string) => `${m}（${SANDBOX_MODE_LABELS[m] ?? m}）`;
@@ -1171,7 +1192,7 @@ async function handleSandboxCommand(
 
   if (!arg) {
     if (!session) {
-      await sendDirectReply(
+      await sendTip(
         sender,
         conv,
         `当前沙箱模式: ${modeLabel(policy.defaultMode)}（部署默认；会话激活后可按会话覆盖）\n可选: ${modeList}`,
@@ -1181,7 +1202,7 @@ async function handleSandboxCommand(
     }
     const override = policy.overrideOf(session);
     const effective = override ?? policy.defaultMode;
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       `当前沙箱模式: ${modeLabel(effective)}（${override ? "会话覆盖" : "部署默认"}）\n可选: ${modeList}\n用法: /sandbox <mode>`,
@@ -1191,21 +1212,21 @@ async function handleSandboxCommand(
   }
 
   if (!SANDBOX_MODES.includes(arg)) {
-    await sendDirectReply(sender, conv, `无效沙箱模式: ${arg}\n可选: ${modeList}`, api);
+    await sendTip(sender, conv, `无效沙箱模式: ${arg}\n可选: ${modeList}`, api);
     return;
   }
   if (!session) {
-    await sendDirectReply(sender, conv, "会话未激活（请先发送一条消息激活会话）", api);
+    await sendTip(sender, conv, "会话未激活（请先发送一条消息激活会话）", api);
     return;
   }
   try {
     setSandboxMode(session, arg);
   } catch (err: any) {
-    await sendDirectReply(sender, conv, `沙箱模式切换失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `沙箱模式切换失败: ${err?.message ?? String(err)}`, api);
     return;
   }
   api.logger?.info?.(`[wildfire] /sandbox: key=${key}, mode=${arg}, by=${sender}`);
-  await sendDirectReply(
+  await sendTip(
     sender,
     conv,
     `沙箱模式已切换为 ${modeLabel(arg)}，下一次工具调用生效（随会话持久化）`,
@@ -1225,25 +1246,25 @@ async function handleKickCommand(
 ): Promise<void> {
   const userId = (arg ?? "").trim();
   if (!userId) {
-    await sendDirectReply(sender, conv, "用法: /kick <userId>（可用 /members 查看成员）", api);
+    await sendTip(sender, conv, "用法: /kick <userId>（可用 /members 查看成员）", api);
     return;
   }
   const client = getClient();
   if (!client) {
-    await sendDirectReply(sender, conv, "机器人未连接", api);
+    await sendTip(sender, conv, "机器人未连接", api);
     return;
   }
   try {
     const result = await client.kickoffGroupMembers(String(conv.target), [userId], [getAiLine(api.config)], null);
     if (result?.code === 0 || result?.isSuccess?.()) {
       api.logger?.info?.(`[wildfire] /kick: group=${conv.target}, member=${userId}, by=${sender}`);
-      await sendDirectReply(sender, conv, `已踢出成员 ${userId}`, api);
+      await sendTip(sender, conv, `已踢出成员 ${userId}`, api);
     } else {
-      await sendDirectReply(sender, conv, `踢人失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+      await sendTip(sender, conv, `踢人失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
     }
   } catch (err: any) {
     api.logger?.error?.(`[wildfire] /kick failed: ${err?.message ?? String(err)}`);
-    await sendDirectReply(sender, conv, `踢人失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `踢人失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1259,25 +1280,25 @@ async function handleInviteCommand(
 ): Promise<void> {
   const userId = (arg ?? "").trim();
   if (!userId) {
-    await sendDirectReply(sender, conv, "用法: /invite <userId>", api);
+    await sendTip(sender, conv, "用法: /invite <userId>", api);
     return;
   }
   const client = getClient();
   if (!client) {
-    await sendDirectReply(sender, conv, "机器人未连接", api);
+    await sendTip(sender, conv, "机器人未连接", api);
     return;
   }
   try {
     const result = await client.addGroupMembers(String(conv.target), [userId], null, [getAiLine(api.config)], null);
     if (result?.code === 0 || result?.isSuccess?.()) {
       api.logger?.info?.(`[wildfire] /invite: group=${conv.target}, member=${userId}, by=${sender}`);
-      await sendDirectReply(sender, conv, `已邀请 ${userId} 进群`, api);
+      await sendTip(sender, conv, `已邀请 ${userId} 进群`, api);
     } else {
-      await sendDirectReply(sender, conv, `邀请失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+      await sendTip(sender, conv, `邀请失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
     }
   } catch (err: any) {
     api.logger?.error?.(`[wildfire] /invite failed: ${err?.message ?? String(err)}`);
-    await sendDirectReply(sender, conv, `邀请失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `邀请失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1294,25 +1315,25 @@ async function handleMuteCommand(
 ): Promise<void> {
   const userId = (arg ?? "").trim();
   if (!userId) {
-    await sendDirectReply(sender, conv, `用法: /${mute ? "mute" : "unmute"} <userId>`, api);
+    await sendTip(sender, conv, `用法: /${mute ? "mute" : "unmute"} <userId>`, api);
     return;
   }
   const client = getClient();
   if (!client) {
-    await sendDirectReply(sender, conv, "机器人未连接", api);
+    await sendTip(sender, conv, "机器人未连接", api);
     return;
   }
   try {
     const result = await client.muteGroupMember(String(conv.target), [userId], mute, [getAiLine(api.config)], null);
     if (result?.code === 0 || result?.isSuccess?.()) {
       api.logger?.info?.(`[wildfire] /${mute ? "mute" : "unmute"}: group=${conv.target}, member=${userId}, by=${sender}`);
-      await sendDirectReply(sender, conv, `${mute ? "已禁言" : "已解除禁言"} ${userId}`, api);
+      await sendTip(sender, conv, `${mute ? "已禁言" : "已解除禁言"} ${userId}`, api);
     } else {
-      await sendDirectReply(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+      await sendTip(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
     }
   } catch (err: any) {
     api.logger?.error?.(`[wildfire] /${mute ? "mute" : "unmute"} failed: ${err?.message ?? String(err)}`);
-    await sendDirectReply(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1328,14 +1349,14 @@ async function handleMembersCommand(
 ): Promise<void> {
   const client = getClient();
   if (!client) {
-    await sendDirectReply(sender, conv, "机器人未连接", api);
+    await sendTip(sender, conv, "机器人未连接", api);
     return;
   }
   try {
     const result = await client.getGroupMembers(String(conv.target));
     const members = result?.result ?? [];
     if (!Array.isArray(members) || members.length === 0) {
-      await sendDirectReply(sender, conv, "群成员列表为空", api);
+      await sendTip(sender, conv, "群成员列表为空", api);
       return;
     }
     const lines = [`群成员（共 ${members.length} 人）:`];
@@ -1346,10 +1367,10 @@ async function handleMembersCommand(
         m.type === 2 ? "管理员" : "普通";
       lines.push(`  ${m.member_id}（${role}）`);
     }
-    await sendDirectReply(sender, conv, lines.join("\n"), api);
+    await sendTip(sender, conv, lines.join("\n"), api);
   } catch (err: any) {
     api.logger?.error?.(`[wildfire] /members failed: ${err?.message ?? String(err)}`);
-    await sendDirectReply(sender, conv, `获取成员失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `获取成员失败: ${err?.message ?? String(err)}`, api);
   }
 }
 
@@ -1365,19 +1386,19 @@ async function handleAllowCommand(
 ): Promise<void> {
   const whitelist: WhitelistFilter | undefined = api.whitelist;
   if (!whitelist) {
-    await sendDirectReply(sender, conv, "白名单组件不可用", api);
+    await sendTip(sender, conv, "白名单组件不可用", api);
     return;
   }
   if (!arg) {
-    await sendDirectReply(sender, conv, `用法: /${allow ? "allow" : "disallow"} <userId>`, api);
+    await sendTip(sender, conv, `用法: /${allow ? "allow" : "disallow"} <userId>`, api);
     return;
   }
   if (allow) {
     whitelist.addUser(arg);
-    await sendDirectReply(sender, conv, `已将 ${arg} 加入白名单`, api);
+    await sendTip(sender, conv, `已将 ${arg} 加入白名单`, api);
   } else {
     whitelist.removeUser(arg);
-    await sendDirectReply(sender, conv, `已将 ${arg} 移出白名单`, api);
+    await sendTip(sender, conv, `已将 ${arg} 移出白名单`, api);
   }
 }
 
@@ -1397,7 +1418,7 @@ async function handleCreateGroupCommand(
 ): Promise<void> {
   const client = getClient();
   if (!client) {
-    await sendDirectReply(sender, conv, "机器人未连接", api);
+    await sendTip(sender, conv, "机器人未连接", api);
     return;
   }
   const config: WildfireConfig = api.config;
@@ -1417,7 +1438,7 @@ async function handleCreateGroupCommand(
     } else {
       const canon = await api.workspace.validateUserPath(arg);
       if (!canon) {
-        await sendDirectReply(sender, conv, "无效目录，或不在允许的工作目录范围内", api);
+        await sendTip(sender, conv, "无效目录，或不在允许的工作目录范围内", api);
         return;
       }
       dir = canon;
@@ -1426,7 +1447,7 @@ async function handleCreateGroupCommand(
   } else if (catalog.length > 0) {
     // no arg + catalog configured → list for selection
     const lines = catalog.map((c: any, i: number) => `${i + 1}. ${c.label ?? c.id}（${c.path}）`);
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       `请选择工作区目录（回复编号），或 /create auto 自动分配：\n${lines.join("\n")}`,
@@ -1435,7 +1456,7 @@ async function handleCreateGroupCommand(
     return;
   }
   if (arg && !Number.isNaN(Number(arg)) && catalog.length === 0) {
-    await sendDirectReply(sender, conv, "未配置可选工作区目录（workspace.catalog）", api);
+    await sendTip(sender, conv, "未配置可选工作区目录（workspace.catalog）", api);
     return;
   }
 
@@ -1458,7 +1479,7 @@ async function handleCreateGroupCommand(
   const result = await client.createGroup(groupInfo, members, sender, [getAiLine(config)], null);
   const groupId = result?.result?.group_id;
   if (result?.code !== 0 || !groupId) {
-    await sendDirectReply(sender, conv, `创建群失败: ${result?.msg ?? "unknown"}`, api);
+    await sendTip(sender, conv, `创建群失败: ${result?.msg ?? "unknown"}`, api);
     return;
   }
 
@@ -1476,7 +1497,7 @@ async function handleCreateGroupCommand(
   api.logger?.info?.(
     `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})`
   );
-  await sendDirectReply(
+  await sendTip(
     sender,
     conv,
     `✅ 工作区群已创建：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）\n\n请搜索群 ID 加入，进群后发第一条消息即激活`,
@@ -1485,7 +1506,7 @@ async function handleCreateGroupCommand(
 }
 
 /**
- * `/destroy-group <groupId>` — dismiss the group and destroy its workspace
+ * `/destroy <groupId>` — dismiss the group and destroy its workspace
  * (single-chat control panel, admin-gated; see INTERACTION_DESIGN.md §4.1.4).
  */
 async function handleDestroyGroupCommand(
@@ -1497,12 +1518,12 @@ async function handleDestroyGroupCommand(
   const client = getClient();
   const groupId = arg.trim();
   if (!client || !groupId) {
-    await sendDirectReply(sender, conv, "用法: /destroy-group <groupId>", api);
+    await sendTip(sender, conv, "用法: /destroy <groupId>", api);
     return;
   }
   const record = api.registry?.get(groupId);
   if (!record) {
-    await sendDirectReply(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
+    await sendTip(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
     return;
   }
 
@@ -1523,7 +1544,7 @@ async function handleDestroyGroupCommand(
   }
 
   api.registry?.unregister(groupId);
-  await sendDirectReply(sender, conv, `🗑 工作区群已销毁: ${groupId}（目录已删除）`, api);
+  await sendTip(sender, conv, `🗑 工作区群已销毁: ${groupId}（目录已删除）`, api);
 }
 
 /**
@@ -1536,14 +1557,14 @@ async function handleWorkspacesCommand(
 ): Promise<void> {
   const list = api.registry?.list() ?? [];
   if (list.length === 0) {
-    await sendDirectReply(sender, conv, "暂无 DSH 工作区群。用 /create 创建", api);
+    await sendTip(sender, conv, "暂无 DSH 工作区群。用 /create 创建", api);
     return;
   }
   const lines = list.map(({ groupId, record }: { groupId: string; record: any }) => {
     const creator = record.creatorUserId === sender ? "（我创建）" : "";
     return `${groupId} | 创建者: ${record.creatorUserId}${creator}\n  目录: ${record.workspaceDir}`;
   });
-  await sendDirectReply(sender, conv, `📋 DSH 工作区群（${list.length}）:\n${lines.join("\n")}`, api);
+  await sendTip(sender, conv, `📋 DSH 工作区群（${list.length}）:\n${lines.join("\n")}`, api);
 }
 
 /**
@@ -1567,7 +1588,7 @@ async function handleGoalCommand(
   const sub = parts[1];
   const objective = parts.slice(1).join(" ");
   if (!groupId) {
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       "用法: /goal <groupId> [pause|resume|目标描述]\n  无子命令 = 查看当前目标",
@@ -1577,31 +1598,31 @@ async function handleGoalCommand(
   }
   const key = `wildfire:group:${groupId}`;
   if (!api.registry?.isDshGroup?.(groupId)) {
-    await sendDirectReply(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
+    await sendTip(sender, conv, `非 DSH 工作区群: ${groupId}`, api);
     return;
   }
   const agents = api.ctx?.get?.("agents");
   const goals = api.ctx?.get?.("goals");
   if (!agents || !goals) {
-    await sendDirectReply(sender, conv, "goals 服务不可用", api);
+    await sendTip(sender, conv, "goals 服务不可用", api);
     return;
   }
   const sessionId = api.wildfireAgents.peekSessionId(key);
   const agent = agents.get(sessionId);
   if (!agent) {
-    await sendDirectReply(sender, conv, "该群会话未激活（请先在群里发消息）", api);
+    await sendTip(sender, conv, "该群会话未激活（请先在群里发消息）", api);
     return;
   }
   try {
     if (sub === "pause" || sub === "resume") {
       const current = goals.get(agent);
       if (!current) {
-        await sendDirectReply(sender, conv, "该群暂无目标", api);
+        await sendTip(sender, conv, "该群暂无目标", api);
         return;
       }
       if (sub === "pause") {
         if (current.phase !== "active") {
-          await sendDirectReply(sender, conv, `目标当前状态为 ${current.phase}，仅进行中的目标可暂停`, api);
+          await sendTip(sender, conv, `目标当前状态为 ${current.phase}，仅进行中的目标可暂停`, api);
           return;
         }
         const updated = goals.pause(agent, current);
@@ -1611,14 +1632,14 @@ async function handleGoalCommand(
           phase: updated.phase,
           roundsStarted: updated.roundsStarted,
         });
-        await sendDirectReply(sender, conv, `⏸ 目标已暂停: ${updated.objective}`, api);
+        await sendTip(sender, conv, `⏸ 目标已暂停: ${updated.objective}`, api);
       } else {
         if (current.phase === "active") {
-          await sendDirectReply(sender, conv, "目标已在运行中", api);
+          await sendTip(sender, conv, "目标已在运行中", api);
           return;
         }
         if (current.phase === "complete") {
-          await sendDirectReply(sender, conv, "目标已完成，无法恢复（可创建新目标）", api);
+          await sendTip(sender, conv, "目标已完成，无法恢复（可创建新目标）", api);
           return;
         }
         const updated = goals.resume(agent, current);
@@ -1628,21 +1649,21 @@ async function handleGoalCommand(
           phase: updated.phase,
           roundsStarted: updated.roundsStarted,
         });
-        await sendDirectReply(sender, conv, `▶️ 目标已恢复: ${updated.objective}`, api);
+        await sendTip(sender, conv, `▶️ 目标已恢复: ${updated.objective}`, api);
       }
       return;
     }
     if (objective) {
       const existing = goals.get(agent);
       if (existing && existing.phase !== "complete") {
-        await sendDirectReply(sender, conv, `该群已有进行中的目标（${existing.phase}），先完成后才能新建`, api);
+        await sendTip(sender, conv, `该群已有进行中的目标（${existing.phase}），先完成后才能新建`, api);
         return;
       }
       await goals.create(agent, { objective });
     }
     const view = goals.get(agent);
     if (!view) {
-      await sendDirectReply(sender, conv, "该群暂无目标。用法: /goal <groupId> <目标描述>", api);
+      await sendTip(sender, conv, "该群暂无目标。用法: /goal <groupId> <目标描述>", api);
       return;
     }
     api.interactions?.sendGoal(key, {
@@ -1652,8 +1673,195 @@ async function handleGoalCommand(
       roundsStarted: view.roundsStarted,
     });
   } catch (err: any) {
-    await sendDirectReply(sender, conv, `目标操作失败: ${err?.message ?? String(err)}`, api);
+    await sendTip(sender, conv, `目标操作失败: ${err?.message ?? String(err)}`, api);
   }
+}
+
+// ═══════════════════ AI 面板静默指令（207 DSH_Command） ═══════════════════
+// 面板交互不落消息流：query=组合查询写 scope=31 type=3；set=执行命令，
+// 变更写 type=1 lastChange（其他成员可见）+ 刷新 type=3。
+
+/**
+ * 处理 207 DSH_Command（AI 面板指令）。
+ * - op=query：聚合面板数据（模型目录/effort/沙箱/计划/cwd/sessionId/目录列表）
+ *   写 scope=31 type=3，不回复消息
+ * - op=set：执行命令（复用文本命令逻辑 + 权限检查），变更写 type=1 lastChange
+ *   （变更可见），随后刷新 type=3 面板数据
+ */
+async function handleDshCommand(
+  api: any,
+  key: string,
+  command: DSHCommandPayload,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const isGroup = conv.type === CONV_TYPE_GROUP || conv.type === CONV_TYPE_CHANNEL;
+
+  if (command.op === "query") {
+    const data = await buildPanelData(api, key);
+    api.interactions?.pushPanelData(key, data);
+    api.logger?.info?.(
+      `[wildfire] DSH_Command query: key=${key}, model=${(data.model as any)?.current ?? "-"}, dirs=${(data.dirs as string[])?.length ?? 0}`
+    );
+    return;
+  }
+
+  if (command.op === "set") {
+    const cmdText = (command.cmd ?? "").trim();
+    const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|destroy(?:-group)?)\b/);
+    if (!m) {
+      api.logger?.warn?.(`[wildfire] DSH_Command set: unsupported cmd=${cmdText}`);
+      return;
+    }
+    const cmd = m[1];
+    if (!(await authorizePanelCmd(api, cmd, sender, conv, isGroup))) {
+      api.interactions?.pushStatus(key, { error: `无权限执行 /${cmd}` });
+      api.logger?.warn?.(`[wildfire] DSH_Command set denied: cmd=/${cmd}, sender=${sender}, key=${key}`);
+      return;
+    }
+    // 销毁当前群：解散群组 + 销毁会话 + 删工作区目录 + 清注册（面板确认后执行）
+    if (cmd === "destroy" || cmd === "destroy-group") {
+      api.logger?.warn?.(`[wildfire] DSH_Command set: DESTROY group=${conv.target}, by=${sender}`);
+      await handleDestroyGroupCommand(api, String(conv.target), sender, conv);
+      return;
+    }
+    // 确保会话激活：新目录（未建立过会话）时先 getAgent 创建/resume，
+    // 否则 /sandbox /plan /compact 等会拒绝"会话未激活（请先发送一条消息激活会话）"
+    try {
+      await api.wildfireAgents.getAgent(key);
+    } catch (err: any) {
+      api.logger?.warn?.(`[wildfire] DSH_Command set: activate session failed: ${String(err)}`);
+    }
+    await handleCommand(api, key, cmd, cmdText, sender, conv, isGroup);
+    // 刷新面板数据（type=3）（修改结果由 tip 小灰条展示，不再写 type=1 lastChange）
+    const data = await buildPanelData(api, key).catch(() => undefined);
+    if (data) api.interactions?.pushPanelData(key, data);
+    api.logger?.info?.(`[wildfire] DSH_Command set: key=${key}, cmd=${cmdText}, by=${sender}`);
+    return;
+  }
+}
+
+/** 面板更新命令的变更说明文案（写 type=1 lastChange，成员可见）。 */
+function panelChangeText(cmd: string, cmdText: string): string | null {
+  const arg = cmdText.replace(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls)\s*/, "").trim();
+  switch (cmd) {
+    case "model":
+      return arg ? `模型 → ${arg}` : null;
+    case "effort":
+      return arg ? `推理等级 → ${arg}` : null;
+    case "cwd":
+      return arg === "clear" ? "工作目录 → 默认" : arg ? `工作目录 → ${arg}` : null;
+    case "sandbox":
+      return arg ? `沙箱 → ${arg}` : null;
+    case "plan":
+      return arg === "on" || arg === "开" ? "计划模式已开启" : arg ? "计划模式已关闭" : null;
+    case "compact":
+      return "上下文已压缩";
+    case "reset":
+      return "会话已重置";
+    default:
+      return null;
+  }
+}
+
+/** 面板更新命令的权限检查（与文本命令路由一致：群=创建者/管理员，私聊=管理员）。 */
+async function authorizePanelCmd(
+  api: any,
+  cmd: string,
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  isGroup: boolean
+): Promise<boolean> {
+  const access = api.access;
+  if (!access) return false;
+  const senderId = String(sender);
+  if (cmd === "cwd" || cmd === "ls") {
+    return isGroup
+      ? (await access.canManageWorkspace(senderId, String(conv.target), true)) ||
+          isDshGroupCreator(api, String(conv.target), senderId)
+      : access.canRunCommand(senderId);
+  }
+  // 销毁群：仅群内创建者/管理员（面板在群聊，私聊不允许）
+  if (cmd === "destroy" || cmd === "destroy-group") {
+    return (
+      isGroup &&
+      ((await access.canManageWorkspace(senderId, String(conv.target), true)) ||
+        isDshGroupCreator(api, String(conv.target), senderId))
+    );
+  }
+  if (isGroup) {
+    return (
+      (await access.canManageWorkspace(senderId, String(conv.target), true)) ||
+      isDshGroupCreator(api, String(conv.target), senderId)
+    );
+  }
+  return access.canRunCommand(senderId);
+}
+
+/** 组合查询：聚合 AI 面板需要的数据（type=3 面板数据）。 */
+async function buildPanelData(api: any, key: string): Promise<Record<string, unknown>> {
+  const sessionId = api.wildfireAgents?.peekSessionId?.(key) ?? "";
+  const cwd = await api.workspace?.peek?.(key, sessionId).catch(() => undefined);
+  const modelSel = await api.models?.peek?.(key).catch(() => undefined);
+  const catalog = (await api.models?.listCatalog?.().catch(() => [])) ?? [];
+  const modelOptions = (catalog as Array<{ provider: string; id: string; name: string }>).map((e) => ({
+    value: `${e.provider}/${e.id}`,
+    label: `${e.provider}/${e.id}（${e.name}）`,
+  }));
+  let effortOptions: string[] = [];
+  if (modelSel) {
+    const support = await resolveEffortInfo(api, modelSel).catch(() => undefined);
+    if (support) effortOptions = support.efforts.map((e: { id: string }) => e.id);
+  }
+  // 沙箱当前值（会话未激活时用部署默认）
+  let sandboxCurrent = "workspace-write";
+  try {
+    const policy = api.ctx?.get?.("sandboxPolicy");
+    if (policy) {
+      const agent = api.ctx?.get?.("agents")?.get?.(sessionId);
+      const session = agent?.session;
+      sandboxCurrent = session ? (policy.overrideOf(session) ?? policy.defaultMode) : policy.defaultMode;
+    }
+  } catch {
+    // 保持默认
+  }
+  // 计划模式当前值（会话未激活时为关）
+  let planOn = false;
+  try {
+    const planMode = api.ctx?.get?.("planMode");
+    const agent = api.ctx?.get?.("agents")?.get?.(sessionId);
+    if (planMode && agent) {
+      const current = planMode.get(agent);
+      planOn = !!current?.active;
+    }
+  } catch {
+    // 保持关
+  }
+  // 目录列表：项目根目录子目录（面板目录选择）
+  const dirs: string[] = [];
+  try {
+    const root = api.workspace?.root?.();
+    if (root) {
+      const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+      dirs.push(
+        ...entries
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b))
+      );
+    }
+  } catch {
+    // 目录列表为空时面板显示提示
+  }
+  return {
+    model: { current: modelSel ? `${modelSel.provider}/${modelSel.model}` : "", options: modelOptions },
+    effort: { current: modelSel?.reasoningEffort ?? "", options: effortOptions },
+    sandbox: { current: sandboxCurrent, options: ["read-only", "workspace-write", "danger-full-access"] },
+    plan: { on: planOn },
+    cwd,
+    sessionId,
+    dirs,
+  };
 }
 
 async function handleGroupNotification(
@@ -1703,15 +1911,17 @@ async function handleCwdCommand(
   const workspace = api.workspace;
   const agents: AgentSessionManager = api.wildfireAgents;
   const sessionId = agents.peekSessionId(key);
-  const label = isGroup ? `群 ${conv.target}` : `会话 ${key}`;
+  // 已经在群里了：群聊响应不再前缀"群 xxx"，只保留私聊的会话前缀
+  const label = isGroup ? "" : `会话 ${key}`;
+  const prefix = label ? `${label} ` : "";
 
   if (!arg) {
     try {
       const dir = await workspace.peek(key, sessionId);
-      const lines = [`${label} 当前工作目录: ${dir}`, `项目根目录: ${workspace.root()}`, `相对路径按根目录解析，如 /cwd my-project；/ls 可浏览根目录内容`];
-      await sendDirectReply(sender, conv, lines.join("\n"), api);
+      const lines = [`${prefix}当前工作目录: ${dir}`, `项目根目录: ${workspace.root()}`, `相对路径按根目录解析，如 /cwd my-project；/ls 可浏览根目录内容`];
+      await sendTip(sender, conv, lines.join("\n"), api);
     } catch (e: any) {
-      await sendDirectReply(sender, conv, `获取工作目录失败: ${e.message}`, api);
+      await sendTip(sender, conv, `获取工作目录失败: ${e.message}`, api);
     }
     return;
   }
@@ -1720,6 +1930,15 @@ async function handleCwdCommand(
     workspace.clearOverride(key);
     // 切目录 = 切会话（保留该目录历史上下文，切回可恢复）——不销毁会话
     await agents.switchWorkspace(key);
+    // 统计切换到目标目录会话：切回旧目录立即显示其历史累计，全新目录为空统计
+    try {
+      const m = await agents.snapshotMetrics(key);
+      api.interactions?.pushMetrics(key, { ...(m ?? {}), sessionId: agents.peekSessionId(key) });
+    } catch (err: any) {
+      api.interactions?.resetMetrics(key);
+    }
+    // 旧会话的任务卡不再更新（切目录=新会话）
+    api.interactions?.resetTaskCards(key);
     api.logger?.info?.(`[wildfire] /cwd cleared: key=${key}`);
     // 同步 scope=31 状态 cwd 为清除后的默认值（面板读到与 /cwd 一致）
     try {
@@ -1728,7 +1947,7 @@ async function handleCwdCommand(
     } catch (e: any) {
       api.logger?.warn?.(`[wildfire] /cwd clear: failed to sync default cwd: ${String(e)}`);
     }
-    await sendDirectReply(sender, conv, "已清除自定义工作目录，恢复默认配置（会话已重置）", api);
+    await sendTip(sender, conv, "已清除自定义工作目录，恢复默认配置（会话已切换，原上下文保留）", api);
     return;
   }
 
@@ -1759,7 +1978,7 @@ async function bindWorkspacePath(
 
   const info = await workspace.resolveUserPath(arg);
   if (!info) {
-    await sendDirectReply(sender, conv, "无效路径，或不在允许的工作目录范围内（allowedRoots）", api);
+    await sendTip(sender, conv, "无效路径，或不在允许的工作目录范围内（allowedRoots）", api);
     return;
   }
 
@@ -1773,17 +1992,26 @@ async function bindWorkspacePath(
     workspace.setOverride(key, canon);
     // 切目录 = 切会话：dispose 当前活跃会话，下一次消息按新 cwd 恢复/新建
     await agents.switchWorkspace(key);
+    // 统计切换到目标目录会话：切回旧目录立即显示其历史累计，全新目录为空统计
+    try {
+      const m = await agents.snapshotMetrics(key);
+      api.interactions?.pushMetrics(key, { ...(m ?? {}), sessionId: agents.peekSessionId(key) });
+    } catch (err: any) {
+      api.interactions?.resetMetrics(key);
+    }
+    // 旧会话的任务卡不再更新（切目录=新会话）
+    api.interactions?.resetTaskCards(key);
     api.logger?.info?.(`[wildfire] /cwd bound: key=${key} -> ${canon}`);
     // 立即把新工作目录同步到 scope=31 状态：否则面板/客户端读到的是上一回合的旧值
     api.interactions?.pushStatus(key, { cwd: canon });
     // 群聊：把群名改成目录的最后一段名字（/a/b/c → 群名 c）
     await renameGroupToDirname(api, conv, canon);
-    await sendDirectReply(sender, conv, `${label} 工作目录已绑定: ${canon}（已持久化，会话上下文已重置）`, api);
+    await sendTip(sender, conv, `工作目录已绑定: ${canon}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
     return;
   }
 
   if (info.exists && !info.isDir) {
-    await sendDirectReply(sender, conv, `已存在同名文件（非目录），无法绑定: ${info.resolved}`, api);
+    await sendTip(sender, conv, `已存在同名文件（非目录），无法绑定: ${info.resolved}`, api);
     return;
   }
 
@@ -1807,7 +2035,7 @@ async function bindWorkspacePath(
     { ownerSender: String(sender), timeoutMs: 60_000 }
   );
   if (!answer) {
-    await sendDirectReply(sender, conv, `已取消绑定（目录未创建）: ${info.resolved}`, api);
+    await sendTip(sender, conv, `已取消绑定（目录未创建）: ${info.resolved}`, api);
     return;
   }
   const first = answer.answers?.[0];
@@ -1817,27 +2045,36 @@ async function bindWorkspacePath(
     try {
       await mkdir(info.resolved, { recursive: true });
     } catch (err: any) {
-      await sendDirectReply(sender, conv, `创建目录失败: ${err?.message ?? String(err)}`, api);
+      await sendTip(sender, conv, `创建目录失败: ${err?.message ?? String(err)}`, api);
       return;
     }
     workspace.setOverride(key, info.resolved);
     // 切目录 = 切会话：dispose 当前活跃会话，下一次消息按新 cwd 恢复/新建
     await agents.switchWorkspace(key);
+    // 统计切换到目标目录会话：切回旧目录立即显示其历史累计，全新目录为空统计
+    try {
+      const m = await agents.snapshotMetrics(key);
+      api.interactions?.pushMetrics(key, { ...(m ?? {}), sessionId: agents.peekSessionId(key) });
+    } catch (err: any) {
+      api.interactions?.resetMetrics(key);
+    }
+    // 旧会话的任务卡不再更新（切目录=新会话）
+    api.interactions?.resetTaskCards(key);
     api.logger?.info?.(`[wildfire] /cwd created+bound: key=${key} -> ${info.resolved}`);
     // 立即把新工作目录同步到 scope=31 状态（同上）
     api.interactions?.pushStatus(key, { cwd: info.resolved });
     // 群聊：把群名改成目录的最后一段名字
     await renameGroupToDirname(api, conv, info.resolved);
-    await sendDirectReply(sender, conv, `${label} 目录已创建并绑定: ${info.resolved}（已持久化，会话上下文已重置）`, api);
+    await sendTip(sender, conv, `目录已创建并绑定: ${info.resolved}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
     return;
   }
   if (selected === "❌ 取消") {
-    await sendDirectReply(sender, conv, `已取消绑定（目录未创建）: ${info.resolved}`, api);
+    await sendTip(sender, conv, `已取消绑定（目录未创建）: ${info.resolved}`, api);
     return;
   }
   if (custom) {
     // 自定义回答 = 新的路径：重新进入绑定流程（深度保护）
-    await sendDirectReply(sender, conv, `重新选择: ${custom}`, api);
+    await sendTip(sender, conv, `重新选择: ${custom}`, api);
     await bindWorkspacePath(api, key, custom, sender, conv, label, depth + 1);
     return;
   }
@@ -1968,9 +2205,9 @@ async function handleModelCommand(
       if (presets.length > 0) {
         lines.push(`预设快捷方式:\n${presets.join("\n")}`);
       }
-      await sendDirectReply(sender, conv, lines.join("\n"), api);
+      await sendTip(sender, conv, lines.join("\n"), api);
     } catch (e: any) {
-      await sendDirectReply(sender, conv, `获取模型信息失败: ${e.message}`, api);
+      await sendTip(sender, conv, `获取模型信息失败: ${e.message}`, api);
     }
     return;
   }
@@ -1987,7 +2224,7 @@ async function handleModelCommand(
   } else {
     const candidates = catalog.filter((e) => e.id === arg);
     if (candidates.length > 1) {
-      await sendDirectReply(
+      await sendTip(
         sender,
         conv,
         `模型 "${arg}" 存在于多个 provider，请指明: ${candidates.map((e) => `${e.provider}/${e.id}`).join(", ")}`,
@@ -2001,7 +2238,7 @@ async function handleModelCommand(
     // Catalog path: switch provider/model only, keep the current effort.
     const selection = await selector.applyModel(key, match.provider, match.id);
     const live = api.wildfireAgents.applyModelLive(key, selection);
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? `（推理等级保留=${selection.reasoningEffort}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
@@ -2012,11 +2249,11 @@ async function handleModelCommand(
   // Backward compatible: configured preset id.
   const selection = selector.applyPreset(key, arg);
   if (!selection) {
-    await sendDirectReply(sender, conv, `未找到模型: ${arg}，发 /model 查看可用列表`, api);
+    await sendTip(sender, conv, `未找到模型: ${arg}，发 /model 查看可用列表`, api);
     return;
   }
   const live = api.wildfireAgents.applyModelLive(key, selection);
-  await sendDirectReply(
+  await sendTip(
     sender,
     conv,
     `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (推理等级=${selection.reasoningEffort})` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
@@ -2107,9 +2344,9 @@ async function handleEffortCommand(
       } else {
         lines.push("当前模型未声明可选推理等级");
       }
-      await sendDirectReply(sender, conv, lines.join("\n"), api);
+      await sendTip(sender, conv, lines.join("\n"), api);
     } catch (e: any) {
-      await sendDirectReply(sender, conv, `获取推理等级失败: ${e.message}`, api);
+      await sendTip(sender, conv, `获取推理等级失败: ${e.message}`, api);
     }
     return;
   }
@@ -2120,7 +2357,7 @@ async function handleEffortCommand(
   const support = await resolveEffortInfo(api, current);
   const hit = support?.efforts.find((e) => e.id === arg);
   if (support && !hit) {
-    await sendDirectReply(
+    await sendTip(
       sender,
       conv,
       `不支持的推理等级: ${arg}，可选: ${support.efforts.map((e) => e.id).join(" / ")}`,
@@ -2131,7 +2368,7 @@ async function handleEffortCommand(
   const selection = { ...current, reasoningEffort: arg };
   selector.setOverride(key, selection);
   const live = api.wildfireAgents.applyModelLive(key, selection);
-  await sendDirectReply(
+  await sendTip(
     sender,
     conv,
     `推理等级已设为 ${arg}${hit ? `（${hit.name}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
@@ -2191,12 +2428,17 @@ async function sendStreamingReply(
 }
 
 /** Send a plain text reply (whitelist rejection, etc.). */
+/**
+ * 发送直接回复。`asTip=true` 时发 Tip 消息（type=90，客户端渲染为居中小字提示，
+ * 不占普通消息气泡）——用于命令响应等"系统提示"性质的文本。
+ */
 async function sendDirectReply(
   sender: string,
   conv: { type: number; target: string; line: number },
   text: string,
   api?: any,
-  targetLine?: number
+  targetLine?: number,
+  asTip = false
 ): Promise<void> {
   const client = getClient();
   if (!client) throw new Error("Wildfire client not connected");
@@ -2207,10 +2449,26 @@ async function sendDirectReply(
     // 默认回复到消息来源的会话线路；提醒等场景可显式指定目标线路
     line: targetLine ?? conv.line,
   };
-  const content = new TextMessageContent();
-  content.content = text;
+  let content: any;
+  if (asTip) {
+    content = new TipNotificationMessageContent(text);
+  } else {
+    content = new TextMessageContent();
+    content.content = text;
+  }
   const result = await client.sendMessage(conversation, content.encode());
   if (!result.isSuccess()) {
     api?.logger?.warn?.(`[wildfire] direct reply failed: ${result.getMsg?.()}`);
   }
+}
+
+/** 发送 tip 消息（命令响应用；客户端渲染为系统提示小字，不进普通消息流）。 */
+async function sendTip(
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  text: string,
+  api?: any,
+  targetLine?: number
+): Promise<void> {
+  await sendDirectReply(sender, conv, text, api, targetLine, true);
 }

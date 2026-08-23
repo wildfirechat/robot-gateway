@@ -37,6 +37,13 @@ export interface DispatchExtras {
   images?: Array<{ attachment: any }>;
 }
 
+/**
+ * 绑定一个 agent scope 的回调（由 index.ts 注入 InteractionManager.bindAgentScope）：
+ * 在 agent 创建/resume 的 setup(agentCtx) 里调用，用于监听该 agent 的 scoped
+ * subagent 事件（全局 ctx.on 收不到 scoped 事件）。
+ */
+export type AgentScopeBinder = (agentCtx: any) => void;
+
 /** Live turn state notifications (mapped to the scope=31 conversation state / DSH_Goal card). */
 export interface TurnHandlers {
   /** Session state changed (idle/running/waiting_user/done). */
@@ -141,6 +148,8 @@ export class AgentSessionManager {
   private config: RequiredSessionConfig;
   private cwdProvider: CwdProvider;
   private modelProvider: ModelProvider;
+  /** 绑定 agent scope 的回调（subagent 事件等 scoped 监听，index.ts 注入）。 */
+  private agentScopeBinder?: AgentScopeBinder;
   private sessions = new Map<string, ManagedSession>();
   /** 会话重建计数：key → cwd → epoch（仅 log 损坏/冲突时递增）。 */
   private epochByKeyCwd = new Map<string, Map<string, number>>();
@@ -245,13 +254,15 @@ export class AgentSessionManager {
     logger: any,
     config: RequiredSessionConfig,
     cwdProvider: CwdProvider,
-    modelProvider: ModelProvider
+    modelProvider: ModelProvider,
+    agentScopeBinder?: AgentScopeBinder
   ) {
     this.ctx = ctx;
     this.logger = logger;
     this.config = config;
     this.cwdProvider = cwdProvider;
     this.modelProvider = modelProvider;
+    this.agentScopeBinder = agentScopeBinder;
 
     // Bridge the durable session firehose to per-conversation subscribers.
     ctx.on("session/event", (session: any, event: SessionEvent) => {
@@ -323,6 +334,7 @@ export class AgentSessionManager {
       },
       setup: (agentCtx: any) => {
         installModelSelection(agentCtx, selectionRef);
+        this.agentScopeBinder?.(agentCtx);
       },
     };
     const createOptions = {
@@ -334,6 +346,7 @@ export class AgentSessionManager {
       },
       setup: (agentCtx: any) => {
         installModelSelection(agentCtx, selectionRef);
+        this.agentScopeBinder?.(agentCtx);
       },
     };
 
@@ -742,6 +755,45 @@ export class AgentSessionManager {
       this.logger?.debug?.(`[wildfire-agent] projection read failed: ${String(err)}`);
       return undefined;
     }
+  }
+
+  /**
+   * 读取指定会话的【累计】统计（激活会话后读 token-meter 投影）。
+   * 用于工作目录切换后：立即显示目标目录会话的统计——
+   * 切回已访问目录（resume）显示其历史累计；全新目录（create 空会话）无
+   * usage 则返回 undefined（客户端不显示统计，等首回合结束）。
+   * 不含 turn/speed（那是"本轮"增量，切目录时没有本轮）。
+   */
+  async snapshotMetrics(key: string): Promise<Partial<TurnMetrics> | undefined> {
+    const agent = await this.getAgent(key);
+    const snap = this.readProjections(agent?.session);
+    if (!snap?.usage) return undefined;
+    const usage = snap.usage;
+    const ctx = snap.context;
+    const context: TurnMetrics["context"] =
+      ctx && typeof ctx.projectedTokens === "number" && typeof ctx.contextWindow === "number" && ctx.contextWindow > 0
+        ? {
+            usedTokens: Math.round(ctx.projectedTokens),
+            windowTokens: ctx.contextWindow,
+            usedPct: Math.round((ctx.projectedTokens / ctx.contextWindow) * 1000) / 10,
+          }
+        : undefined;
+    const cacheHitRatePct =
+      usage.cacheReadTokens + usage.uncachedInputTokens > 0
+        ? Math.round((usage.cacheReadTokens / (usage.cacheReadTokens + usage.uncachedInputTokens)) * 1000) / 10
+        : 0;
+    return {
+      usage: {
+        promptTokens: usage.uncachedInputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
+        totalTokens:
+          usage.uncachedInputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
+      },
+      ...(context ? { context } : {}),
+      cacheHitRatePct,
+    };
   }
 
   /**

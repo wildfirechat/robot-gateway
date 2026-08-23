@@ -218,7 +218,7 @@ createUserMessage({
 
 ### 会话运行状态与 Token 计量（scope=31 会话级用户设置）
 
-Agent 运行状态（state/phase/toolName/model/reasoningEffort）、交互/结果态（interaction/reason/error/cwd/sessionId/goal）与 Token 计量（usage/turn/context/cacheHitRatePct/speed，来源 `ctx.sessionProjections` 的 dsh-token-meter 投影）统一走 **scope=31 会话级用户设置（type=1 状态）**，由 `updateConversationUserSetting` 推送、300ms 合并节流，不占消息流。客户端订阅该设置即可读取展示（各端 `dshMetricsText` 渲染一行计量文本）。完整字段字典见 `INTERACTION_DESIGN.md` §2.2。
+Agent 运行状态（state/phase/toolName/model/reasoningEffort）、交互/结果态（interaction/reason/error/cwd/sessionId/goal/**lastChange**）走 **scope=31 type=1 状态**（键 `..._1`）；Token 计量（usage/turn/context/cacheHitRatePct/speed/metricsAt）走 **scope=31 type=2 统计**（键 `..._2`）；AI 面板数据（组合查询结果：model 目录/effort/沙箱/计划/cwd/目录列表）走 **scope=31 type=3 面板数据**（键 `..._3`）——三通道分离：状态是高频瞬态、统计是低频累积（回合结束必推）、面板数据由 207 组合查询/更新刷新。面板交互经 **DSH_Command(207)** 透明消息完成（不落消息流），更新后写 type=1 `lastChange`（变更可见）。客户端分别订阅。完整字段字典见 `INTERACTION_DESIGN.md` §2.2。
 
 ## 工作目录（Workspace）选定
 

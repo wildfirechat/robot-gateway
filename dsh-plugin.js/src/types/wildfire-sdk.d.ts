@@ -84,6 +84,11 @@ declare module "@wildfirechat/server-sdk" {
     streamId: string;
   }
 
+  export class TipNotificationMessageContent extends MessageContent {
+    constructor(tip: string);
+    tip: string;
+  }
+
   export interface Conversation {
     type: number;
     target: string;

@@ -74,31 +74,28 @@
 { "aid": "uuid", "action": "approve" }   // 或 "reject"
 ```
 
-**进度/状态通道（scope=31 会话级用户设置，替代原 204/205 消息）** — 由 `turn/start`、`step/start`、`tool/call`、`turn/end` 事件映射，经 `updateConversationUserSetting`（scope=31，type=1）推送，300ms 合并节流；**不落消息流、不产生历史堆积**。每次推送携带自上次推送以来的完整合并状态（累计字段如 `model`/`cwd`/`sessionId`/`usage`/`context` 不会丢失）：
+**进度/状态通道（scope=31 会话级用户设置，替代原 204/205 消息）** — 由 `turn/start`、`step/start`、`tool/call`、`turn/end` 事件映射，经 `updateConversationUserSetting`（scope=31）推送，300ms 合并节流；**不落消息流、不产生历史堆积**。**双通道设计**：运行/交互状态走 **type=1**（键 `..._1`，高频瞬态，每次推送携带自上次以来的完整合并状态），Token 统计走 **type=2**（键 `..._2`，低频累积、回合结束必推含出错/取消，带 `metricsAt` 时间戳）——统计不受状态推送路径影响。
 
-**A. 运行状态**
+**type=1 运行/交互状态**
 ```json
 { "state": "idle" | "running" | "waiting_user" | "done",
   "phase": "thinking" | "tool" | "done", "toolName": "bash",
-  "model": "deepseek-official/deepseek-v4-flash", "reasoningEffort": "high" }
-```
-
-**B. 交互/结果态**
-```json
-{ "interaction": "question" | "approval",        // state=waiting_user 时有效
+  "model": "deepseek-official/deepseek-v4-flash", "reasoningEffort": "high",
+  "interaction": "question" | "approval",        // state=waiting_user 时有效
   "reason": "completed" | "error" | "cancelled", // 上回合结果；新回合开始（state=running）时清除
   "error": "错误信息",                            // reason=error 时
   "cwd": "/data/wf/<id>/", "sessionId": "wildfire-<hash>",
   "goal": { "phase": "active|paused|blocked|complete", "roundsStarted": 3, "objective": "..." } }
 ```
 
-**C. Token 计量（来源：DSH dsh-token-meter 投影，provider 真实计数；插件在回合结束时快照差分）**
+**type=2 Token 统计（来源：DSH dsh-token-meter 投影，provider 真实计数；插件在回合结束时快照差分）**
 ```json
 { "usage":   { "promptTokens": 323, "outputTokens": 181, "cacheReadTokens": 15488, "cacheWriteTokens": 0, "totalTokens": 15992 },
   "turn":    { "inputTokens": 102, "outputTokens": 179, "cacheHitTokens": 7808, "durationMs": 2540 },
   "context": { "usedTokens": 8113, "windowTokens": 1000000, "usedPct": 0.8 },
   "cacheHitRatePct": 98,
-  "speed":   { "tokensPerSec": 70.5, "ttftMs": 2227 } }
+  "speed":   { "tokensPerSec": 70.5, "ttftMs": 2227 },
+  "metricsAt": 1787470162762 }
 ```
 
 字段语义（客户端展示约定）：
@@ -107,7 +104,8 @@
 - `context`：上下文占用 —— `usedTokens` 是"下一请求预估 prompt 成本"（projectedTokens，能反映压缩回落），`usedPct = usedTokens/windowTokens`；窗口默认 1M（deepseek）
 - `cacheHitRatePct`：累计缓存命中率 = cacheRead/(cacheRead+uncachedInput)；多轮会话才有意义，首轮通常 0%
 - `speed`：本轮生成速度（输出 token/耗时）与首字延迟，插件本地计时，非 provider 上报
-- 客户端展示一行计量文本（参考各端 `dshMetricsText`）：`🤔 等待确认/🔐 等待审批 · 上下文 0.8% · 缓存 98% · 70.5 tok/s · 本轮 179 tok · 累计 15992 tok · ⚠️错误/已取消`
+- `metricsAt`：统计生成时间（Unix ms），客户端据此判断时效
+- 客户端标题合并行 = **AI 在线（type=1 群主在线）· 运行态提示（type=1：🤔 等待确认/🔐 等待审批/⚠️错误/已取消）· 统计（type=2：上下文 0.8% · 缓存 98% · 70.5 tok/s · 本轮 179 tok · 累计 15992 tok）**，各段为空则跳过（参考各端 `dshMetricsText` + `dshStatusHint`）
 
 > 决策原因：进度/状态是高频瞬态数据，作为消息发送会堆积历史且透传消息（messageId=0）在客户端消息列表中不可见；会话级用户设置天然是"当前状态"语义，客户端订阅即得。Token 计量走同一通道，客户端无需额外查询。
 
@@ -415,6 +413,7 @@ inbound 消息 → 先拦截通知类型（105 AddGroupMember / 108 DismissGroup
 | 15 | **PC 端 DSH 会话 UI**：输入框输入 **`/` 弹出命令菜单**（Tribute，与 `@` 提及同机制；选中命令填入输入框、不直接发送）；标题栏**状态徽标 + 停止按钮**（发 `/stop`）；输入框占位随状态变化（`waiting_user` 提示可直接文字作答）；会话列表**状态圆点 + 群 DSH 标识**——全部仅对 DSH 会话显示，事件驱动（`settingUpdate`）无轮询 |
 | 16 | **项目根目录 + 目录浏览 + 缺失目录创建确认**：`workspace.root` 为唯一项目根（回退链 `autoRoot` → 第一个 `allowedRoot` → `path`）；`/cwd` 相对路径一律按根目录解析；新增 `/ls [子目录]` 列出根目录内容（任一准入成员）；`/cwd` 目标目录不存在时发 **DSH_Question 确认卡片**（✅ 创建 / ❌ 取消 / 自定义回答输入新路径，深度 ≤3 轮，60s 超时），不再直接报错 |
 | 17 | **会话策略与群名联动**：`/cwd` 切换目录 = **切换会话**——session id 由 (群, 目录) 派生（`wildfire-{hash[:20]}-{dirHash[:16]}`），各目录会话独立持久化、上下文互不干扰；切回已访问目录时 **`resume` 恢复该目录上下文**，新目录则新建；`/reset` 仍是显式重置（清当前目录上下文）；部署前的旧会话按 cwd 匹配迁移（不匹配则新建）。群聊绑定成功后机器人 `modifyGroupInfo(type=0)` 把**群名改为目录最后一段**（`/a/b/c` → `c`），私聊不生效，改名失败不影响绑定流程 |
+| 18 | **AI 面板静默通道（207 + type=3）**：AI 设置面板（模型/推理等级/沙箱/计划/工作目录/压缩/重置）的交互**不落消息流**——打开发 **DSH_Command(207)** 组合查询（透明消息，客户端不渲染），插件聚合面板数据（model 目录/effort/沙箱/计划/cwd/sessionId/根目录子目录）写 **scope=31 type=3**（键 `..._3`），面板读 type=3 渲染；更新操作发 207 `set`（cmd=命令文本），插件执行后写 **type=1 `lastChange`**（如 "模型 → xxx"，新回合开始时清除，**变更对群成员可见**）并刷新 type=3；`/` 命令菜单相应精简（面板覆盖的命令不再展示，插件命令保留为底层 API）。数据通道现为三路：type=1 状态 / type=2 统计 / type=3 面板数据 |
 
 ### 待定问题
 

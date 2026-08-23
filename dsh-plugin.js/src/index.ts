@@ -195,6 +195,54 @@ export function apply(ctx: any, config: any): void {
             );
           }
         },
+        setConversationMetrics: async (key: string, payload: Record<string, unknown>) => {
+          const client = getConnectedClient();
+          if (!client) return;
+          const target = api.interactions.getConversation(key);
+          if (!target) return;
+          // scope=31 conversation user setting, type=2 = Token 统计
+          // （与 type=1 运行状态分开，键 `<convType>-<line>-<target>_2`）。
+          const conversation =
+            target.conv.type === 0
+              ? { type: 0, target: target.sender, line: target.conv.line }
+              : { type: target.conv.type, target: target.conv.target, line: target.conv.line };
+          const result = await client.updateConversationUserSetting(
+            conversation,
+            2,
+            JSON.stringify(payload)
+          );
+          if (result?.code !== 0) {
+            logger.warn?.(`[wildfire] conversation metrics set failed: ${result?.msg ?? result?.code}`);
+          } else {
+            logger.info?.(
+              `[wildfire] conversation metrics set: key=${key}, type=${conversation.type}, target=${conversation.target}, value=${JSON.stringify(payload)}`
+            );
+          }
+        },
+        setConversationPanelData: async (key: string, payload: Record<string, unknown>) => {
+          const client = getConnectedClient();
+          if (!client) return;
+          const target = api.interactions.getConversation(key);
+          if (!target) return;
+          // scope=31 conversation user setting, type=3 = AI 面板数据
+          // （组合查询结果，键 `<convType>-<line>-<target>_3`）。
+          const conversation =
+            target.conv.type === 0
+              ? { type: 0, target: target.sender, line: target.conv.line }
+              : { type: target.conv.type, target: target.conv.target, line: target.conv.line };
+          const result = await client.updateConversationUserSetting(
+            conversation,
+            3,
+            JSON.stringify(payload)
+          );
+          if (result?.code !== 0) {
+            logger.warn?.(`[wildfire] conversation panel data set failed: ${result?.msg ?? result?.code}`);
+          } else {
+            logger.info?.(
+              `[wildfire] conversation panel data set: key=${key}, type=${conversation.type}, target=${conversation.target}, value=${JSON.stringify(payload)}`
+            );
+          }
+        },
       } satisfies CardSender,
       (sessionId: string) => api.wildfireAgents.keyForSessionId(sessionId),
       (key: string) => turnOwners.get(key)
@@ -206,7 +254,9 @@ export function apply(ctx: any, config: any): void {
       // Resolve the working directory for each conversation before agent creation.
       (key, sessionId) => api.workspace.resolve(key, sessionId),
       // Resolve the model selection for each conversation before agent creation.
-      (key) => api.models.resolve(key)
+      (key) => api.models.resolve(key),
+      // 在每个 agent scope 绑定 subagent 事件 → 任务卡片（scoped 事件全局监听不到）
+      (agentCtx: any) => api.interactions.bindAgentScope(agentCtx)
     ),
   };
 
@@ -230,6 +280,9 @@ export function apply(ctx: any, config: any): void {
       // web profile the Host apiproxy has already claimed the userQuestions
       // provider, and registering first would crash ITS activation instead.
       api.interactions.register(ctx);
+      // 任务进度卡片（208）：subagent 事件是 scoped 分发，需在每个 agent 的
+      // setup(agentCtx) 里绑定（AgentSessionManager 的 agentScopeBinder）。
+      api.interactions.registerTaskFeed(ctx);
       // Load persisted state (workspace bindings + dynamic allowlist + DSH registry + session epochs).
       await api.workspace.init();
       await api.whitelist.init();

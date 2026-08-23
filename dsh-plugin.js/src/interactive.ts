@@ -23,6 +23,9 @@ import {
   summarizeApproval,
   summarizeGoal,
   summarizeQuestion,
+  summarizeTasks,
+  type DSHTaskItem,
+  type DSHTaskProgressPayload,
   type DSHAnswerPayload,
   type DSHApprovalPayload,
   type DSHApprovalResultPayload,
@@ -107,12 +110,29 @@ export interface RuntimeState {
   goal?: GoalState;
   /** 进度（预留）。 */
   progress?: ProgressState;
-  // C 类：Token 计量
+  /** 最近一次面板/命令变更说明（如 "模型 → deepseek-v4-pro"）；新回合开始时清除。 */
+  lastChange?: string;
+}
+
+/**
+ * Token 统计（独立通道：scope=31 type=2 计量，与运行状态 type=1 分开）。
+ * 低频累积数据，仅在回合结束时推送；不受状态推送路径影响（出错/取消也推）。
+ */
+export interface MetricsState {
+  /** 会话累计用量（dsh-token-meter 投影，provider 真实计数）。 */
   usage?: UsageState;
+  /** 本轮增量（快照差分 + 插件本地计时）。 */
   turn?: TurnState;
+  /** 上下文占用（下一请求预估 / 模型窗口）。 */
   context?: ContextState;
+  /** 累计缓存命中率（0-100）。 */
   cacheHitRatePct?: number;
+  /** 本轮生成速度（本地计时）。 */
   speed?: SpeedState;
+  /** 统计生成时间（Unix ms，客户端判断时效）。 */
+  metricsAt?: number;
+  /** 统计所属 DSH 会话 id（客户端对比当前会话：跨会话的旧统计不显示）。 */
+  sessionId?: string;
 }
 
 /** Where to deliver a card/text for a conversation. */
@@ -146,6 +166,18 @@ export interface CardSender {
    * the message feed.
    */
   setConversationState(key: string, payload: Record<string, unknown>): Promise<void>;
+  /**
+   * Set the conversation-scoped user setting carrying the agent Token 统计
+   * (scope=31, type=2 计量). 与运行状态（type=1）分开：统计是低频累积数据，
+   * 独立推送、不受状态路径影响。
+   */
+  setConversationMetrics(key: string, payload: Record<string, unknown>): Promise<void>;
+  /**
+   * Set the conversation-scoped user setting carrying the AI 面板数据
+   * (scope=31, type=3 面板数据)：组合查询结果（模型目录/effort/沙箱/计划/cwd/
+   * 目录列表），面板打开与每次更新后刷新。
+   */
+  setConversationPanelData(key: string, payload: Record<string, unknown>): Promise<void>;
 }
 
 interface PendingQuestion {
@@ -408,7 +440,7 @@ export class InteractionManager {
     for (const field of [
       "state", "phase", "toolName", "model", "reasoningEffort",
       "interaction", "reason", "error", "cwd", "sessionId", "goal", "progress",
-      "usage", "turn", "context", "cacheHitRatePct", "speed",
+      "lastChange",
     ] as const) {
       if (data[field] !== undefined) (acc as any)[field] = data[field];
     }
@@ -461,25 +493,85 @@ export class InteractionManager {
     if (state === "running") {
       delete next.reason;
       delete next.error;
+      delete next.lastChange; // 新回合开始：清掉上一轮面板/命令变更提示
     } else {
       if (acc.reason !== undefined) next.reason = acc.reason;
       if (acc.error !== undefined) next.error = acc.error;
     }
+    if (acc.lastChange !== undefined) next.lastChange = acc.lastChange;
     if (acc.cwd !== undefined) next.cwd = acc.cwd;
     if (acc.sessionId !== undefined) next.sessionId = acc.sessionId;
     if (acc.goal !== undefined) next.goal = acc.goal;
     if (acc.progress !== undefined) next.progress = acc.progress;
-    // C 类：Token 计量（累计字段，仅在有新值时覆盖）
-    if (acc.usage !== undefined) next.usage = acc.usage;
-    if (acc.turn !== undefined) next.turn = acc.turn;
-    if (acc.context !== undefined) next.context = acc.context;
-    if (acc.cacheHitRatePct !== undefined) next.cacheHitRatePct = acc.cacheHitRatePct;
-    if (acc.speed !== undefined) next.speed = acc.speed;
     this.fullState.set(acc.key, next);
     this.cards
       .setConversationState(acc.key, next)
       .catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire] conversation state update failed: ${String(err)}`)
+      );
+  }
+
+  // ─────────────────────── Token 统计通道（scope=31 type=2） ───────────────────────
+  // 统计是低频累积数据，与运行状态（type=1）分开推送：回合结束必推
+  // （含出错/取消），不受状态推送路径影响。
+
+  /** Token 统计累积（按 key 覆盖式：每次回合结束推全量最新统计）。 */
+  private fullMetrics = new Map<string, Record<string, unknown>>();
+
+  /**
+   * 回合结束推送 Token 统计（scope=31, type=2）。`metrics` 为 undefined 时
+   * （如新会话首个请求前）跳过，保留上一次统计。
+   */
+  pushMetrics(key: string, metrics: MetricsState | undefined): void {
+    if (!metrics || typeof metrics !== "object") return;
+    const payload: Record<string, unknown> = {
+      ...metrics,
+      metricsAt: Date.now(),
+    };
+    this.fullMetrics.set(key, payload);
+    this.logger?.info?.(
+      `[wildfire] pushMetrics: key=${key}, out=${(payload.turn as any)?.outputTokens ?? "-"}, tok/s=${(payload.speed as any)?.tokensPerSec ?? "-"}, cacheHit=${payload.cacheHitRatePct ?? "-"}%`
+    );
+    this.cards
+      .setConversationMetrics(key, payload)
+      .catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire] conversation metrics update failed: ${String(err)}`)
+      );
+  }
+
+  /**
+   * 重置 Token 统计（scope=31 type=2 清空）——工作目录切换后调用：
+   * 统计属于旧会话，切目录后必须清掉，避免客户端误读旧目录的累计值；
+   * 新会话首回合结束 pushMetrics 重新写入。
+   */
+  resetMetrics(key: string): void {
+    this.fullMetrics.delete(key);
+    this.logger?.info?.(`[wildfire] resetMetrics: key=${key}`);
+    this.cards
+      .setConversationMetrics(key, {})
+      .catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire] conversation metrics reset failed: ${String(err)}`)
+      );
+  }
+
+  // ─────────────────────── AI 面板数据通道（scope=31 type=3） ───────────────────────
+  // 组合查询结果（模型目录/effort/沙箱/计划/cwd/目录列表），覆盖式写
+  // （面板打开发 DSH_Command query 后读取；每次更新后插件重写刷新）。
+
+  /** AI 面板数据（按 key 覆盖式最新快照）。 */
+  private fullPanelData = new Map<string, Record<string, unknown>>();
+
+  /**
+   * 推送 AI 面板数据（scope=31, type=3）。覆盖式：每次组合查询/更新后整份刷新。
+   */
+  pushPanelData(key: string, data: Record<string, unknown>): void {
+    if (!data || typeof data !== "object") return;
+    this.fullPanelData.set(key, data);
+    this.logger?.info?.(`[wildfire] pushPanelData: key=${key}, model=${(data.model as any)?.current ?? "-"}, dirs=${(data.dirs as any[])?.length ?? 0}`);
+    this.cards
+      .setConversationPanelData(key, data)
+      .catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire] conversation panel data update failed: ${String(err)}`)
       );
   }
 
@@ -494,8 +586,133 @@ export class InteractionManager {
       );
   }
 
+  // ─────────────────────── 任务进度卡片（208 DSH_TaskProgress） ───────────────────────
+  // 一张卡片一个会话：首次 sendCard 记录 messageId，之后 updateMessage 原地更新。
+  // 数据源：subagent/start、subagent/end 事件（parent Agent → IM 会话 key）。
+
+  /** key → 任务卡片 messageId（首次发送后记录，用于 updateMessage）。 */
+  private taskCardIds = new Map<string, string>();
+  /** key → 任务卡片发送中（sendCard 未 resolve 前不重复发，避免并发产生多张孤儿卡）。 */
+  private taskCardPending = new Set<string>();
+  /** key → taskId → 任务项。 */
+  private taskItems = new Map<string, Map<string, DSHTaskItem>>();
+
+  /**
+   * 注册任务卡片数据源。subagent 事件是 scoped 分发（按 parent agent 的
+   * scope 载体），全局 ctx.on 收不到——必须在每个 agent 的 setup(agentCtx)
+   * 里绑定（见 bindAgentScope）。
+   */
+  registerTaskFeed(ctx: any): void {
+    this.logger?.info?.("[wildfire] task feed ready (bind per-agent scope via setup)");
+  }
+
+  /**
+   * 绑定一个 agent 的 scope 到任务卡片：在该 agent 内监听其派生的
+   * subagent/start、subagent/end（agent.ts 的 create/resume setup 调用）。
+   */
+  bindAgentScope(agentCtx: any): void {
+    agentCtx.on("subagent/start", (info: any) => {
+      try {
+        const parent = agentCtx.agent;
+        const key = this.resolveKeyForSession(String(parent?.session?.id));
+        if (!key) return;
+        this.upsertTask(key, String(info?.runId ?? info?.id), {
+          kind: "subagent",
+          id: String(info?.id ?? ""),
+          label: this.subagentLabel(parent, info),
+          status: "running",
+          updatedAt: Date.now(),
+        });
+      } catch (err: any) {
+        this.logger?.warn?.(`[wildfire] subagent/start handling failed: ${String(err)}`);
+      }
+    });
+    agentCtx.on("subagent/end", (info: any) => {
+      try {
+        const parent = agentCtx.agent;
+        const key = this.resolveKeyForSession(String(parent?.session?.id));
+        if (!key) return;
+        const failed = String(info?.stopReason ?? "") === "error";
+        this.upsertTask(key, String(info?.runId ?? info?.id), {
+          kind: "subagent",
+          id: String(info?.id ?? ""),
+          label: this.subagentLabel(parent, info),
+          status: failed ? "failed" : "done",
+          ...(failed ? { reason: "子任务执行失败" } : {}),
+          updatedAt: Date.now(),
+        });
+      } catch (err: any) {
+        this.logger?.warn?.(`[wildfire] subagent/end handling failed: ${String(err)}`);
+      }
+    });
+  }
+
+  /** 子任务标签：优先 descriptor label（尽力而为），缺失时用 id 前缀。 */
+  private subagentLabel(parent: any, info: any): string | undefined {
+    try {
+      const childAgent = parent?.subagents?.get?.(String(info?.id));
+      const label = childAgent?.descriptor?.label ?? childAgent?.meta?.label;
+      if (typeof label === "string" && label.trim()) return label.trim();
+    } catch {
+      // 忽略
+    }
+    return undefined;
+  }
+
+  /** 记录/更新一个任务项并刷新卡片。 */
+  private upsertTask(key: string, taskId: string, item: DSHTaskItem): void {
+    let byKey = this.taskItems.get(key);
+    if (!byKey) {
+      byKey = new Map<string, DSHTaskItem>();
+      this.taskItems.set(key, byKey);
+    }
+    byKey.set(taskId, item);
+    this.flushTaskCard(key);
+  }
+
+  /** 向会话发/更新任务卡片（一张卡：首次 sendCard，之后 updateMessage）。 */
+  private flushTaskCard(key: string): void {
+    const target = this.getConversation(key);
+    if (!target) return;
+    const items = [...(this.taskItems.get(key) ?? new Map<string, DSHTaskItem>()).values()];
+    const payload: DSHTaskProgressPayload = { tasks: items, updatedAt: Date.now() };
+    const existingId = this.taskCardIds.get(key);
+    if (existingId) {
+      this.cards
+        .updateCard(existingId, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload))
+        .catch((err: unknown) =>
+          this.logger?.warn?.(`[wildfire] task card update failed: ${String(err)}`)
+        );
+      return;
+    }
+    // 发送中不重复发：并发 subagent/start 只发一张卡，messageId 返回后记录
+    if (this.taskCardPending.has(key)) return;
+    this.taskCardPending.add(key);
+    this.cards
+      .sendCard(target, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload), 1)
+      .then((messageId) => {
+        if (messageId) this.taskCardIds.set(key, messageId);
+      })
+      .catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire] task card send failed: ${String(err)}`)
+      )
+      .finally(() => {
+        this.taskCardPending.delete(key);
+      });
+  }
+
+  /** 重置任务卡片状态（切目录/重置会话时调用：旧会话任务卡不再更新）。 */
+  resetTaskCards(key: string): void {
+    this.taskCardIds.delete(key);
+    this.taskCardPending.delete(key);
+    this.taskItems.delete(key);
+  }
+
   /** Reset everything (plugin stop). */
   dispose(): void {
+    this.taskCardIds.clear();
+    this.taskCardPending.clear();
+    this.taskItems.clear();
     for (const pending of this.pendingQuestions.values()) {
       clearTimeout(pending.timer);
       pending.resolve({ answers: [] });
