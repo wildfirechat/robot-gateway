@@ -155,8 +155,10 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
         String sessionId = session.getId();
         String robotId = connectMsg.getRobotId();
         String secret = connectMsg.getSecret();
+        // SDK 上报的平台号（null = 网关默认平台 Linux=7）
+        Integer platform = connectMsg.getPlatform();
 
-        LOG.info("Authenticating session {} as robot {}", sessionId, robotId);
+        LOG.info("Authenticating session {} as robot {} (platform={})", sessionId, robotId, platform);
 
         // 如果已经鉴权，拒绝重复鉴权
         if (sessionManager.isAuthenticated(sessionId)) {
@@ -170,7 +172,7 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
 
         if (result.isSuccess()) {
             // 鉴权成功
-            sessionManager.authenticateSession(sessionId, robotId, result.getRobotService());
+            sessionManager.authenticateSession(sessionId, robotId, result.getRobotService(), platform);
             // 通知 IMSDK 设置机器人在线
             sessionManager.updateRobotOnlineStatus(sessionId, true);
             ConnectMessage success = ConnectMessage.success();

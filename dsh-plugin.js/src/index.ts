@@ -7,7 +7,7 @@
 
 import { startClient, stopClient, getConnectedClient, isClientConnected } from "./clients.js";
 import { turnOwners } from "./inbound.js";
-import { getConfig, getSessionConfig, getAiLine, validateConfig } from "./config.js";
+import { getConfig, getSessionConfig, validateConfig } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { AgentSessionManager } from "./agent.js";
 import { WorkspaceResolver } from "./workspace.js";
@@ -123,7 +123,7 @@ export function apply(ctx: any, config: any): void {
           const conversation = {
             type: target.conv.type,
             target: target.conv.type === 0 ? target.sender : target.conv.target,
-            line: getAiLine(cfg), // AI 回复统一使用 AI line（默认 2）
+            line: target.conv.line, // 回复到会话所在线路
           };
           const result = await client.sendMessage(conversation, content.encode());
           if (!result?.isSuccess?.()) {
@@ -143,13 +143,19 @@ export function apply(ctx: any, config: any): void {
           const conversation = {
             type: target.conv.type,
             target: target.conv.type === 0 ? target.sender : target.conv.target,
-            line: getAiLine(cfg), // AI 卡片统一使用 AI line（默认 2）
+            line: target.conv.line, // 卡片发到会话所在线路
           };
           const result = await client.sendMessage(conversation, payload);
           if (!result?.isSuccess?.()) {
             throw new Error(result?.getMsg?.() ?? "card send failed");
           }
-          const uid = String(result?.getResult()?.messageUid ?? "");
+          // 优先读 messageUidString（gateway 新增的字符串字段，避免 int64 精度丢失）；
+          // 老 gateway 没有该字段时回退 messageUid。
+          const uid = String(
+            result?.getResult()?.messageUidString ??
+              result?.getResult()?.messageUid ??
+              ""
+          );
           logger.info?.(
             `[wildfire] card sent: type=${type}, uid=${uid}, summary=${summary.slice(0, 60)}`
           );
@@ -159,7 +165,11 @@ export function apply(ctx: any, config: any): void {
           const client = getConnectedClient();
           if (!client) return;
           const payload = buildPayload(type, data, summary, 1);
-          await client.updateMessage(messageId, payload);
+          const result = await client.updateMessage(messageId, payload);
+          const r = result as any;
+          logger.info?.(
+            `[wildfire] updateMessage called: messageId=${messageId}, type=${type}, code=${r?.code ?? r?.getCode?.()}, msg=${r?.msg ?? r?.getMsg?.() ?? "ok"}`
+          );
         },
         setConversationState: async (key: string, payload: Record<string, unknown>) => {
           const client = getConnectedClient();
@@ -170,8 +180,8 @@ export function apply(ctx: any, config: any): void {
           // user; group → target = groupId. type=1 = 状态 (business convention).
           const conversation =
             target.conv.type === 0
-              ? { type: 0, target: target.sender, line: getAiLine(cfg) }
-              : { type: target.conv.type, target: target.conv.target, line: getAiLine(cfg) };
+              ? { type: 0, target: target.sender, line: target.conv.line }
+              : { type: target.conv.type, target: target.conv.target, line: target.conv.line };
           const result = await client.updateConversationUserSetting(
             conversation,
             1,

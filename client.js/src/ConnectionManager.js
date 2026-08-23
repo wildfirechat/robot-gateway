@@ -1,6 +1,25 @@
 import { RobotGatewayClient } from './RobotGatewayClient.js';
 
 /**
+ * 野火 Platform 号（ProtoConstants.Platform）：
+ * 1=iOS, 2=Android, 3=Windows, 4=OSX, 5=WEB, 6=WX, 7=Linux, 10=Harmony ...
+ */
+
+/**
+ * 按当前运行环境自动探测机器人平台号。
+ * Node 进程跑在哪个 OS 就上报哪个平台；无法识别时兜底 Linux（7，服务器语义）。
+ */
+export function detectPlatform() {
+    const p = typeof process !== 'undefined' && process.platform ? process.platform : '';
+    switch (p) {
+        case 'darwin': return 4;  // OSX
+        case 'win32': return 3;   // Windows
+        case 'linux': return 7;   // Linux
+        default: return 7;        // 兜底 Linux
+    }
+}
+
+/**
  * 连接管理器
  * 管理 WebSocket 连接的生命周期和自动重连
  */
@@ -30,7 +49,7 @@ export class ConnectionManager {
      * @param {number} timeoutSeconds - 超时时间（秒）
      * @returns {Promise<boolean>} - 是否成功
      */
-    async connect(robotId, robotSecret, timeoutSeconds = 30) {
+    async connect(robotId, robotSecret, timeoutSeconds = 30, platform = null) {
         if (this.running) {
             throw new Error('Already running');
         }
@@ -38,6 +57,9 @@ export class ConnectionManager {
         this.running = true;
         this.robotId = robotId;
         this.robotSecret = robotSecret;
+        // 平台号：显式参数优先，其次构造 options.platform，最后按运行环境自动探测
+        // （Linux=7 / macOS=4 / Windows=3）。重连时沿用本次连接上报的平台。
+        this.platform = platform ?? this.options?.platform ?? detectPlatform();
 
         try {
             // 创建客户端
@@ -51,7 +73,7 @@ export class ConnectionManager {
 
             // 发送鉴权请求
             const authPromise = this.waitForAuth(timeoutSeconds);
-            this.client.sendConnect(robotId, robotSecret);
+            this.client.sendConnect(robotId, robotSecret, this.platform);
 
             // 等待鉴权结果
             const authResult = await authPromise;
@@ -102,7 +124,7 @@ export class ConnectionManager {
             this.client = null;
         }
 
-        return this.connect(this.robotId, this.robotSecret);
+        return this.connect(this.robotId, this.robotSecret, 30, this.platform);
     }
 
     /**

@@ -54,8 +54,15 @@ public class SessionManager {
     // 未鉴权会话超时时间（毫秒）- 1分钟
     private static final long UNAUTHENTICATED_TIMEOUT = 60 * 1000;
 
-    // 机器人在线状态对应的平台号
+    // 机器人在线状态对应的平台号（SDK 未上报 platform 时的默认值；Linux）
     private static final int ROBOT_ONLINE_PLATFORM = 7;
+
+    /**
+     * 会话实际的在线平台号：SDK 上报的平台优先，缺省用默认平台（Linux=7）。
+     */
+    private static int effectivePlatform(Integer platform) {
+        return platform != null ? platform : ROBOT_ONLINE_PLATFORM;
+    }
 
     @Autowired
     private Executor asyncExecutor;
@@ -104,10 +111,11 @@ public class SessionManager {
             }
             // 如果是最后一个会话，先同步通知 IMSDK 设置机器人下线，避免 RobotService 关闭后无法发送
             if (isLastSession && info.getRobotService() != null) {
+                int platform = effectivePlatform(info.getPlatform());
                 try {
-                    IMResult<Void> result = info.getRobotService().setOnline(ROBOT_ONLINE_PLATFORM, false);
+                    IMResult<Void> result = info.getRobotService().setOnline(platform, false);
                     LOG.info("Set robot {} online status to false on platform {}: {}",
-                            info.getRobotId(), ROBOT_ONLINE_PLATFORM,
+                            info.getRobotId(), platform,
                             result != null ? result.getErrorCode() : "null");
                 } catch (Exception e) {
                     LOG.error("Failed to set robot {} online status to false: {}", info.getRobotId(), e.getMessage());
@@ -137,8 +145,9 @@ public class SessionManager {
 
     /**
      * 鉴权会话
+     * @param platform SDK 上报的平台号（null = 默认平台 Linux=7）
      */
-    public boolean authenticateSession(String sessionId, String robotId, RobotService robotService) {
+    public boolean authenticateSession(String sessionId, String robotId, RobotService robotService, Integer platform) {
         SessionInfo info = sessionInfos.get(sessionId);
         if (info == null) {
             LOG.warn("Session {} not found for authentication", sessionId);
@@ -170,11 +179,12 @@ public class SessionManager {
         info.setAuthenticated(true);
         info.setRobotId(robotId);
         info.setRobotService(robotService);
+        info.setPlatform(platform);
 
         robotSessionMap.computeIfAbsent(robotId, k -> new CopyOnWriteArraySet<>()).add(sessionId);
 
-        // 通知 IMSDK 设置机器人在线
-        setRobotOnlineAsync(robotService, robotId, true);
+        // 通知 IMSDK 设置机器人在线（使用 SDK 上报的平台）
+        setRobotOnlineAsync(robotService, robotId, true, platform);
 
         LOG.info("Session {} authenticated as robot {}", sessionId, robotId);
         return true;
@@ -228,11 +238,16 @@ public class SessionManager {
 
     /**
      * 发送消息到指定会话
+     * 序列化后统一给 messageId/messageUid 附加 String 字段（messageIdString/
+     * messageUidString）：这两个字段是 int64，超过 JS Number 安全整数（2^53），
+     * JS 端 JSON.parse 会精度丢失（571912188042674306 → ...300），导致按 uid 定位
+     * 失败。原数字字段保持不变（其他平台 SDK 兼容），JS 端优先读 String 字段。
      */
     public boolean sendMessage(WebSocketSession session, Object message) {
         if (session != null && session.isOpen()) {
             try {
                 String json = gson.toJson(message);
+                json = addUidStringFields(json);
                 session.sendMessage(new TextMessage(json));
                 return true;
             } catch (IOException e) {
@@ -247,6 +262,47 @@ public class SessionManager {
             }
         }
         return false;
+    }
+
+    /**
+     * 递归为 JSON 中所有 messageId/messageUid 数字字段附加
+     * messageIdString/messageUidString（字符串原值，JS 端防 int64 精度丢失）。
+     * 原数字字段不动，其他平台 SDK 不受影响。
+     */
+    private static String addUidStringFields(String json) {
+        try {
+            com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+            addUidStringsRecursive(root);
+            return root.toString();
+        } catch (Exception e) {
+            // 非 JSON 或解析失败：原样返回
+            return json;
+        }
+    }
+
+    private static void addUidStringsRecursive(com.google.gson.JsonObject obj) {
+        // 遍历中不能修改 LinkedTreeMap（会抛 ConcurrentModificationException），
+        // 先收集需要附加的键，遍历结束后统一 addProperty。
+        java.util.List<java.util.Map.Entry<String, com.google.gson.JsonElement>> toAdd =
+                new java.util.ArrayList<>();
+        for (java.util.Map.Entry<String, com.google.gson.JsonElement> entry : obj.entrySet()) {
+            com.google.gson.JsonElement el = entry.getValue();
+            if (el.isJsonObject()) {
+                addUidStringsRecursive(el.getAsJsonObject());
+            } else if (el.isJsonArray()) {
+                for (com.google.gson.JsonElement item : el.getAsJsonArray()) {
+                    if (item.isJsonObject()) {
+                        addUidStringsRecursive(item.getAsJsonObject());
+                    }
+                }
+            } else if (el.isJsonPrimitive() && el.getAsJsonPrimitive().isNumber()
+                    && ("messageId".equals(entry.getKey()) || "messageUid".equals(entry.getKey()))) {
+                toAdd.add(entry);
+            }
+        }
+        for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : toAdd) {
+            obj.addProperty(e.getKey() + "String", e.getValue().getAsString());
+        }
     }
 
     /**
@@ -325,6 +381,8 @@ public class SessionManager {
         private boolean authenticated;
         private String robotId;
         private RobotService robotService;
+        /** SDK 上报的平台号（null = 默认平台 Linux=7） */
+        private Integer platform;
         private volatile long lastHeartbeatTime;
         private final long createTime;
 
@@ -344,6 +402,8 @@ public class SessionManager {
         public void setRobotId(String robotId) { this.robotId = robotId; }
         public RobotService getRobotService() { return robotService; }
         public void setRobotService(RobotService robotService) { this.robotService = robotService; }
+        public Integer getPlatform() { return platform; }
+        public void setPlatform(Integer platform) { this.platform = platform; }
         public long getLastHeartbeatTime() { return lastHeartbeatTime; }
         public void updateHeartbeatTime() { this.lastHeartbeatTime = System.currentTimeMillis(); }
     }
@@ -357,16 +417,18 @@ public class SessionManager {
 
     /**
      * 异步设置机器人在线状态
+     * @param platform SDK 上报的平台号（null = 默认平台 Linux=7）
      */
-    private void setRobotOnlineAsync(RobotService robotService, String robotId, boolean online) {
+    private void setRobotOnlineAsync(RobotService robotService, String robotId, boolean online, Integer platform) {
         if (robotService == null || asyncExecutor == null) {
             return;
         }
+        int p = effectivePlatform(platform);
         asyncExecutor.execute(() -> {
             try {
-                IMResult<Void> result = robotService.setOnline(ROBOT_ONLINE_PLATFORM, online);
+                IMResult<Void> result = robotService.setOnline(p, online);
                 LOG.info("Set robot {} online status to {} on platform {}: {}",
-                        robotId, online, ROBOT_ONLINE_PLATFORM,
+                        robotId, online, p,
                         result != null ? result.getErrorCode() : "null");
             } catch (Exception e) {
                 LOG.error("Failed to set robot {} online status to {}: {}", robotId, online, e.getMessage());
@@ -380,7 +442,7 @@ public class SessionManager {
     public void updateRobotOnlineStatus(String sessionId, boolean online) {
         SessionInfo info = sessionInfos.get(sessionId);
         if (info != null && info.getRobotService() != null) {
-            setRobotOnlineAsync(info.getRobotService(), info.getRobotId(), online);
+            setRobotOnlineAsync(info.getRobotService(), info.getRobotId(), online, info.getPlatform());
         }
     }
 

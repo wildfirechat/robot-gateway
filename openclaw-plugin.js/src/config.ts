@@ -7,6 +7,8 @@ export interface WildfireConfig {
   gatewayUrl?: string;
   robotId?: string;
   robotSecret?: string;
+  /** 机器人平台号（可选覆盖）：默认不配置，SDK 按运行环境自动探测（Linux=7 / macOS=4 / Windows=3）。 */
+  gatewayPlatform?: number;
   asrServer?: string;
   requireMention?: boolean;
   helpKeywords?: string;
@@ -33,6 +35,7 @@ export function getAccountConfig(api: any, accountId: string = "default"): Wildf
       gatewayUrl: account.gatewayUrl ?? cfg.gatewayUrl,
       robotId: account.robotId ?? cfg.robotId,
       robotSecret: account.robotSecret ?? cfg.robotSecret,
+      gatewayPlatform: account.gatewayPlatform ?? cfg.gatewayPlatform,
       asrServer: account.asrServer ?? cfg.asrServer,
       requireMention: account.requireMention ?? cfg.requireMention ?? true,
       helpKeywords: account.helpKeywords ?? cfg.helpKeywords ?? "帮,请,分析,总结",

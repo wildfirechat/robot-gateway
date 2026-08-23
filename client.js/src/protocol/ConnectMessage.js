@@ -1,21 +1,26 @@
 /**
  * 鉴权消息类
  * 对应 Java 版本的 ConnectMessage
+ *
+ * `platform`：机器人 SDK 所在平台（野火 Platform 号，见 ProtoConstants.Platform：
+ * 1=iOS, 2=Android, 3=Windows, 4=OSX, 5=WEB, 6=WX, 7=Linux, 10=Harmony ...）。
+ * 网关用它调用 im-server 的 `/robot/set_online` 设置机器人在正确平台在线。
  */
 export class ConnectMessage {
-    constructor(type, robotId = null, secret = null, code = null, msg = null) {
+    constructor(type, robotId = null, secret = null, code = null, msg = null, platform = null) {
         this.type = type;
         this.robotId = robotId;
         this.secret = secret;
         this.code = code;
         this.msg = msg;
+        this.platform = platform;
     }
 
     /**
      * 创建鉴权请求消息
      */
-    static authRequest(robotId, secret) {
-        return new ConnectMessage('connect', robotId, secret);
+    static authRequest(robotId, secret, platform = null) {
+        return new ConnectMessage('connect', robotId, secret, null, null, platform);
     }
 
     /**
@@ -45,6 +50,7 @@ export class ConnectMessage {
         if (this.secret !== null) obj.secret = this.secret;
         if (this.code !== null) obj.code = this.code;
         if (this.msg !== null) obj.msg = this.msg;
+        if (this.platform !== null && this.platform !== undefined) obj.platform = this.platform;
         return obj;
     }
 
@@ -54,7 +60,8 @@ export class ConnectMessage {
             json.robotId,
             json.secret,
             json.code,
-            json.msg
+            json.msg,
+            json.platform
         );
     }
 }

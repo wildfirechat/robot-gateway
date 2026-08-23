@@ -14,11 +14,13 @@ declare module "@wildfirechat/robot-gateway-client-sdk" {
     timeout?: number;
     reconnectInterval?: number;
     heartbeatInterval?: number;
+    /** 机器人平台号（可选覆盖）；缺省时 SDK 按运行环境自动探测（Linux=7 / macOS=4 / Windows=3）。 */
+    platform?: number;
   }
 
   export class RobotServiceClient {
     constructor(gatewayUrl: string, messageHandler?: MessageHandler | null, options?: ClientOptions);
-    connect(robotId: string, robotSecret: string, timeoutSeconds?: number): Promise<boolean>;
+    connect(robotId: string, robotSecret: string, timeoutSeconds?: number, platform?: number): Promise<boolean>;
     close(): void;
     isConnected(): boolean;
     isAuthenticated(): boolean;
@@ -30,8 +32,13 @@ declare module "@wildfirechat/robot-gateway-client-sdk" {
     /** Modify group info: type 0 = group name (ModifyGroupInfoType.Modify_Group_Name). */
     modifyGroupInfo(groupId: string, type: number, value: string, lines?: number[], payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
     updateConversationUserSetting(conversation: any, type: number, value: string): Promise<{ code: number; msg?: string }>;
-    dismissGroup(groupId: string): Promise<{ code: number; msg?: string }>;
+    dismissGroup(groupId: string, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string }>;
     updateMessage(messageId: string, payload: any): Promise<{ code: number; msg?: string }>;
+    /** 群管理：踢人/拉人/禁言/成员列表（机器人以群主身份操作；lines=通知线路，用 AI 线） */
+    kickoffGroupMembers(groupId: string, members: string[], lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
+    addGroupMembers(groupId: string, members: string[], to?: string | null, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
+    muteGroupMember(groupId: string, members: string[], mute: boolean, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
+    getGroupMembers(groupId: string): Promise<{ code: number; msg?: string; result?: Array<{ member_id?: string; type?: number }> }>;
   }
 }
 

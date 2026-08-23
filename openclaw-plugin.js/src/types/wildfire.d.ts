@@ -11,9 +11,11 @@ declare module '@wildfirechat/robot-gateway-client-sdk' {
         timeout?: number;
         reconnectInterval?: number;
         heartbeatInterval?: number;
+        /** 机器人平台号（ProtoConstants.Platform：7=Linux, 5=WEB ...），连接网关时上报。 */
+        platform?: number;
       }
     );
-    connect(robotId: string, robotSecret: string): Promise<boolean>;
+    connect(robotId: string, robotSecret: string, timeoutSeconds?: number, platform?: number): Promise<boolean>;
     close(): void;
     sendMessage(conversation: any, payload: any): Promise<IMResult<any>>;
     uploadFile(fileData: Buffer, fileName: string, fileType: number, mimeType: string): Promise<IMResult<string>>;

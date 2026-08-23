@@ -112,7 +112,8 @@ dsh --profile wildfire
 | `gatewayUrl` | 是 | 野火机器人网关 WebSocket 地址 |
 | `robotId` | 是 | 机器人 ID |
 | `robotSecret` | 是 | 机器人密钥 |
-| `aiLine` | 否 | AI 消息使用的线路（line），默认 `2`。收到 AI line 上的消息后，所有回复（文本/流式/卡片/媒体）都发送到该线路；收到**非 AI line** 的消息（如普通消息 line 0）时，会回复一条提醒到 line 0：「AI回复将通过线路N回复」，不进入 AI 处理 |
+| `gatewayPlatform` | 否 | 机器人平台号（**可选覆盖**，一般不需要配置）：默认 SDK 按运行环境自动探测（Linux=`7` / macOS=`4` / Windows=`3`，见野火 Platform）。网关用该平台调用 im-server `/robot/set_online` 设置机器人在线；仅当需模拟其他平台（如 `5`=WEB）时配置 |
+| `aiLine` | 否 | AI 会话使用的线路（line），默认 `2`。设计：**单聊（与机器人私聊）= 全局控制面板**（管理命令，不进入 AI）；**AI 对话仅限群聊会话 line === aiLine**（默认 2）。群聊消息若线路不对（如 line 0 普通群）会回复提醒且不进入 AI；回复始终发到消息来源的会话线路 |
 | `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent |
 | `requireMention` | 否 | 群聊触发模式：默认 `false` = 群内所有消息触发（无需@）；`true` = 需@或问号/关键词触发 |
 | `helpKeywords` | 否 | 群聊触发关键词（逗号分隔），默认 `帮,请,分析,总结` |

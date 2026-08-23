@@ -62,6 +62,17 @@ public class RobotServiceClient {
         return connectionManager.connect(robotId, secret);
     }
 
+    /**
+     * 连接并鉴权（带平台号）
+     * @param robotId 机器人ID
+     * @param secret 机器人密钥
+     * @param platform 机器人平台号（ProtoConstants.Platform：7=Linux, 5=WEB ...），null = 网关默认
+     * @return 鉴权是否成功
+     */
+    public boolean connect(String robotId, String secret, Integer platform) {
+        return connectionManager.connect(robotId, secret, platform);
+    }
+
     public String getRobotId() {
         return connectionManager.getRobotId();
     }

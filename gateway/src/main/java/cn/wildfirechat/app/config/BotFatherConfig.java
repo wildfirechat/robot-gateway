@@ -30,6 +30,7 @@ public class BotFatherConfig {
     private int maxRobotsPerUser = 1;
 
     // AI消息使用的line（默认2，普通消息line为0，朋友圈为1）
+    // 欢迎语发送到此线路，用户可接着在 line 2 与机器人交互（控制面板）
     private int aiLine = 2;
 
     // Getters and Setters

@@ -171,7 +171,7 @@ sendStreamingReply(streamId, finalText, state="completed")
 | 群聊（conv.type=1/2） | `wildfire:group:{conv.target}` | `wildfire-{sha256(groupId)[:20]}` |
 
 - 同一 IM 会话内多轮对话复用同一 DSH Agent（上下文连续）
-- **会话重建**（如 `/cwd` 切换工作目录）后 epoch 递增，新 session id 为 `wildfire-{hash[:20]}-{epoch}`，避免与旧持久化会话冲突
+- **会话重建**（如 `/reset` 显式重置）后该目录的 epoch 递增，session id 变化，旧上下文不再恢复；**`/cwd` 切换目录 = 切换会话**（session id 由 群+目录 派生 `wildfire-{hash[:20]}-{dirHash[:16]}`，各目录会话独立持久化，切回已访问目录 `resume` 恢复其上下文）
 - DSH 会话持久化：DSH 重启后可通过 `ctx.agents.resume({sessionId})` 恢复
 - 会话空闲超时（默认 24h）后 `handle.dispose()` 释放，防内存泄漏
 - 每会话串行队列：同一会话同时只允许一个 Agent 任务在途（复用 openclaw 的 `sessionQueues` 模式）
@@ -216,6 +216,10 @@ createUserMessage({
 | `turn/end` | `StreamingTextGeneratedMessageContent` | 最终定型消息 |
 | `turn/end` reason=`error` | 文本错误提示 | 如 `Processing failed: ...` |
 
+### 会话运行状态与 Token 计量（scope=31 会话级用户设置）
+
+Agent 运行状态（state/phase/toolName/model/reasoningEffort）、交互/结果态（interaction/reason/error/cwd/sessionId/goal）与 Token 计量（usage/turn/context/cacheHitRatePct/speed，来源 `ctx.sessionProjections` 的 dsh-token-meter 投影）统一走 **scope=31 会话级用户设置（type=1 状态）**，由 `updateConversationUserSetting` 推送、300ms 合并节流，不占消息流。客户端订阅该设置即可读取展示（各端 `dshMetricsText` 渲染一行计量文本）。完整字段字典见 `INTERACTION_DESIGN.md` §2.2。
+
 ## 工作目录（Workspace）选定
 
 Agent 的工作目录在 **DSH 会话创建时写入会话头（`meta.cwd`）**，之后不可变。headless 模式的默认值是 `process.cwd()`（DSH 进程启动目录）；web profile 通过 `ctx.workspaceRegistry` 按会话 cwd 归类工作区（GUI 工作区视图可见）。因此 IM 插件的目录选定必须在**创建会话时解析**，切换目录 = 销毁旧会话、用新 cwd 重建。
@@ -251,7 +255,7 @@ Agent 的工作目录在 **DSH 会话创建时写入会话头（`meta.cwd`）**�
 - **项目根目录** `workspace.root`：所有项目都在此目录下。未配置时回退链 `autoRoot` → 第一个 `allowedRoot` → `path`。`/create-group auto` 的自动目录与 `/ls` 默认列表也基于它
 - **目录不存在**：发 **DSH_Question 确认卡片**——`✅ 创建`（`mkdir -p` 后绑定）/ `❌ 取消`；卡片自定义回答可直接输入**新路径**重新选择（深度保护最多 3 轮）；60s 未应答自动取消
 - 路径须位于 `allowedRoots` 内（已存在目录 realpath 比较；不存在目录词法比较）
-- 切换/绑定后销毁该会话的旧 Agent，用新 cwd 重建（新 session id，epoch 递增），**多轮上下文因切换而重置**（切回旧目录也不复用旧会话，见 INTERACTION_DESIGN.md §7 决策 17）
+- 切换/绑定后 dispose 当前活跃 Agent；下一次消息按**新目录**派生 session id（`resume` 恢复该目录已有上下文，或新建）——**各目录会话独立持久化，切回旧目录可恢复其上下文**（见 INTERACTION_DESIGN.md §7 决策 17；`/reset` 仍是显式清空）
 - **群聊绑定成功后自动改群名**：机器人调用 `modifyGroupInfo(type=0)` 把群名改为目录**最后一段**（`/a/b/c` → 群名 `c`），私聊不生效；改名为尽力而为，失败不影响 `/cwd` 流程
 - 绑定持久化到 `workspace.persistFile`（默认 `~/.dsh/wildfire-workspaces.json`，`workspace.persist=false` 关闭），**重启不丢失**
 
@@ -450,6 +454,10 @@ config:
 ```
 
 ## 部署
+
+### 0. 机器人平台号（自动探测，无需配置）
+
+机器人 SDK 连接网关（`/robot/gateway` WebSocket）时，鉴权消息（connect）携带 `platform` 字段（野火 Platform 号）。SDK **按运行环境自动探测**：Linux=`7`、macOS=`4`（OSX）、Windows=`3`，无法识别时兜底 `7`（Linux）。网关把该平台存入会话，并在调用 im-server `/robot/set_online` 设置机器人上下线时使用它——保证客户端看到机器人在**正确平台**在线。插件无需任何配置；仅特殊场景（如模拟 WEB 在线）可用配置项 `gatewayPlatform` 覆盖。SDK 未上报时（旧版 SDK），网关按默认平台（Linux=7）处理。
 
 ### 1. 打包并安装插件
 

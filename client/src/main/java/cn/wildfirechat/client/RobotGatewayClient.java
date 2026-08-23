@@ -130,8 +130,19 @@ class RobotGatewayClient extends WebSocketClient {
      * @param authFuture 鉴权结果Future
      */
     public void sendConnect(String robotId, String secret, CompletableFuture<Boolean> authFuture) {
+        sendConnect(robotId, secret, null, authFuture);
+    }
+
+    /**
+     * 发送鉴权请求（带平台号）
+     * @param robotId 机器人ID
+     * @param secret 机器人密钥
+     * @param platform 机器人平台号，null 时网关按默认平台处理
+     * @param authFuture 鉴权结果Future
+     */
+    public void sendConnect(String robotId, String secret, Integer platform, CompletableFuture<Boolean> authFuture) {
         this.authFuture = authFuture;
-        ConnectMessage request = ConnectMessage.request(robotId, secret);
+        ConnectMessage request = ConnectMessage.request(robotId, secret, platform);
         String json = gson.toJson(request);
 
         if (isOpen()) {

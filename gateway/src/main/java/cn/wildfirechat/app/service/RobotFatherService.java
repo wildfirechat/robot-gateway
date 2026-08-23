@@ -123,7 +123,9 @@ public class RobotFatherService {
             // 构建会话（私聊）
             Conversation conversation = new Conversation();
             conversation.setType(0); // 私聊
-            conversation.setLine(botFatherConfig.getAiLine()); // AI消息使用配置的line（默认2）
+            // 欢迎语发送到 AI line（默认 2）：用户看到欢迎语后可接着在 line 2
+            // 与机器人单聊（控制面板：管理命令），AI 对话在群聊（line 2）进行。
+            conversation.setLine(botFatherConfig.getAiLine());
             conversation.setTarget(userId); // 发送给创建者
 
             // 构建消息内容

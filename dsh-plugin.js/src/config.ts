@@ -186,8 +186,17 @@ export interface WildfireConfig {
   /** Wildfire robot secret */
   robotSecret?: string;
   /**
-   * AI 消息使用的 line（默认 2）。收到消息后，所有回复（文本/流式/卡片/媒体）
-   * 都发送到该 line 上，与普通消息（line 0）、朋友圈（line 1）隔离。
+   * 机器人平台号（可选覆盖）：默认**不配置**，SDK 按运行环境自动探测
+   * （Linux=7 / macOS=4 / Windows=3，见 ProtoConstants.Platform）。
+   * 仅当需要把机器人显示为其他平台在线时才配置（如 gatewayPlatform: 5 模拟 WEB）。
+   */
+  gatewayPlatform?: number;
+  /**
+   * AI 会话使用的线路（line），默认 2。
+   * 设计：单聊（与机器人私聊）= 全局控制面板（管理命令），不进入 AI；
+   * AI 对话仅限【群聊会话 line === aiLine】（默认 2）。
+   * 群聊消息若线路不对（如 line 0 普通群），会回复提醒且不进入 AI。
+   * 回复始终发到消息来源的会话线路。
    */
   aiLine?: number;
   /** Optional ASR endpoint; voice messages are transcribed before dispatch. */
@@ -227,7 +236,7 @@ export function validateConfig(config: WildfireConfig): string | null {
   return null;
 }
 
-/** Effective AI line for outbound replies. Default 2. */
+/** Effective AI line (group-chat AI session line). Default 2. */
 export function getAiLine(config: WildfireConfig): number {
   return config.aiLine ?? 2;
 }

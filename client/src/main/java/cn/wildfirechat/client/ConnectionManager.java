@@ -35,6 +35,28 @@ class ConnectionManager {
     private volatile boolean authenticated = false;
     private volatile String robotId;
     private volatile String robotSecret;
+    /** 机器人平台号（连接时上报，重连沿用）；null = 按运行环境自动探测 */
+    private volatile Integer platform;
+
+    /** 野火 Platform 号（ProtoConstants.Platform）：1=iOS 2=Android 3=Windows 4=OSX 5=WEB 6=WX 7=Linux 10=Harmony */
+    private static final int PLATFORM_LINUX = 7;
+    private static final int PLATFORM_OSX = 4;
+    private static final int PLATFORM_WINDOWS = 3;
+
+    /**
+     * 按当前运行环境自动探测机器人平台号（JVM 跑在哪个 OS 就上报哪个平台；
+     * 无法识别时兜底 Linux=7，服务器语义）。
+     */
+    private static int detectPlatform() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("mac") || os.contains("darwin")) {
+            return PLATFORM_OSX;
+        }
+        if (os.contains("win")) {
+            return PLATFORM_WINDOWS;
+        }
+        return PLATFORM_LINUX;
+    }
 
     private ScheduledExecutorService heartbeatExecutor;
     private ScheduledExecutorService reconnectExecutor;
@@ -107,6 +129,17 @@ class ConnectionManager {
     }
 
     /**
+     * 连接并鉴权（带平台号）
+     * @param robotId 机器人ID
+     * @param secret 机器人密钥
+     * @param platform 机器人平台号（ProtoConstants.Platform），null = 网关默认
+     * @return 鉴权是否成功
+     */
+    public boolean connect(String robotId, String secret, Integer platform) {
+        return connect(robotId, secret, 30, platform);
+    }
+
+    /**
      * 连接并鉴权
      * @param robotId 机器人ID
      * @param secret 机器人密钥
@@ -114,6 +147,18 @@ class ConnectionManager {
      * @return 鉴权是否成功
      */
     public boolean connect(String robotId, String secret, long timeoutSeconds) {
+        return connect(robotId, secret, timeoutSeconds, null);
+    }
+
+    /**
+     * 连接并鉴权（带平台号）
+     * @param robotId 机器人ID
+     * @param secret 机器人密钥
+     * @param timeoutSeconds 超时时间（秒）
+     * @param platform 机器人平台号（ProtoConstants.Platform），null = 网关默认
+     * @return 鉴权是否成功
+     */
+    public boolean connect(String robotId, String secret, long timeoutSeconds, Integer platform) {
         // 先建立WebSocket连接
         start();
 
@@ -143,7 +188,10 @@ class ConnectionManager {
         // 需要凭据来完成自动重试。
         this.robotId = robotId;
         this.robotSecret = secret;
-        client.sendConnect(robotId, secret, authFuture);
+        // 平台号：显式参数优先，null 时按运行环境自动探测（Linux=7 / macOS=4 / Windows=3）。
+        // 重连沿用本次连接上报的平台。
+        this.platform = platform != null ? platform : detectPlatform();
+        client.sendConnect(robotId, secret, this.platform, authFuture);
 
         try {
             boolean result = authFuture.get(timeoutSeconds, TimeUnit.SECONDS);
@@ -353,7 +401,7 @@ class ConnectionManager {
             new Thread(() -> {
                 try {
                     CompletableFuture<Boolean> authFuture = new CompletableFuture<>();
-                    client.sendConnect(robotId, robotSecret, authFuture);
+                    client.sendConnect(robotId, robotSecret, platform, authFuture);
 
                     Boolean result = authFuture.get(30, TimeUnit.SECONDS);
                     if (result) {

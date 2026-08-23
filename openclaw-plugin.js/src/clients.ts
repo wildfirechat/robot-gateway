@@ -42,10 +42,18 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
       timeout: 30,
       reconnectInterval: 5000,
       heartbeatInterval: 180000,
+      // 平台号：默认不配置 —— SDK 按运行环境自动探测（Linux=7 / macOS=4 / Windows=3），
+      // 网关据此设置 im-server 的机器人在线平台（/robot/set_online）。
+      platform: config.gatewayPlatform,
     }
   );
 
-  const isConn = await client.connect(config.robotId!, config.robotSecret!);
+  const isConn = await client.connect(
+    config.robotId!,
+    config.robotSecret!,
+    30,
+    config.gatewayPlatform
+  );
 
   if (isConn) {
     connected = true;

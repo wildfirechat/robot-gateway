@@ -31,6 +31,60 @@ import {
   type DSHQuestionPayload,
 } from "./protocol.js";
 
+/** 目标工具状态（goal tool，随 DSH_Goal 卡片推送）。 */
+export interface GoalState {
+  phase: string;
+  roundsStarted: number;
+  objective: string;
+}
+
+/** 可选进度（预留：当前无数据源时客户端不显示）。 */
+export interface ProgressState {
+  current: number;
+  total: number;
+  label?: string;
+}
+
+/** 会话累计 token 用量（dsh-token-meter 投影，provider 真实计数）。 */
+export interface UsageState {
+  /** 未命中缓存的输入 tokens。 */
+  promptTokens: number;
+  /** 输出 tokens（含 reasoning）。 */
+  outputTokens: number;
+  /** 命中缓存的输入 tokens。 */
+  cacheReadTokens: number;
+  /** 缓存写入 tokens。 */
+  cacheWriteTokens: number;
+  /** 四桶之和。 */
+  totalTokens: number;
+}
+
+/** 本轮 token 增量（快照差分 + 插件本地计时）。 */
+export interface TurnState {
+  inputTokens: number;
+  outputTokens: number;
+  cacheHitTokens: number;
+  durationMs: number;
+}
+
+/** 上下文占用（token-meter contextPressure 投影）。 */
+export interface ContextState {
+  /** 下一请求预估 prompt 成本（projectedTokens）。 */
+  usedTokens: number;
+  /** 模型上下文窗口容量。 */
+  windowTokens: number;
+  /** 占用百分比（0-100，一位小数）。 */
+  usedPct: number;
+}
+
+/** 本轮生成速度（插件本地计时）。 */
+export interface SpeedState {
+  /** 输出 token 数 / 耗时（tok/s）。 */
+  tokensPerSec: number;
+  /** 首字延迟（ms）。 */
+  ttftMs: number;
+}
+
 /** Agent runtime state, pushed via the scope=31 conversation user setting. */
 export interface RuntimeState {
   state?: "idle" | "running" | "waiting_user" | "done";
@@ -38,6 +92,27 @@ export interface RuntimeState {
   toolName?: string;
   model?: string;
   reasoningEffort?: string;
+  // B 类：交互/结果态
+  /** 正在等待哪种卡片（state=waiting_user 时有效）。 */
+  interaction?: "question" | "approval";
+  /** 上一回合结束原因（新回合开始时清除）。 */
+  reason?: "completed" | "error" | "cancelled";
+  /** 出错信息（reason=error 时）。 */
+  error?: string;
+  /** 会话工作目录。 */
+  cwd?: string;
+  /** DSH 会话 id。 */
+  sessionId?: string;
+  /** 目标工具状态。 */
+  goal?: GoalState;
+  /** 进度（预留）。 */
+  progress?: ProgressState;
+  // C 类：Token 计量
+  usage?: UsageState;
+  turn?: TurnState;
+  context?: ContextState;
+  cacheHitRatePct?: number;
+  speed?: SpeedState;
 }
 
 /** Where to deliver a card/text for a conversation. */
@@ -86,15 +161,17 @@ interface PendingQuestion {
 interface PendingApproval {
   key: string;
   aid: string;
+  toolName?: string;
+  reason?: string;
   resolve: (value: string) => void;
   timer: NodeJS.Timeout;
   ownerSender?: string;
   cardMessageId?: string;
 }
 
-/** Card status payloads for updateMessage (button states). */
-function cardStatusPayload(kind: "question" | "approval", state: string): any {
-  return { cardKind: kind, state };
+/** Card status payloads for updateMessage (button states + user selection). */
+function cardStatusPayload(kind: "question" | "approval", state: string, extra?: Record<string, unknown>): any {
+  return { cardKind: kind, state, ...(extra ?? {}) };
 }
 
 export class InteractionManager {
@@ -109,9 +186,9 @@ export class InteractionManager {
   private registered = false;
   // Conversation state accumulator (scope=31 user setting), coalesced 300ms.
   private stateTimer: NodeJS.Timeout | undefined;
-  private pendingState:
-    | { key: string; state?: string; phase?: string; toolName?: string; model?: string; reasoningEffort?: string }
-    | undefined;
+  private pendingState: RuntimeState & { key: string } | undefined;
+  /** 上次 flush 的完整 payload（按 key），每次 flush 从它合并，保证累计字段不丢。 */
+  private fullState = new Map<string, Record<string, unknown>>();
 
   constructor(
     config: WildfireConfig,
@@ -197,7 +274,12 @@ export class InteractionManager {
     clearTimeout(question.timer);
     const answer = this.normalizeAnswers(payload, question.questions);
     question.resolve(answer);
-    this.updateCardState(question.cardMessageId, "question", "answered");
+    // 更新卡片：保留原问题内容 + 标记已作答 + 带上用户的选择
+    this.updateCardState(question.cardMessageId, "question", "answered", {
+      qid: question.qid,
+      questions: question.questions,
+      answers: answer.answers,
+    });
     this.pushStatus(key, { state: "running" });
     return true;
   }
@@ -220,7 +302,13 @@ export class InteractionManager {
     clearTimeout(approval.timer);
     const outcome = payload.action === "approve" ? "allowed-once" : "rejected";
     approval.resolve(outcome);
-    this.updateCardState(approval.cardMessageId, "approval", outcome === "allowed-once" ? "approved" : "rejected");
+    // 更新卡片：保留审批信息 + 用户的选择（同意/拒绝）
+    this.updateCardState(approval.cardMessageId, "approval", outcome === "allowed-once" ? "approved" : "rejected", {
+      aid: approval.aid,
+      toolName: approval.toolName,
+      ...(approval.reason ? { reason: approval.reason } : {}),
+      action: payload.action,
+    });
     this.pushStatus(key, { state: "running" });
     return true;
   }
@@ -237,8 +325,14 @@ export class InteractionManager {
       }
       this.pendingQuestions.delete(key);
       clearTimeout(question.timer);
-      question.resolve(this.parseTextAnswer(text, question.questions));
-      this.updateCardState(question.cardMessageId, "question", "answered");
+      const textAnswer = this.parseTextAnswer(text, question.questions);
+      question.resolve(textAnswer);
+      // 更新卡片：保留原问题 + 文本选择
+      this.updateCardState(question.cardMessageId, "question", "answered", {
+        qid: question.qid,
+        questions: question.questions,
+        answers: textAnswer.answers,
+      });
       this.pushStatus(key, { state: "running" });
       return true;
     }
@@ -249,8 +343,15 @@ export class InteractionManager {
       }
       this.pendingApprovals.delete(key);
       clearTimeout(approval.timer);
-      approval.resolve(this.parseApproval(text));
-      this.updateCardState(approval.cardMessageId, "approval", this.parseApproval(text) === "allowed-once" ? "approved" : "rejected");
+      const outcome = this.parseApproval(text);
+      approval.resolve(outcome);
+      // 更新卡片：保留审批信息 + 文本选择（同意/拒绝）
+      this.updateCardState(approval.cardMessageId, "approval", outcome === "allowed-once" ? "approved" : "rejected", {
+        aid: approval.aid,
+        toolName: approval.toolName,
+        ...(approval.reason ? { reason: approval.reason } : {}),
+        action: outcome === "allowed-once" ? "approve" : "reject",
+      });
       this.pushStatus(key, { state: "running" });
       return true;
     }
@@ -292,14 +393,25 @@ export class InteractionManager {
    * Update the conversation runtime state via the scope=31 user setting
    * (type=1 状态). Coalesced within 300ms; group members see the state in
    * their user settings instead of the message feed.
+   *
+   * 字段合并语义：本次 flush 与上次 flush 的完整 payload 合并后发送，
+   * 所以累计字段（model/cwd/sessionId/usage/context/cacheHitRatePct）不会
+   * 因某次推送没带而丢失。清除语义：state=running（新回合开始）会清除
+   * reason/error；state≠waiting_user 时 interaction 不发送。
    */
   pushStatus(key: string, data: RuntimeState): void {
-    this.logger?.info?.(`[wildfire] pushStatus: key=${key}, state=${data.state}`);
+    this.logger?.info?.(
+      `[wildfire] pushStatus: key=${key}, state=${data.state ?? "-"}, reason=${data.reason ?? "-"}`
+    );
     const acc = this.pendingState ?? { key };
     acc.key = key;
-    if (data.state) acc.state = data.state;
-    if (data.model) acc.model = data.model;
-    if (data.reasoningEffort) acc.reasoningEffort = data.reasoningEffort;
+    for (const field of [
+      "state", "phase", "toolName", "model", "reasoningEffort",
+      "interaction", "reason", "error", "cwd", "sessionId", "goal", "progress",
+      "usage", "turn", "context", "cacheHitRatePct", "speed",
+    ] as const) {
+      if (data[field] !== undefined) (acc as any)[field] = data[field];
+    }
     this.pendingState = acc;
     this.scheduleStateFlush();
   }
@@ -327,15 +439,45 @@ export class InteractionManager {
     const acc = this.pendingState;
     this.pendingState = undefined;
     if (!acc) return;
-    const payload: Record<string, unknown> = { state: acc.state ?? "running" };
-    if (acc.phase && payload.state !== "done" && payload.state !== "idle") {
-      payload.phase = acc.phase;
+    const prev = this.fullState.get(acc.key) ?? {};
+    const next: Record<string, unknown> = { ...prev };
+    const state = acc.state ?? (next.state as string) ?? "running";
+    next.state = state;
+    if (acc.phase !== undefined) {
+      if (state === "done" || state === "idle") delete next.phase;
+      else next.phase = acc.phase;
     }
-    if (acc.toolName && payload.state !== "done") payload.toolName = acc.toolName;
-    if (acc.model) payload.model = acc.model;
-    if (acc.reasoningEffort) payload.reasoningEffort = acc.reasoningEffort;
+    if (acc.toolName !== undefined) {
+      if (state === "done") delete next.toolName;
+      else next.toolName = acc.toolName;
+    }
+    if (acc.model !== undefined) next.model = acc.model;
+    if (acc.reasoningEffort !== undefined) next.reasoningEffort = acc.reasoningEffort;
+    // B 类：交互/结果态（state=running 新回合开始 → 清除上一回合的 reason/error）
+    if (acc.interaction !== undefined) {
+      if (state === "waiting_user") next.interaction = acc.interaction;
+      else delete next.interaction;
+    }
+    if (state === "running") {
+      delete next.reason;
+      delete next.error;
+    } else {
+      if (acc.reason !== undefined) next.reason = acc.reason;
+      if (acc.error !== undefined) next.error = acc.error;
+    }
+    if (acc.cwd !== undefined) next.cwd = acc.cwd;
+    if (acc.sessionId !== undefined) next.sessionId = acc.sessionId;
+    if (acc.goal !== undefined) next.goal = acc.goal;
+    if (acc.progress !== undefined) next.progress = acc.progress;
+    // C 类：Token 计量（累计字段，仅在有新值时覆盖）
+    if (acc.usage !== undefined) next.usage = acc.usage;
+    if (acc.turn !== undefined) next.turn = acc.turn;
+    if (acc.context !== undefined) next.context = acc.context;
+    if (acc.cacheHitRatePct !== undefined) next.cacheHitRatePct = acc.cacheHitRatePct;
+    if (acc.speed !== undefined) next.speed = acc.speed;
+    this.fullState.set(acc.key, next);
     this.cards
-      .setConversationState(acc.key, payload)
+      .setConversationState(acc.key, next)
       .catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire] conversation state update failed: ${String(err)}`)
       );
@@ -392,6 +534,7 @@ export class InteractionManager {
         summarizeQuestion(data),
         1
       );
+      this.logger?.info?.(`[wildfire] question card: qid=${qid}, messageId=${cardMessageId}`);
     } catch (err: any) {
       this.logger?.warn?.(`[wildfire] question card send failed, falling back to text: ${err.message}`);
       await this.cards.sendText(
@@ -400,7 +543,7 @@ export class InteractionManager {
       );
     }
 
-    this.pushStatus(key, { state: "waiting_user" });
+    this.pushStatus(key, { state: "waiting_user", interaction: "question" });
     const ownerSender = this.resolveTurnOwner(key) ?? target.sender;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -445,6 +588,7 @@ export class InteractionManager {
         summarizeQuestion(data),
         1
       );
+      this.logger?.info?.(`[wildfire] askDirect card: qid=${qid}, messageId=${cardMessageId}`);
     } catch (err: any) {
       this.logger?.warn?.(`[wildfire] askDirect card send failed, falling back to text: ${err.message}`);
       await this.cards.sendText(
@@ -453,7 +597,7 @@ export class InteractionManager {
       );
     }
 
-    this.pushStatus(key, { state: "waiting_user" });
+    this.pushStatus(key, { state: "waiting_user", interaction: "question" });
     const ownerSender = opts.ownerSender ?? target.sender;
     const timeoutMs = opts.timeoutMs ?? this.config.askUserTimeoutMs;
     return new Promise<DSHAnswerPayload | null>((resolve) => {
@@ -506,7 +650,7 @@ export class InteractionManager {
       );
     }
 
-    this.pushStatus(key, { state: "waiting_user" });
+    this.pushStatus(key, { state: "waiting_user", interaction: "approval" });
     const ownerSender = this.resolveTurnOwner(key) ?? target.sender;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -517,18 +661,42 @@ export class InteractionManager {
         resolve("cancelled");
       }, this.config.approvalTimeoutMs);
       timer.unref?.();
-      this.pendingApprovals.set(key, { key, aid, resolve, timer, ownerSender, cardMessageId });
+      this.pendingApprovals.set(key, {
+        key,
+        aid,
+        toolName: data.toolName,
+        ...(data.reason ? { reason: data.reason } : {}),
+        resolve,
+        timer,
+        ownerSender,
+        cardMessageId,
+      });
     });
   }
 
   /** Update a card's state in place via updateMessage (best effort). */
-  private updateCardState(messageId: string | undefined, kind: "question" | "approval", state: string): void {
+  private updateCardState(
+    messageId: string | undefined,
+    kind: "question" | "approval",
+    state: string,
+    extra?: Record<string, unknown>
+  ): void {
     if (!messageId) return;
     this.cards
-      .updateCard(messageId, kind === "question" ? DSH_TYPE.QUESTION : DSH_TYPE.APPROVAL, cardStatusPayload(kind, state), state)
-      .catch((err: unknown) =>
-        this.logger?.warn?.(`[wildfire] card state update failed: ${String(err)}`)
-      );
+      .updateCard(
+        messageId,
+        kind === "question" ? DSH_TYPE.QUESTION : DSH_TYPE.APPROVAL,
+        cardStatusPayload(kind, state, extra),
+        state
+      )
+      .then(() => {
+        // updateMessage 返回后（resolved）即视为成功
+        this.logger?.info?.(`[wildfire] card state updated: messageId=${messageId}, kind=${kind}, state=${state}`);
+      })
+      .catch((err: unknown) => {
+        // error 级别：GUI-less profile 隐藏 warn，必须用 error 才能看到失败原因
+        this.logger?.error?.(`[wildfire] card state update FAILED: messageId=${messageId}, kind=${kind}, state=${state}: ${String(err)}`);
+      });
   }
 
   /** Normalize a structured DSH_Answer against the original questions. */

@@ -96,12 +96,15 @@ export class RobotGatewayClient {
 
     /**
      * 发送鉴权请求
+     * @param {number|null} platform 机器人平台号（ProtoConstants.Platform），
+     *   null 时网关按默认平台处理
      */
-    sendConnect(robotId, robotSecret) {
+    sendConnect(robotId, robotSecret, platform = null) {
         this.robotId = robotId;
         this.robotSecret = robotSecret;
-        
-        const connectMsg = ConnectMessage.authRequest(robotId, robotSecret);
+        this.platform = platform;
+
+        const connectMsg = ConnectMessage.authRequest(robotId, robotSecret, platform);
         this.send(JSON.stringify(connectMsg));
         this.shouldReconnect = true;
     }
@@ -276,7 +279,7 @@ export class RobotGatewayClient {
         console.log('Attempting to reconnect...');
         try {
             await this.connect();
-            this.sendConnect(this.robotId, this.robotSecret);
+            this.sendConnect(this.robotId, this.robotSecret, this.platform);
         } catch (error) {
             console.error('Reconnect failed:', error.message);
             // 重连失败，继续尝试

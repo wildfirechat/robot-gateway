@@ -61,6 +61,30 @@ export interface TurnOutcome {
   text: string;
   /** Raw `turn/end` reason, when the turn ended. */
   reason?: any;
+  /** Token/context metrics for the turn (from token-meter projections + local timing). */
+  metrics?: TurnMetrics;
+}
+
+/**
+ * Token/context metrics pushed to Wildfire after a turn:
+ * - `usage`      — cumulative session usage (provider-reported, token-meter)
+ * - `turn`       — this turn's deltas (projection diff) + wall time
+ * - `context`    — next-request prompt cost vs model window (occupancy)
+ * - `cacheHitRatePct` — cumulative cache-hit ratio (cacheRead/(cacheRead+uncached))
+ * - `speed`      — this turn's decode speed + time-to-first-token (local timing)
+ */
+export interface TurnMetrics {
+  usage: { promptTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalTokens: number };
+  turn: { inputTokens: number; outputTokens: number; cacheHitTokens: number; durationMs: number };
+  context?: { usedTokens: number; windowTokens: number; usedPct: number };
+  cacheHitRatePct: number;
+  speed: { tokensPerSec: number; ttftMs: number };
+}
+
+/** A token-meter projection snapshot (usage + context occupancy). */
+interface ProjectionSnapshot {
+  usage?: { uncachedInputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
+  context?: { pressureTokens?: number; projectedTokens?: number; contextWindow?: number };
 }
 
 type SessionEventHandler = (event: SessionEvent) => void;
@@ -77,16 +101,38 @@ interface ManagedSession {
 }
 
 /**
- * Deterministic dsh SessionId from an IM conversation key.
+ * Deterministic dsh SessionId from an IM conversation key (LEGACY format).
  * `wildfire:user:<userId>` / `wildfire:group:<groupId>` -> `wildfire-<sha256[:20]>[-<epoch>]`
  *
- * `epoch` starts at 0 (no suffix). A workspace switch disposes the old session
- * and bumps the epoch so the recreated session gets a fresh, collision-free id.
+ * 旧格式保留用途：
+ * - `/create` 的 wsId（自动目录名）生成
+ * - per-session workspace 模式下的预览 id（cwdProvider 需要）
+ * - 迁移回退：新格式 id 不存在时尝试用旧 id resume 已有会话
  */
 export function sessionIdForConversation(key: string, epoch = 0): string {
   const hash = createHash("sha256").update(key.toLowerCase()).digest("hex");
   const base = hash.slice(0, 20);
   return epoch > 0 ? `wildfire-${base}-${epoch}` : `wildfire-${base}`;
+}
+
+/**
+ * Deterministic dsh SessionId keyed by (IM conversation key, workspace cwd).
+ * `wildfire-<sha256(key)[:20]>-<sha256(cwd)[:16]>[-<epoch>]`
+ *
+ * 目录哈希进入 id：切到别的目录 → 不同 id（各目录会话独立、可并存于磁盘）；
+ * 切回已访问过的目录 → 相同 id → `resume` 恢复该目录的上下文。
+ * `epoch` 仅在会话 log 损坏/冲突重建时递增（按 目录 维度）。
+ */
+export function sessionIdForConversationWithCwd(key: string, cwd: string, epoch = 0): string {
+  const hash = createHash("sha256").update(key.toLowerCase()).digest("hex");
+  const dirHash = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+  const base = `wildfire-${hash.slice(0, 20)}-${dirHash}`;
+  return epoch > 0 ? `${base}-${epoch}` : base;
+}
+
+/** 规范化目录路径（词法），保证同一目录的不同写法派生同一 sessionId。 */
+export function normalizeCwd(cwd: string): string {
+  return path.resolve(cwd);
 }
 
 export class AgentSessionManager {
@@ -96,13 +142,19 @@ export class AgentSessionManager {
   private cwdProvider: CwdProvider;
   private modelProvider: ModelProvider;
   private sessions = new Map<string, ManagedSession>();
-  private epochs = new Map<string, number>();
+  /** 会话重建计数：key → cwd → epoch（仅 log 损坏/冲突时递增）。 */
+  private epochByKeyCwd = new Map<string, Map<string, number>>();
+  /** 旧格式（epoch 派生）会话 id 的持久化 epoch（迁移用，仅旧配置文件有值）。 */
+  private legacyEpochByKey = new Map<string, number>();
+  /** 迁移后的旧格式 sessionId：key → 旧 id（该会话继续用旧 id，上下文保留）。 */
+  private legacySessionByKey = new Map<string, string>();
+  /** 最近一次 getAgent 解析的 cwd（peekSessionId 用，不持久化）。 */
+  private cwdByKey = new Map<string, string>();
   private sessionIdToKey = new Map<string, string>();
   private sweepTimer: NodeJS.Timeout | undefined;
   private disposed = false;
-  // epoch 持久化：epoch 递增由 /cwd 切换、reset、resume 失败触发，落盘后
-  // 进程重启不再归零 —— 否则重启后从 epoch 0 重新 resume 旧 cwd 的日志，
-  // 会撞上"同一 sessionId 已持久化在不同 cwd"的 id collision。
+  // 会话状态持久化：epoch（按目录维度）+ 迁移映射，落盘后进程重启不丢；
+  // 目录哈希进入 sessionId 后，"切回目录恢复上下文"依赖这些记录的稳定性。
   private epochFile = "";
   private epochSaveTimer: NodeJS.Timeout | undefined;
   private epochLoaded = false;
@@ -115,22 +167,39 @@ export class AgentSessionManager {
     try {
       const raw = await readFile(this.epochFile, "utf8");
       const data = JSON.parse(raw);
-      if (data && typeof data === "object" && data.epochs) {
-        for (const [key, ep] of Object.entries<number>(data.epochs)) {
-          this.epochs.set(key, ep);
+      if (data && typeof data === "object") {
+        // 新格式：{ epochs: { key: { cwd: epoch } }, legacy: { key: oldSessionId } }
+        if (data.epochs) {
+          for (const [key, entry] of Object.entries<any>(data.epochs)) {
+            if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+              const byCwd = new Map<string, number>();
+              for (const [cwd, ep] of Object.entries<number>(entry)) {
+                byCwd.set(cwd, ep);
+              }
+              this.epochByKeyCwd.set(key, byCwd);
+            } else {
+              // 旧格式：{ epochs: { key: number } } —— 保留为 legacy epoch（迁移用）
+              this.legacyEpochByKey.set(key, Number(entry) || 0);
+            }
+          }
+        }
+        if (data.legacy) {
+          for (const [key, sid] of Object.entries<string>(data.legacy)) {
+            this.legacySessionByKey.set(key, sid);
+          }
         }
         this.logger?.info?.(
-          `[wildfire-agent] loaded ${this.epochs.size} persisted session epochs from ${this.epochFile}`
+          `[wildfire-agent] loaded persisted session state from ${this.epochFile} (${this.epochByKeyCwd.size} keys, ${this.legacySessionByKey.size} legacy)`
         );
       }
     } catch (err: any) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        this.logger?.warn?.(`[wildfire-agent] failed to load session epochs: ${err.message}`);
+        this.logger?.warn?.(`[wildfire-agent] failed to load session state: ${err.message}`);
       }
     }
   }
 
-  /** Persist epochs to disk (debounced). */
+  /** Persist session state to disk (debounced). */
   private persistEpochs(): void {
     if (this.epochSaveTimer) return;
     this.epochSaveTimer = setTimeout(() => {
@@ -139,14 +208,36 @@ export class AgentSessionManager {
     }, 500);
   }
 
-  /** Write the epoch map now (debounce flush / plugin stop). */
+  /** Write the session state now (debounce flush / plugin stop). */
   async flushEpochs(): Promise<void> {
     if (!this.epochFile) return;
     await mkdir(path.dirname(this.epochFile), { recursive: true });
+    const epochs: Record<string, Record<string, number>> = {};
+    for (const [key, byCwd] of this.epochByKeyCwd) {
+      epochs[key] = Object.fromEntries(byCwd);
+    }
     await writeFile(
       this.epochFile,
-      JSON.stringify({ epochs: Object.fromEntries(this.epochs) }, null, 2)
+      JSON.stringify({ epochs, legacy: Object.fromEntries(this.legacySessionByKey) }, null, 2)
     );
+  }
+
+  /** Epoch for (key, cwd); default 0. */
+  private epochOf(key: string, cwd: string): number {
+    return this.epochByKeyCwd.get(key)?.get(cwd) ?? 0;
+  }
+
+  /** Bump the rebuild epoch for (key, cwd) and persist. */
+  private bumpEpoch(key: string, cwd: string): number {
+    let byCwd = this.epochByKeyCwd.get(key);
+    if (!byCwd) {
+      byCwd = new Map<string, number>();
+      this.epochByKeyCwd.set(key, byCwd);
+    }
+    const next = (byCwd.get(cwd) ?? 0) + 1;
+    byCwd.set(cwd, next);
+    this.persistEpochs();
+    return next;
   }
 
   constructor(
@@ -182,18 +273,29 @@ export class AgentSessionManager {
 
   /**
    * Get (create on demand) the live Agent for a conversation key.
-   * A live agent is reused when present (its cwd is fixed); otherwise a fresh
-   * agent is created with the workspace resolved by `cwdProvider`.
+   *
+   * 会话 id 由 (群, 工作目录) 派生：切目录 = 换 id（各目录会话独立并存于磁盘）；
+   * 切回已访问目录 → 同一 id → resume 恢复该目录上下文。内存中每次只活跃
+   * 一个（切目录时 dispose 旧会话，log 保留可恢复）。
    */
   async getAgent(key: string): Promise<any> {
-    let epoch = this.epochs.get(key) ?? 0;
-    let sessionId = sessionIdForConversation(key, epoch);
+    // 先解析当前工作目录（global/override 模式不依赖 sessionId；per-session
+    // 模式用旧格式预览 id 生成默认目录）。
+    const previewId = sessionIdForConversation(key, 0);
+    const cwd = await this.cwdProvider(key, previewId);
+    const norm = normalizeCwd(cwd);
+    this.cwdByKey.set(key, norm);
+    const epoch = this.epochOf(key, norm);
+    // 迁移优先：已迁移到旧 id 的会话继续用旧 id（保留切换目录前的上下文）
+    let sessionId = this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, norm, epoch);
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.lastActivity = Date.now();
       return existing.handle.agent;
     }
 
+    // 切目录：同 key 的其他活跃会话先 dispose（log 保留，可切回恢复）
+    await this.evictKeyOthers(key, sessionId);
     this.evictIfNeeded();
 
     const agents = this.ctx.get("agents");
@@ -201,7 +303,6 @@ export class AgentSessionManager {
       throw new Error("dsh core services (agents) not available");
     }
 
-    const cwd = await this.cwdProvider(key, sessionId);
     const selection = await this.modelProvider(key);
     const selectionRef: { current: ModelSelection | undefined; assembled: any } = {
       current: selection,
@@ -226,7 +327,7 @@ export class AgentSessionManager {
     };
     const createOptions = {
       sessionId: SessionId(sessionId),
-      meta: { cwd },
+      meta: { cwd: norm },
       agentOptions: {
         provider: selection.provider,
         model: selection.model,
@@ -239,26 +340,35 @@ export class AgentSessionManager {
     let handle: any;
     try {
       handle = await agents.resume(resumeOptions);
-      this.logger?.info?.(`[wildfire-agent] session resumed: key=${key}, sessionId=${sessionId}`);
+      this.logger?.info?.(
+        `[wildfire-agent] session resumed: key=${key}, sessionId=${sessionId}, cwd=${norm}`
+      );
     } catch (err: any) {
       const message = String(err?.message ?? err);
       if (message.includes("not found")) {
-        handle = await agents.create(createOptions);
+        // 新格式 id 不存在：尝试旧格式 id（迁移部署前已有的会话，保留其上下文）。
+        // 仅当旧会话的 cwd 与当前目录一致时才迁移，否则丢弃旧 id 正常新建。
+        const migrated = await this.tryMigrateLegacy(key, norm, agents, resumeOptions, createOptions);
+        if (migrated) {
+          handle = migrated.handle;
+          sessionId = migrated.sessionId;
+        } else {
+          handle = await agents.create(createOptions);
+        }
       } else {
         // Resume failed for another reason (corrupt/torn log, cwd mismatch, ...).
-        // Bump the epoch and create under a fresh id; the deterministic id may
-        // already be persisted at a different cwd (id collision), so keep
-        // bumping until create succeeds (bounded).
+        // Bump the epoch for (key, cwd) and create under a fresh id; the id may
+        // still collide if the cwd itself changed shape, so keep bumping (bounded).
         this.logger?.warn?.(
           `[wildfire-agent] resume failed for ${sessionId}, bumping epoch & creating fresh: ${message}`
         );
         let created = false;
         let attempts = 0;
+        let freshSessionId = sessionId;
         while (!created && attempts < 20) {
           attempts += 1;
-          const nextEpoch = (this.epochs.get(key) ?? 0) + 1;
-          this.epochs.set(key, nextEpoch);
-          const freshSessionId = sessionIdForConversation(key, nextEpoch);
+          const nextEpoch = this.bumpEpoch(key, norm);
+          freshSessionId = sessionIdForConversationWithCwd(key, norm, nextEpoch);
           const freshOptions = {
             ...createOptions,
             sessionId: SessionId(freshSessionId),
@@ -281,17 +391,14 @@ export class AgentSessionManager {
           throw new Error(`unable to create a fresh session for ${key} after ${attempts} epoch bumps`);
         }
         this.persistEpochs();
-        // 实际创建的 session 以最新 epoch 为准：managed 表必须以它登记，
-        // 否则 dispatch 的 subscribe(session.id) 会查不到（"no managed session"）
-        epoch = this.epochs.get(key) ?? 0;
-        sessionId = sessionIdForConversation(key, epoch);
+        sessionId = freshSessionId;
       }
     }
 
     const managed: ManagedSession = {
       key,
       sessionId,
-      epoch,
+      epoch: this.epochOf(key, norm),
       handle: { agent: handle.agent, dispose: () => handle.dispose() },
       selection: selectionRef,
       lastActivity: Date.now(),
@@ -300,9 +407,64 @@ export class AgentSessionManager {
     this.sessions.set(sessionId, managed);
     this.sessionIdToKey.set(sessionId, key);
     this.logger?.info?.(
-      `[wildfire-agent] session created: key=${key}, sessionId=${sessionId}, cwd=${cwd}, model=${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (effort=${selection.reasoningEffort})` : ""}`
+      `[wildfire-agent] session created: key=${key}, sessionId=${sessionId}, cwd=${norm}, model=${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (effort=${selection.reasoningEffort})` : ""}`
     );
     return handle.agent;
+  }
+
+  /**
+   * 迁移回退：尝试用旧格式（epoch 派生）id resume 部署前的既有会话。
+   * 成功且旧会话 cwd 与当前目录一致 → 登记 legacySessionByKey（持久化），
+   * 后续一直沿用旧 id（上下文保留）；否则返回 null（调用方正常新建）。
+   */
+  private async tryMigrateLegacy(
+    key: string,
+    norm: string,
+    agents: any,
+    resumeOptions: any,
+    createOptions: any
+  ): Promise<{ handle: any; sessionId: string } | null> {
+    if (this.legacySessionByKey.has(key)) return null;
+    const oldEpoch = this.legacyEpochByKey.get(key) ?? 0;
+    const oldId = sessionIdForConversation(key, oldEpoch);
+    if (oldId === String(resumeOptions.resumeSessionId ?? "")) return null;
+    try {
+      const oldHandle = await agents.resume({ ...resumeOptions, resumeSessionId: SessionId(oldId) });
+      const oldCwd = oldHandle?.agent?.session?.meta?.cwd;
+      if (oldCwd === undefined || normalizeCwd(String(oldCwd)) === norm) {
+        this.legacySessionByKey.set(key, oldId);
+        this.persistEpochs();
+        this.logger?.info?.(
+          `[wildfire-agent] migrated legacy session: key=${key}, sessionId=${oldId}, cwd=${oldCwd}`
+        );
+        return { handle: oldHandle, sessionId: oldId };
+      }
+      // 旧会话属于其他目录：不要它（log 保留，切回该目录时自然恢复）
+      this.logger?.info?.(
+        `[wildfire-agent] legacy session ${oldId} cwd=${oldCwd} != ${norm}, discarding for fresh create`
+      );
+      await oldHandle.dispose().catch(() => {});
+      return null;
+    } catch (oldErr: any) {
+      const om = String(oldErr?.message ?? oldErr);
+      if (!om.includes("not found")) {
+        this.logger?.warn?.(`[wildfire-agent] legacy resume failed for ${oldId}: ${om.slice(0, 120)}`);
+      }
+      return null;
+    }
+  }
+
+  /** 切换目录：dispose 同 key 的其他活跃会话（log 保留，切回可恢复）。 */
+  private async evictKeyOthers(key: string, keepSessionId: string): Promise<void> {
+    for (const [sid, managed] of [...this.sessions]) {
+      if (sid === keepSessionId || managed.key !== key) continue;
+      this.sessions.delete(sid);
+      this.sessionIdToKey.delete(sid);
+      await managed.handle.dispose().catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire-agent] evict ${sid}: ${String(err)}`)
+      );
+      this.logger?.info?.(`[wildfire-agent] switched workspace session: key=${key}, disposed=${sid}`);
+    }
   }
 
   /** Reverse lookup: IM conversation key for a dsh session id. */
@@ -340,53 +502,91 @@ export class AgentSessionManager {
   }
 
   /**
-   * Dispose the conversation's live agent (e.g. after a `/cwd` workspace
-   * switch). The next dispatch recreates the session under the new cwd with a
-   * fresh session id (epoch bumped). Multi-turn context from the old session is
-   * intentionally lost.
+   * 显式重置会话（`/reset`、`/new`、dispatch 的 cwd 冲突重试）：dispose 当前
+   * 活跃会话并 bump (key, cwd) 的 epoch —— 下次消息用新 id，旧上下文不再恢复。
+   * 与 `/cwd` 切换（`switchWorkspace`，保留上下文）语义不同。
    */
   async resetSession(key: string): Promise<void> {
-    const epoch = this.epochs.get(key) ?? 0;
-    const sessionId = sessionIdForConversation(key, epoch);
+    const norm = await this.currentCwdOf(key);
+    const epoch = this.epochOf(key, norm);
+    const sessionId = this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, norm, epoch);
     const managed = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
     this.sessionIdToKey.delete(sessionId);
-    this.epochs.set(key, epoch + 1);
-    this.persistEpochs();
+    // 显式重置：不再沿用旧 id/旧上下文
+    this.legacySessionByKey.delete(key);
+    this.bumpEpoch(key, norm);
     if (managed) {
       await managed.handle.dispose().catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire-agent] reset ${sessionId}: ${String(err)}`)
       );
-      this.logger?.info?.(`[wildfire-agent] session reset: key=${key}, old=${sessionId}`);
     }
+    this.logger?.info?.(
+      `[wildfire-agent] session reset: key=${key}, old=${sessionId}, cwd=${norm}, nextEpoch=${this.epochOf(key, norm)}`
+    );
   }
 
-  /** Current session id for a conversation key (without creating an agent). */
+  /**
+   * 切换工作区（`/cwd` 绑定/清除）：dispose 该 key 的全部活跃会话但**不** bump
+   * epoch —— 下次消息按新 cwd 派生 id（resume 恢复该目录上下文，或新建）。
+   */
+  async switchWorkspace(key: string): Promise<void> {
+    const disposed: string[] = [];
+    for (const [sid, managed] of [...this.sessions]) {
+      if (managed.key !== key) continue;
+      this.sessions.delete(sid);
+      this.sessionIdToKey.delete(sid);
+      await managed.handle.dispose().catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire-agent] switch ${sid}: ${String(err)}`)
+      );
+      disposed.push(sid);
+    }
+    this.cwdByKey.delete(key); // 强制下次按新 cwd 派生
+    this.logger?.info?.(
+      `[wildfire-agent] workspace switched: key=${key}, disposed=[${disposed.join(", ")}]`
+    );
+  }
+
+  /** 当前会话 id（不创建 agent）：优先最近解析的 cwd，未激活时用旧格式预览 id。 */
   peekSessionId(key: string): string {
-    const epoch = this.epochs.get(key) ?? 0;
-    return sessionIdForConversation(key, epoch);
+    const cwd = this.cwdByKey.get(key);
+    if (!cwd) return sessionIdForConversation(key, this.legacyEpochByKey.get(key) ?? 0);
+    const norm = normalizeCwd(cwd);
+    const epoch = this.epochOf(key, norm);
+    return this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, norm, epoch);
+  }
+
+  /** 解析 (key, cwd)：优先缓存，否则走 cwdProvider（per-session 模式用旧格式预览 id）。 */
+  private async currentCwdOf(key: string): Promise<string> {
+    const cached = this.cwdByKey.get(key);
+    if (cached) return normalizeCwd(cached);
+    const previewId = sessionIdForConversation(key, this.legacyEpochByKey.get(key) ?? 0);
+    const cwd = await this.cwdProvider(key, previewId);
+    const norm = normalizeCwd(cwd);
+    this.cwdByKey.set(key, norm);
+    return norm;
   }
 
   /**
    * Dispose the conversation's agent AND forget it entirely (workspace
-   * destruction). Unlike `resetSession` (which bumps the epoch for a fresh
-   * same-id session), this removes all memory of the key so a later message
-   * starts from epoch 0.
+   * destruction). Removes all memory of the key so a later message starts
+   * fresh (epoch 0, new directory-derived id).
    */
   async disposeWorkspace(key: string): Promise<void> {
-    const epoch = this.epochs.get(key) ?? 0;
-    const sessionId = sessionIdForConversation(key, epoch);
-    const managed = this.sessions.get(sessionId);
-    this.sessions.delete(sessionId);
-    this.sessionIdToKey.delete(sessionId);
-    this.epochs.delete(key);
-    this.persistEpochs();
-    if (managed) {
+    for (const [sid, managed] of [...this.sessions]) {
+      if (managed.key !== key) continue;
+      this.sessions.delete(sid);
+      this.sessionIdToKey.delete(sid);
       await managed.handle.dispose().catch((err: unknown) =>
-        this.logger?.warn?.(`[wildfire-agent] disposeWorkspace ${sessionId}: ${String(err)}`)
+        this.logger?.warn?.(`[wildfire-agent] disposeWorkspace ${sid}: ${String(err)}`)
       );
-      this.logger?.info?.(`[wildfire-agent] workspace session disposed: key=${key}, sessionId=${sessionId}`);
     }
+    this.epochByKeyCwd.delete(key);
+    this.legacyEpochByKey.delete(key);
+    this.legacySessionByKey.delete(key);
+    this.cwdByKey.delete(key);
+    this.persistEpochs();
+    this.logger?.info?.(`[wildfire-agent] workspace session disposed: key=${key}`);
   }
 
   /**
@@ -405,6 +605,10 @@ export class AgentSessionManager {
     const agent = await this.getAgent(key);
     const session = agent.session;
     const startSeq = session.seq;
+    const startedAt = Date.now();
+    let firstChunkAt: number | undefined;
+    // 回合开始时的 token 计量快照（token-meter 投影是累计值，结束时差分）。
+    const startProjection = this.readProjections(session);
     let started = false;
     let finalText = "";
     let reason: any;
@@ -425,6 +629,7 @@ export class AgentSessionManager {
         case "assistant/chunk": {
           const chunk = event.data?.chunk;
           if (chunk?.type === "text-delta" && typeof chunk.text === "string") {
+            if (firstChunkAt === undefined) firstChunkAt = Date.now();
             finalText += chunk.text;
             deltaCount++;
             onDelta(chunk.text);
@@ -507,7 +712,106 @@ export class AgentSessionManager {
         `[wildfire-agent] turn done: key=${key}, deltas=${deltaCount}, textLen=${finalText.length}`
       );
     }
-    return { text: finalText, reason };
+    const endProjection = this.readProjections(session);
+    const metrics = this.computeMetrics(startProjection, endProjection, startedAt, firstChunkAt);
+    if (metrics) {
+      this.logger?.info?.(
+        `[wildfire-agent] turn metrics: key=${key}, out=${metrics.turn.outputTokens} (${metrics.speed.tokensPerSec} tok/s, ttft=${metrics.speed.ttftMs}ms), cacheHit=${metrics.cacheHitRatePct}%, context=${metrics.context ? `${metrics.context.usedPct}%` : "n/a"}`
+      );
+    }
+    return { text: finalText, reason, metrics };
+  }
+
+  /**
+   * Read the current token-meter projections for a session (best effort).
+   * Requires `ctx.sessionProjections` + the dsh-token-meter units, both part
+   * of the dsh-base bundle; returns undefined when unavailable so callers
+   * degrade gracefully (no metrics pushed).
+   */
+  private readProjections(session: any): ProjectionSnapshot | undefined {
+    try {
+      const registry = this.ctx.get?.("sessionProjections");
+      if (!registry) return undefined;
+      const snap = registry.snapshot(session);
+      const values = snap?.values ?? {};
+      return {
+        usage: values.tokenUsage,
+        context: values.contextPressure,
+      };
+    } catch (err: any) {
+      this.logger?.debug?.(`[wildfire-agent] projection read failed: ${String(err)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Diff the turn-start and turn-end projections into the pushed metrics.
+   * Returns undefined when no provider usage has landed yet (brand-new
+   * session, first request in flight).
+   */
+  private computeMetrics(
+    start: ProjectionSnapshot | undefined,
+    end: ProjectionSnapshot | undefined,
+    startedAt: number,
+    firstChunkAt: number | undefined
+  ): TurnMetrics | undefined {
+    if (!end?.usage) return undefined;
+    const usage = end.usage;
+    const durationMs = Date.now() - startedAt;
+
+    const turn = {
+      inputTokens: 0,
+      outputTokens: usage.outputTokens,
+      cacheHitTokens: usage.cacheReadTokens,
+      durationMs,
+    };
+    if (start?.usage) {
+      turn.outputTokens = Math.max(0, usage.outputTokens - start.usage.outputTokens);
+      turn.cacheHitTokens = Math.max(0, usage.cacheReadTokens - start.usage.cacheReadTokens);
+      turn.inputTokens = Math.max(
+        0,
+        usage.uncachedInputTokens + usage.cacheWriteTokens - start.usage.uncachedInputTokens - start.usage.cacheWriteTokens
+      );
+    }
+
+    const speed: TurnMetrics["speed"] = {
+      tokensPerSec:
+        turn.outputTokens > 0 && durationMs > 0
+          ? Math.round((turn.outputTokens / durationMs) * 1000 * 10) / 10
+          : 0,
+      ttftMs: firstChunkAt !== undefined ? firstChunkAt - startedAt : 0,
+    };
+
+    // 上下文占用：projectedTokens（下一请求预估成本）/ contextWindow。
+    const ctx = end.context;
+    const context: TurnMetrics["context"] =
+      ctx && typeof ctx.projectedTokens === "number" && typeof ctx.contextWindow === "number" && ctx.contextWindow > 0
+        ? {
+            usedTokens: Math.round(ctx.projectedTokens),
+            windowTokens: ctx.contextWindow,
+            usedPct: Math.round((ctx.projectedTokens / ctx.contextWindow) * 1000) / 10,
+          }
+        : undefined;
+
+    const cacheHitRatePct =
+      usage.cacheReadTokens + usage.uncachedInputTokens > 0
+        ? Math.round((usage.cacheReadTokens / (usage.cacheReadTokens + usage.uncachedInputTokens)) * 1000) / 10
+        : 0;
+
+    return {
+      usage: {
+        promptTokens: usage.uncachedInputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
+        totalTokens:
+          usage.uncachedInputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
+      },
+      turn,
+      ...(context ? { context } : {}),
+      cacheHitRatePct,
+      speed,
+    };
   }
 
   /** Subscribe to session events for one dsh session id. */

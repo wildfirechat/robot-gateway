@@ -23,6 +23,7 @@ import { getClient } from "./clients.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
 import {
+  CONV_TYPE_SINGLE,
   CONV_TYPE_GROUP,
   CONV_TYPE_CHANNEL,
   MESSAGE_TYPE_FILE,
@@ -119,7 +120,13 @@ const DEDUP_MAX_ENTRIES = 500;
  * sender + conversation + payload type/content (test webhooks carry no id).
  */
 function dedupInfo(data: any): { key: string; isDuplicate: boolean } {
-  const msgId = data?.messageId ?? data?.messageUid;
+  // 优先读 gateway 附加的 String 字段（messageIdString/messageUidString）：
+  // int64 在 JS Number 下会精度丢失，字符串保持精确。老 gateway 无 String 字段时回退。
+  const msgId =
+    data?.messageIdString ??
+    data?.messageUidString ??
+    data?.messageId ??
+    data?.messageUid;
   const key = msgId
     ? `id:${msgId}`
     : `sig:${String(data?.sender ?? "")}|${String(data?.conv?.type ?? "")}|${String(data?.conv?.target ?? "")}|${String(data?.payload?.type ?? "")}|${String(data?.payload?.content ?? "")}`;
@@ -191,18 +198,24 @@ export async function handleIncomingMessage(
   // Group notifications (104-125) are system events: handle lifecycle before
   // whitelist / filters / dispatch (see INTERACTION_DESIGN.md §4.3.1).
   if (isGroupNotification) {
-    await handleGroupNotification(api, payloadType, conv, key);
+    // 群通知按 AI line（默认 2）处理：通知消息可能到达在任意 line，
+    // 统一归一化到 AI line 再处理（销毁/注销等语义与 line 无关，但保持
+    // 会话/通知状态记录在 AI line 上）。
+    await handleGroupNotification(api, payloadType, { ...conv, line: getAiLine(config) }, key);
     return;
   }
 
-  // AI line 归一化：无论消息来自哪条线路（普通消息 line 0、朋友圈 line 1 等），
-  // 都【正常进入 AI 处理，不丢弃】；回复统一通过 AI line（默认 2）发出
-  // （sendDirectReply / sendStreamingReply / 媒体消息已按 AI line 发送）。
-  // 同时给用户发一条提醒（发到原消息所在线路），引导去 AI line 查看回复。
+  // ========== 会话分流（按 line 判定） ==========
+  // 设计：
+  // - 单聊（与机器人私聊）= 全局控制面板：只处理管理命令，不进入 AI 对话
+  // - 群聊会话 line === aiLine（默认 2）= AI 对话
+  // - 群聊会话 line !== aiLine = 触发提醒，但【同时正常进入 AI 处理】，
+  //   后续会话按 AI line（默认 2）归一化处理（回复发到 line 2）
   const aiLine = getAiLine(config);
-  if (conv.line !== aiLine) {
+  const isSingle = conv.type === CONV_TYPE_SINGLE;
+  if (!isSingle && conv.line !== aiLine) {
     api.logger?.info?.(
-      `[wildfire] message from non-AI line: line=${conv.line}, aiLine=${aiLine}, sender=${sender}, convTarget=${conv.target}, processing normally (reply via AI line)`
+      `[wildfire] group chat on non-AI line: line=${conv.line}, aiLine=${aiLine}, sender=${sender}, convTarget=${conv.target}, normalizing to AI line`
     );
     try {
       await sendDirectReply(
@@ -210,11 +223,12 @@ export async function handleIncomingMessage(
         { type: conv.type, target: conv.target, line: conv.line },
         `AI回复将通过线路${aiLine}回复`,
         api,
-        conv.line // 提醒发到原消息所在线路
+        conv.line // 提醒发到消息所在线路
       );
     } catch (e: any) {
-      api.logger?.warn?.(`[wildfire] AI-line notice failed: ${e?.message ?? e}`);
+      api.logger?.warn?.(`[wildfire] wrong-line notice failed: ${e?.message ?? e}`);
     }
+    // 后续以 AI line 处理（会话归一化）
     conv = { ...conv, line: aiLine };
   }
 
@@ -241,7 +255,7 @@ export async function handleIncomingMessage(
   }
 
   // Remember the conversation target for interactive seams (ask_user / approval).
-  api.interactions?.remember(key, String(sender), { type: conv.type, target: String(conv.target), line: getAiLine(api.config) });
+  api.interactions?.remember(key, String(sender), { type: conv.type, target: String(conv.target), line: conv.line });
 
   // Structured DSH replies (201 DSH_Answer / 203 DSH_ApprovalResult).
   if (isDshType) {
@@ -315,7 +329,7 @@ export async function handleIncomingMessage(
 
   // Management commands: `/cwd` works in private and group chat; the rest are
   // private-chat only. All are admin-gated when admins are configured.
-  const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create-group|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox)\b/);
+  const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
   if (!cmdMatch && trimmed.startsWith("/")) {
@@ -380,7 +394,7 @@ export async function handleIncomingMessage(
 
       // Workspace lifecycle commands (create/destroy/list/reset-by-id), jobs
       // and goal management are single-chat control-panel commands, admin-gated.
-      if (cmd === "create-group" || cmd === "destroy-group" || cmd === "workspaces" || cmd === "goal" || cmd === "jobs" || cmd === "new") {
+      if (cmd === "create" || cmd === "create-group" || cmd === "destroy-group" || cmd === "workspaces" || cmd === "goal" || cmd === "jobs" || cmd === "new") {
         if (isGroup) {
           await sendDirectReply(sender, conv, `/${cmd} 仅支持私聊（控制面板）`, api);
           return;
@@ -400,6 +414,23 @@ export async function handleIncomingMessage(
           : access.canRunCommand(senderId);
         if (!permitted) {
           await sendDirectReply(sender, conv, "无权限管理白名单（需要管理员或群主）", api);
+          return;
+        }
+        await handleCommand(api, key, cmd, trimmed, sender, conv, isGroup);
+        return;
+      }
+
+      // 群管理命令（踢人/拉人/禁言/成员列表）：仅群内使用，创建者或管理员执行
+      if (cmd === "kick" || cmd === "invite" || cmd === "mute" || cmd === "unmute" || cmd === "members") {
+        if (!isGroup) {
+          await sendDirectReply(sender, conv, `/${cmd} 仅支持在 DSH 群内使用`, api);
+          return;
+        }
+        const canGroupManage =
+          (await access.canManageWorkspace(senderId, convTarget, true)) ||
+          isDshGroupCreator(api, convTarget, senderId);
+        if (!canGroupManage) {
+          await sendDirectReply(sender, conv, `/${cmd} 需要群创建者或管理员执行`, api);
           return;
         }
         await handleCommand(api, key, cmd, trimmed, sender, conv, isGroup);
@@ -427,6 +458,13 @@ export async function handleIncomingMessage(
         sessionQueues.delete(key);
       }
     }
+  }
+
+  // 单聊 = 全局控制面板：普通文本（非命令）不进入 AI 对话，
+  // 提示用户 AI 功能需在群聊（AI 线路）中使用。
+  if (isSingle) {
+    await sendDirectReply(sender, conv, "单聊仅用于管理命令（/help 查看全部命令）。AI 对话请在群聊中使用。", api);
+    return;
   }
 
   const streamId = `wildfire-stream-${randomUUID()}`;
@@ -469,7 +507,7 @@ export async function handleIncomingMessage(
 
     // Immediate placeholder so the client shows a waiting state.
     try {
-      await sendStreamingReply(sender, conv, streaming.initialPlaceholder, streamId, "generating", logger, getAiLine(config));
+      await sendStreamingReply(sender, conv, streaming.initialPlaceholder, streamId, "generating", logger);
     } catch (e: any) {
       logger?.warn?.(`[wildfire] placeholder failed: ${e.message}`);
     }
@@ -477,7 +515,7 @@ export async function handleIncomingMessage(
     const stream = new ThrottledStream(
       async (fullText: string) => {
         if (fullText.includes("NO_REPLY")) return;
-        await sendStreamingReply(sender, conv, fullText, streamId, "generating", logger, getAiLine(config));
+        await sendStreamingReply(sender, conv, fullText, streamId, "generating", logger);
       },
       streaming.throttleMs
     );
@@ -487,6 +525,23 @@ export async function handleIncomingMessage(
     if (payloadType === MESSAGE_TYPE_FILE && media && text && !transcript) {
       bodyText = `${text}；${media.text}`;
     }
+
+    // 回合开始：刷新会话信息（sessionId/cwd/model，best effort）。
+    try {
+      const sessionId = agents.peekSessionId(key);
+      const cwd = await api.workspace.peek(key, sessionId).catch(() => undefined);
+      const model = await api.models?.peek?.(key).catch?.(() => undefined);
+      api.interactions?.pushStatus(key, {
+        sessionId,
+        ...(cwd ? { cwd } : {}),
+        ...(model?.provider && model?.model
+          ? { model: `${model.provider}/${model.model}`, ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}) }
+          : {}),
+      });
+    } catch {
+      // best effort — 会话信息推送失败不影响回合
+    }
+
     const outcome = await agents.dispatch(
       key,
       bodyText,
@@ -495,7 +550,11 @@ export async function handleIncomingMessage(
       {
         onStatus: (state) => api.interactions?.pushStatus(key, { state }),
         onProgress: (data) => api.interactions?.pushProgress(key, data),
-        onGoal: (data) => api.interactions?.sendGoal(key, data),
+        onGoal: (data) => {
+          api.interactions?.sendGoal(key, data);
+          // 同步目标状态到 scope=31 状态设置（客户端可读）
+          api.interactions?.pushStatus(key, { goal: data });
+        },
       }
     );
     await stream.finish();
@@ -519,22 +578,37 @@ export async function handleIncomingMessage(
         finalText = extracted.text.trim();
       }
     }
+    // 回合结果推送：reason（completed/cancelled）+ token 计量（usage/turn/context/cacheHitRatePct/speed）。
+    // 与下方最终消息一致：无文本且无媒体 = cancelled（type 20）。
+    const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0);
+    api.interactions?.pushStatus(key, {
+      state: "done",
+      reason: noOutput ? "cancelled" : "completed",
+      ...(outcome.metrics ?? {}),
+    });
+
     // Always finalize the stream: without the terminal message the client
     // keeps showing the typing state forever. 有媒体产出但无正文 → completed 兜底
     // 占位；完全无产出（无文本且无媒体）→ 发送"生成取消"(17)，客户端显示取消态，
     // 不再把 "(no response)" 当作正常完成消息发出。
     if (finalText.trim()) {
-      await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger, getAiLine(config));
+      await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
     } else if (extracted?.media?.length) {
-      await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger, getAiLine(config));
+      await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
     } else {
-      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger, getAiLine(config));
+      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
     }
   } catch (err: any) {
     logger?.error?.(`[wildfire] dispatch failed: ${err.message}\n${err.stack?.slice(0, 1200) ?? ""}`);
+    // turn 异常中断：状态可能残留 running/waiting_user，重置为 done 并带上错误原因
+    api.interactions?.pushStatus(key, {
+      state: "done",
+      reason: "error",
+      error: String(err?.message ?? err).slice(0, 300),
+    });
     try {
       const errorText = `Processing failed: ${err.message.slice(0, 80)}`;
-      await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger, getAiLine(config));
+      await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger);
     } catch {
       // ignore secondary send errors
     }
@@ -565,7 +639,7 @@ async function sendOutboundMedia(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    line: getAiLine(api?.config ?? {}), // 媒体消息也走 AI line（默认 2）
+    line: conv.line, // 媒体消息发到消息来源的会话线路
   };
 
   for (const item of mediaList) {
@@ -668,7 +742,7 @@ function isDshGroupCreator(api: any, groupId: string, senderId: string): boolean
 /**
  * Dispatch a management command (`/help`, `/cwd`, `/model`, `/effort`, `/reset`,
  * `/plan`, `/compact`, `/sandbox`, `/allow`, `/disallow`, `/allowlist`,
- * `/create-group`, `/destroy-group`, `/workspaces`, `/goal`, `/jobs`, `/new`).
+ * `/create`（原 /create-group）, `/destroy-group`, `/workspaces`, `/goal`, `/jobs`, `/new`).
  * Callers must have already checked the feature gate and permissions.
  */
 async function handleCommand(
@@ -680,7 +754,7 @@ async function handleCommand(
   conv: { type: number; target: string; line: number },
   isGroup: boolean
 ): Promise<void> {
-  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create-group|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox)\s*/, "").trim();
+  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy-group|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\s*/, "").trim();
   switch (cmd) {
     case "help":
       await handleHelpCommand(api, sender, conv, isGroup);
@@ -706,10 +780,26 @@ async function handleCommand(
     case "sandbox":
       await handleSandboxCommand(api, key, arg, sender, conv);
       return;
+    case "kick":
+      await handleKickCommand(api, key, arg, sender, conv);
+      return;
+    case "invite":
+      await handleInviteCommand(api, key, arg, sender, conv);
+      return;
+    case "mute":
+      await handleMuteCommand(api, key, arg, sender, conv, true);
+      return;
+    case "unmute":
+      await handleMuteCommand(api, key, arg, sender, conv, false);
+      return;
+    case "members":
+      await handleMembersCommand(api, key, arg, sender, conv);
+      return;
     case "reset":
       await api.wildfireAgents.resetSession(key);
       await sendDirectReply(sender, conv, "会话已重置（上下文清空）", api);
       return;
+    case "create":
     case "create-group":
       await handleCreateGroupCommand(api, arg, sender, conv);
       return;
@@ -790,9 +880,13 @@ async function handleHelpCommand(
       lines.push("/reset — 重置本会话（上下文清空）");
     }
     lines.push("/allow|/disallow <userId>、/allowlist — 白名单管理");
+    lines.push("/kick <userId> — 踢出群成员（群创建者/管理员）");
+    lines.push("/invite <userId> — 邀请成员进群");
+    lines.push("/mute|/unmute <userId> — 禁言/解除禁言");
+    lines.push("/members — 列出群成员");
   }
   if (!isGroup && isAdmin) {
-    lines.push("/create-group [工作区] — 创建 DSH 工作区群");
+    lines.push("/create [工作区] — 创建 DSH 工作区群（/create-group 兼容）");
     lines.push("/destroy-group <groupId> — 销毁工作区群（删除目录）");
     lines.push("/new <groupId> — 重置指定群的会话");
     lines.push("/workspaces — 列出所有 DSH 工作区群");
@@ -817,7 +911,10 @@ async function handleStopCommand(
   const agents = api.ctx?.get?.("agents");
   const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
   if (!agent || agent.status !== "running") {
-    await sendDirectReply(sender, conv, "当前没有正在运行的任务", api);
+    // 即使没有运行中的任务，也可能残留 running/waiting_user 状态
+    // （如异常中断后未重置）——这里一并重置为 idle
+    api.interactions?.pushStatus(key, { state: "idle" });
+    await sendDirectReply(sender, conv, "当前没有正在运行的任务（会话状态已重置）", api);
     return;
   }
   try {
@@ -1117,6 +1214,146 @@ async function handleSandboxCommand(
 }
 
 /**
+ * `/kick <userId>` — 群创建者/管理员踢出指定成员（AI 机器人是群主，代执行）。
+ */
+async function handleKickCommand(
+  api: any,
+  _key: string,
+  arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const userId = (arg ?? "").trim();
+  if (!userId) {
+    await sendDirectReply(sender, conv, "用法: /kick <userId>（可用 /members 查看成员）", api);
+    return;
+  }
+  const client = getClient();
+  if (!client) {
+    await sendDirectReply(sender, conv, "机器人未连接", api);
+    return;
+  }
+  try {
+    const result = await client.kickoffGroupMembers(String(conv.target), [userId], [getAiLine(api.config)], null);
+    if (result?.code === 0 || result?.isSuccess?.()) {
+      api.logger?.info?.(`[wildfire] /kick: group=${conv.target}, member=${userId}, by=${sender}`);
+      await sendDirectReply(sender, conv, `已踢出成员 ${userId}`, api);
+    } else {
+      await sendDirectReply(sender, conv, `踢人失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+    }
+  } catch (err: any) {
+    api.logger?.error?.(`[wildfire] /kick failed: ${err?.message ?? String(err)}`);
+    await sendDirectReply(sender, conv, `踢人失败: ${err?.message ?? String(err)}`, api);
+  }
+}
+
+/**
+ * `/invite <userId>` — 群创建者/管理员拉成员进群。
+ */
+async function handleInviteCommand(
+  api: any,
+  _key: string,
+  arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const userId = (arg ?? "").trim();
+  if (!userId) {
+    await sendDirectReply(sender, conv, "用法: /invite <userId>", api);
+    return;
+  }
+  const client = getClient();
+  if (!client) {
+    await sendDirectReply(sender, conv, "机器人未连接", api);
+    return;
+  }
+  try {
+    const result = await client.addGroupMembers(String(conv.target), [userId], null, [getAiLine(api.config)], null);
+    if (result?.code === 0 || result?.isSuccess?.()) {
+      api.logger?.info?.(`[wildfire] /invite: group=${conv.target}, member=${userId}, by=${sender}`);
+      await sendDirectReply(sender, conv, `已邀请 ${userId} 进群`, api);
+    } else {
+      await sendDirectReply(sender, conv, `邀请失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+    }
+  } catch (err: any) {
+    api.logger?.error?.(`[wildfire] /invite failed: ${err?.message ?? String(err)}`);
+    await sendDirectReply(sender, conv, `邀请失败: ${err?.message ?? String(err)}`, api);
+  }
+}
+
+/**
+ * `/mute <userId>` / `/unmute <userId>` — 禁言/取消禁言群成员。
+ */
+async function handleMuteCommand(
+  api: any,
+  _key: string,
+  arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  mute: boolean
+): Promise<void> {
+  const userId = (arg ?? "").trim();
+  if (!userId) {
+    await sendDirectReply(sender, conv, `用法: /${mute ? "mute" : "unmute"} <userId>`, api);
+    return;
+  }
+  const client = getClient();
+  if (!client) {
+    await sendDirectReply(sender, conv, "机器人未连接", api);
+    return;
+  }
+  try {
+    const result = await client.muteGroupMember(String(conv.target), [userId], mute, [getAiLine(api.config)], null);
+    if (result?.code === 0 || result?.isSuccess?.()) {
+      api.logger?.info?.(`[wildfire] /${mute ? "mute" : "unmute"}: group=${conv.target}, member=${userId}, by=${sender}`);
+      await sendDirectReply(sender, conv, `${mute ? "已禁言" : "已解除禁言"} ${userId}`, api);
+    } else {
+      await sendDirectReply(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${(result as any)?.msg ?? (result as any)?.getMsg?.() ?? (result as any)?.code ?? "未知错误"}`, api);
+    }
+  } catch (err: any) {
+    api.logger?.error?.(`[wildfire] /${mute ? "mute" : "unmute"} failed: ${err?.message ?? String(err)}`);
+    await sendDirectReply(sender, conv, `${mute ? "禁言" : "解除禁言"}失败: ${err?.message ?? String(err)}`, api);
+  }
+}
+
+/**
+ * `/members` — 列出群成员（userId + 角色），便于 /kick /mute 指定目标。
+ */
+async function handleMembersCommand(
+  api: any,
+  _key: string,
+  _arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const client = getClient();
+  if (!client) {
+    await sendDirectReply(sender, conv, "机器人未连接", api);
+    return;
+  }
+  try {
+    const result = await client.getGroupMembers(String(conv.target));
+    const members = result?.result ?? [];
+    if (!Array.isArray(members) || members.length === 0) {
+      await sendDirectReply(sender, conv, "群成员列表为空", api);
+      return;
+    }
+    const lines = [`群成员（共 ${members.length} 人）:`];
+    for (const m of members) {
+      const role =
+        m.type === 0 ? "普通" :
+        m.type === 1 ? "群主" :
+        m.type === 2 ? "管理员" : "普通";
+      lines.push(`  ${m.member_id}（${role}）`);
+    }
+    await sendDirectReply(sender, conv, lines.join("\n"), api);
+  } catch (err: any) {
+    api.logger?.error?.(`[wildfire] /members failed: ${err?.message ?? String(err)}`);
+    await sendDirectReply(sender, conv, `获取成员失败: ${err?.message ?? String(err)}`, api);
+  }
+}
+
+/**
  * `/allow <userId>` / `/disallow <userId>` — manage the dynamic whitelist.
  */
 async function handleAllowCommand(
@@ -1145,12 +1382,12 @@ async function handleAllowCommand(
 }
 
 /**
- * `/create-group [工作区]` — create a DSH workspace group via the robot
+ * `/create [工作区]` — create a DSH workspace group via the robot
  * (single-chat control panel, admin-gated). Workspace selection (4.1.3):
- *   /create-group            → catalog list if configured, else auto
- *   /create-group <编号>     → pick catalog entry
- *   /create-group auto       → auto-assign <autoRoot>/<workspaceId>
- *   /create-group <路径>     → explicit path (allowedRoots validated)
+ *   /create            → catalog list if configured, else auto
+ *   /create <编号>     → pick catalog entry
+ *   /create auto       → auto-assign <autoRoot>/<workspaceId>
+ *   /create <路径>     → explicit path (allowedRoots validated)
  */
 async function handleCreateGroupCommand(
   api: any,
@@ -1192,7 +1429,7 @@ async function handleCreateGroupCommand(
     await sendDirectReply(
       sender,
       conv,
-      `请选择工作区目录（回复编号），或 /create-group auto 自动分配：\n${lines.join("\n")}`,
+      `请选择工作区目录（回复编号），或 /create auto 自动分配：\n${lines.join("\n")}`,
       api
     );
     return;
@@ -1217,7 +1454,8 @@ async function handleCreateGroupCommand(
     { member_id: sender, type: 0 },
     { member_id: String(config.robotId), type: 0 },
   ];
-  const result = await client.createGroup(groupInfo, members, sender, [0], null);
+  // 群通知发到 AI 线路（getAiLine，默认 2）：群成员在 AI 线可见建群/入群通知
+  const result = await client.createGroup(groupInfo, members, sender, [getAiLine(config)], null);
   const groupId = result?.result?.group_id;
   if (result?.code !== 0 || !groupId) {
     await sendDirectReply(sender, conv, `创建群失败: ${result?.msg ?? "unknown"}`, api);
@@ -1236,7 +1474,7 @@ async function handleCreateGroupCommand(
   // 4. register and reply
   api.registry?.register(groupId, String(sender), dir);
   api.logger?.info?.(
-    `[wildfire] /create-group done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})`
+    `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})`
   );
   await sendDirectReply(
     sender,
@@ -1268,8 +1506,8 @@ async function handleDestroyGroupCommand(
     return;
   }
 
-  // dismiss the group (members lose access)
-  const dismissResult = await client.dismissGroup(groupId);
+  // dismiss the group (members lose access)；群通知发到 AI 线路
+  const dismissResult = await client.dismissGroup(groupId, [getAiLine(api.config)], null);
   if (dismissResult?.code !== 0) {
     api.logger?.warn?.(`[wildfire] dismissGroup failed: ${dismissResult?.msg}`);
   }
@@ -1298,7 +1536,7 @@ async function handleWorkspacesCommand(
 ): Promise<void> {
   const list = api.registry?.list() ?? [];
   if (list.length === 0) {
-    await sendDirectReply(sender, conv, "暂无 DSH 工作区群。用 /create-group 创建", api);
+    await sendDirectReply(sender, conv, "暂无 DSH 工作区群。用 /create 创建", api);
     return;
   }
   const lines = list.map(({ groupId, record }: { groupId: string; record: any }) => {
@@ -1480,8 +1718,16 @@ async function handleCwdCommand(
 
   if (arg === "clear") {
     workspace.clearOverride(key);
-    await agents.resetSession(key);
+    // 切目录 = 切会话（保留该目录历史上下文，切回可恢复）——不销毁会话
+    await agents.switchWorkspace(key);
     api.logger?.info?.(`[wildfire] /cwd cleared: key=${key}`);
+    // 同步 scope=31 状态 cwd 为清除后的默认值（面板读到与 /cwd 一致）
+    try {
+      const def = await workspace.peek(key, agents.peekSessionId(key));
+      api.interactions?.pushStatus(key, { cwd: def });
+    } catch (e: any) {
+      api.logger?.warn?.(`[wildfire] /cwd clear: failed to sync default cwd: ${String(e)}`);
+    }
     await sendDirectReply(sender, conv, "已清除自定义工作目录，恢复默认配置（会话已重置）", api);
     return;
   }
@@ -1525,8 +1771,11 @@ async function bindWorkspacePath(
       // keep the normalized path when realpath fails (shouldn't happen for an existing dir)
     }
     workspace.setOverride(key, canon);
-    await agents.resetSession(key);
+    // 切目录 = 切会话：dispose 当前活跃会话，下一次消息按新 cwd 恢复/新建
+    await agents.switchWorkspace(key);
     api.logger?.info?.(`[wildfire] /cwd bound: key=${key} -> ${canon}`);
+    // 立即把新工作目录同步到 scope=31 状态：否则面板/客户端读到的是上一回合的旧值
+    api.interactions?.pushStatus(key, { cwd: canon });
     // 群聊：把群名改成目录的最后一段名字（/a/b/c → 群名 c）
     await renameGroupToDirname(api, conv, canon);
     await sendDirectReply(sender, conv, `${label} 工作目录已绑定: ${canon}（已持久化，会话上下文已重置）`, api);
@@ -1572,8 +1821,11 @@ async function bindWorkspacePath(
       return;
     }
     workspace.setOverride(key, info.resolved);
-    await agents.resetSession(key);
+    // 切目录 = 切会话：dispose 当前活跃会话，下一次消息按新 cwd 恢复/新建
+    await agents.switchWorkspace(key);
     api.logger?.info?.(`[wildfire] /cwd created+bound: key=${key} -> ${info.resolved}`);
+    // 立即把新工作目录同步到 scope=31 状态（同上）
+    api.interactions?.pushStatus(key, { cwd: info.resolved });
     // 群聊：把群名改成目录的最后一段名字
     await renameGroupToDirname(api, conv, info.resolved);
     await sendDirectReply(sender, conv, `${label} 目录已创建并绑定: ${info.resolved}（已持久化，会话上下文已重置）`, api);
@@ -1609,8 +1861,8 @@ async function renameGroupToDirname(
   const name = path.basename(dir);
   if (!name || name === "/" || name === ".") return;
   try {
-    // ModifyGroupInfoType.Modify_Group_Name = 0
-    const result = await client.modifyGroupInfo(String(conv.target), 0, name);
+    // ModifyGroupInfoType.Modify_Group_Name = 0；群通知（改名）发到 AI 线路（默认 2）
+    const result = await client.modifyGroupInfo(String(conv.target), 0, name, [getAiLine(api.config)]);
     api.logger?.info?.(
       `[wildfire] group renamed: ${conv.target} -> "${name}", success=${result?.isSuccess?.()}`
     );
@@ -1896,8 +2148,7 @@ async function sendStreamingReply(
   text: string,
   streamId: string,
   state: "generating" | "completed" | "cancelled",
-  logger?: any,
-  aiLine?: number
+  logger?: any
 ): Promise<void> {
   const client = getClient();
   if (!client) throw new Error("Wildfire client not connected");
@@ -1905,7 +2156,7 @@ async function sendStreamingReply(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    line: aiLine ?? conv.line, // AI 回复统一使用 AI line（默认 2）
+    line: conv.line, // 回复发到消息来源的会话线路
   };
 
   let payload: any;
@@ -1953,8 +2204,8 @@ async function sendDirectReply(
   const conversation = {
     type: conv.type,
     target: conv.type === 0 ? sender : conv.target,
-    // 默认走 AI line；提醒等场景可显式指定目标线路（如 line 0）
-    line: targetLine ?? getAiLine(api?.config ?? {}),
+    // 默认回复到消息来源的会话线路；提醒等场景可显式指定目标线路
+    line: targetLine ?? conv.line,
   };
   const content = new TextMessageContent();
   content.content = text;
