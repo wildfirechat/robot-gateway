@@ -74,6 +74,31 @@ macOS 建议用 launchd 开机自启（模板见 [DSH_INTEGRATION.md 部署章�
 - **并存模式**（`dsh web` profile + 本插件）：浏览器 GUI 与 IM 同时可用，**会话互通**（GUI 可查看/代答 IM 会话）。但 ask_user 提问、plan 审阅、工具审批归**浏览器**（无浏览器时挂起）；模型/工具/goal/流式回复两面共享
 - **IM 专用模式**（自定义 profile，无 GUI）：提问/审批/plan 审阅**全部走 IM**，无人值守可用
 
+### 常见问题：`dsh web` 启动了，但野火插件没有加载？
+
+**profile 隔离**：DSH 的插件配置按 profile 隔离——插件包装在哪个 profile 的 `node_modules`、
+patch 配在哪个 profile 的 `cordis.patch.yml`，就只在那个 profile 启动时加载。
+`dsh web` 等价于 `dsh --profile web`，只加载 **web profile** 的 bundles 与 patch，
+**不会**自动带上 `wildfire` profile（或其他 profile）里配置的插件。所以：
+
+- 只在 `~/.dsh/profiles/wildfire` 配置过插件时，`dsh web` 起来后插件不会加载——这是预期行为；
+- 让 `dsh web` 同时带起插件，需把插件也装进 web profile 并在其 patch 层激活：
+
+```bash
+# 1. 在 web profile 里安装插件包（等价于 pnpm add）
+dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
+
+# 2. 激活：编辑 ~/.dsh/profiles/web/cordis.patch.yml，insert 插件行 + tool-ask-user
+#    （配置与 wildfire profile 相同，见下）
+
+# 3. 停旧进程（同一 robotId 只允许一个连接），重启
+pkill -f "dsh --profile wildfire"
+dsh web
+# 日志出现 [wildfire] connected as <robotId> 即加载成功
+```
+
+可用 `dsh --profile web --dump-config | grep wildfire` 检查插件行是否已就位。
+
 ### 切换到 IM 专用模式（3 步）
 
 ```bash

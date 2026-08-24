@@ -710,6 +710,53 @@ dsh --profile wildfire
 
 **回切并存模式**：停掉 wildfire profile，改跑 `dsh web` 即可（配置仍在 web profile 的 patch 层，两 profile 可交替使用，同一时间只跑一个）。
 
+### 从 IM 专用模式（wildfire profile）切换到并存模式（web profile）的完整步骤
+
+适用：希望 `dsh web` 启动时**同时带起 IM 机器人**（GUI 监督 + IM 对话并存）。
+
+> **profile 隔离（为什么 `dsh web` 不会自动带插件）**：DSH 的插件配置按 profile 隔离——
+> 插件包装在哪个 profile 的 `node_modules`、patch 配在哪个 profile 的 `cordis.patch.yml`，
+> 就只在那个 profile 启动时加载。`dsh web` 等价于 `dsh --profile web`，只加载
+> **web profile** 的 bundles（`@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app`）与用户 patch，
+> **不会**读取 wildfire profile（或其他任何 profile）里安装/配置的插件。因此仅在
+> `~/.dsh/profiles/wildfire` 配置过插件时，`dsh web` 起来后插件不会加载——这不是 bug，
+> 是 profile 隔离的预期行为，需要把插件也装进 web profile 并在其 patch 层激活。
+
+```bash
+# 1. 在 web profile 里安装插件包（任选其一）
+#    方式 A：dsh 插件管理（推荐，等价于在 profile 目录执行 pnpm add）
+dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
+#    方式 B：手动指定本地 tgz（file: 依赖；改包后重装即刷新）
+#    在 ~/.dsh/profiles/web/package.json 的 dependencies 加：
+#      "@wildfirechat/dsh-wildfire": "file:/path/to/wildfirechat-dsh-wildfire-0.1.0.tgz"
+#    并确保 ~/.dsh/profiles/web/pnpm-workspace.yaml 存在（nodeLinker: hoisted，
+#    可从 wildfire profile 复制），然后：
+corepack pnpm@latest --dir ~/.dsh/profiles/web install
+
+# 2. 激活并配置：编辑 ~/.dsh/profiles/web/cordis.patch.yml，insert 插件行 + tool-ask-user
+#    （与 wildfire profile 的配置完全一致；可直接把 wildfire 的 patch 内容复制过来，
+#    或参考「配置参考」章节）：
+# - insert:
+#     - id: tool-ask-user
+#       name: '@deepseek-ai/dsh-tool-ask-user'
+#     - id: wildfire
+#       name: '@wildfirechat/dsh-wildfire'
+#       config:
+#         gatewayUrl: ws://.../robot/gateway
+#         robotId: ...
+#         robotSecret: ...
+
+# 3. 停旧进程（同一 robotId 同时只允许一个网关连接，先停 IM 专用模式），重启 dsh web
+pkill -f "dsh --profile wildfire"
+dsh web
+# 日志出现 [wildfire] connected as <robotId> 即插件加载成功
+```
+
+验证：野火客户端给机器人发消息正常回复；浏览器 GUI 同时可用（同一 Agent 运行时，会话互通）。
+可用 `dsh --profile web --dump-config | grep wildfire` 检查组合树里插件行是否就位。
+
+> 两 profile 可长期并存、交替使用，**同一时间只跑一个**（机器人连接互斥）。
+
 #### 选型建议
 
 | 场景 | 推荐形态 |
