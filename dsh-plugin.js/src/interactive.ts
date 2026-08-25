@@ -217,8 +217,10 @@ export class InteractionManager {
   private pendingApprovals = new Map<string, PendingApproval>();
   private registered = false;
   // Conversation state accumulator (scope=31 user setting), coalesced 300ms.
+  // 按会话 key 分槽：多个会话并发推送时互不覆盖（旧实现单槽 + key 覆盖，
+  // 300ms 窗口内第二个会话会把第一个会话的状态更新吞掉）。
   private stateTimer: NodeJS.Timeout | undefined;
-  private pendingState: RuntimeState & { key: string } | undefined;
+  private pendingStates = new Map<string, RuntimeState & { key: string }>();
   /** 上次 flush 的完整 payload（按 key），每次 flush 从它合并，保证累计字段不丢。 */
   private fullState = new Map<string, Record<string, unknown>>();
 
@@ -435,8 +437,7 @@ export class InteractionManager {
     this.logger?.info?.(
       `[wildfire] pushStatus: key=${key}, state=${data.state ?? "-"}, reason=${data.reason ?? "-"}`
     );
-    const acc = this.pendingState ?? { key };
-    acc.key = key;
+    const acc = this.pendingStates.get(key) ?? { key };
     for (const field of [
       "state", "phase", "toolName", "model", "reasoningEffort",
       "interaction", "reason", "error", "cwd", "sessionId", "goal", "progress",
@@ -444,17 +445,16 @@ export class InteractionManager {
     ] as const) {
       if (data[field] !== undefined) (acc as any)[field] = data[field];
     }
-    this.pendingState = acc;
+    this.pendingStates.set(key, acc);
     this.scheduleStateFlush();
   }
 
   /** Merge agent activity (thinking/tool) into the runtime state. */
   pushProgress(key: string, data: RuntimeState): void {
-    const acc = this.pendingState ?? { key };
-    acc.key = key;
+    const acc = this.pendingStates.get(key) ?? { key };
     if (data.phase) acc.phase = data.phase;
     if (data.toolName) acc.toolName = data.toolName;
-    this.pendingState = acc;
+    this.pendingStates.set(key, acc);
     this.scheduleStateFlush();
   }
 
@@ -468,10 +468,13 @@ export class InteractionManager {
   }
 
   private flushState(): void {
-    const acc = this.pendingState;
-    this.pendingState = undefined;
-    if (!acc) return;
-    const prev = this.fullState.get(acc.key) ?? {};
+    const entries = [...this.pendingStates.entries()];
+    this.pendingStates.clear();
+    for (const [key, acc] of entries) this.flushStateForKey(key, acc);
+  }
+
+  private flushStateForKey(key: string, acc: RuntimeState & { key: string }): void {
+    const prev = this.fullState.get(key) ?? {};
     const next: Record<string, unknown> = { ...prev };
     const state = acc.state ?? (next.state as string) ?? "running";
     next.state = state;
@@ -503,9 +506,9 @@ export class InteractionManager {
     if (acc.sessionId !== undefined) next.sessionId = acc.sessionId;
     if (acc.goal !== undefined) next.goal = acc.goal;
     if (acc.progress !== undefined) next.progress = acc.progress;
-    this.fullState.set(acc.key, next);
+    this.fullState.set(key, next);
     this.cards
-      .setConversationState(acc.key, next)
+      .setConversationState(key, next)
       .catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire] conversation state update failed: ${String(err)}`)
       );
@@ -596,65 +599,210 @@ export class InteractionManager {
   private taskCardPending = new Set<string>();
   /** key → taskId → 任务项。 */
   private taskItems = new Map<string, Map<string, DSHTaskItem>>();
+  /** 已绑定 subagent 事件监听的 agent scope（WeakSet：防重复绑定，也防递归死循环）。 */
+  private boundTaskScopes = new WeakSet<object>();
+  /** key → 任务卡发送中收到的"脏"标记：sendCard 落定后补一次刷新（修并发丢失窗口）。 */
+  private taskCardDirty = new Set<string>();
+  /** 全局 ctx（registerTaskFeed 注入，用于 turn/end 后把后台任务同步进卡片）。 */
+  private ctx: any;
 
   /**
-   * 注册任务卡片数据源。subagent 事件是 scoped 分发（按 parent agent 的
-   * scope 载体），全局 ctx.on 收不到——必须在每个 agent 的 setup(agentCtx)
-   * 里绑定（见 bindAgentScope）。
+   * 注册任务卡片数据源。
+   * 1) subagent 事件是 scoped 分发（按 parent agent 的 scope 载体），全局
+   *    ctx.on 收不到——必须在每个 agent 的 setup(agentCtx) 里绑定
+   *    （见 bindAgentScope），并在派生子代理时递归绑定其 scope（嵌套子代理）。
+   * 2) 全局 `session/event` firehose 的 turn/end 触发一次后台任务同步
+   *    （kind:"job" 项，来源 `jobs.list(agent)`，随轮次结束刷新）。
    */
   registerTaskFeed(ctx: any): void {
-    this.logger?.info?.("[wildfire] task feed ready (bind per-agent scope via setup)");
+    this.ctx = ctx;
+    ctx.on("session/event", (session: any, event: any) => {
+      try {
+        if (event?.type !== "turn/end") return;
+        const key = this.resolveKeyForSession(String(session?.id));
+        if (!key) return;
+        void this.syncJobs(key, String(session?.id));
+      } catch (err: any) {
+        this.logger?.warn?.(`[wildfire] task feed turn/end handling failed: ${String(err)}`);
+      }
+    });
+    this.logger?.info?.("[wildfire] task feed ready (bind per-agent scope via setup, jobs sync on turn/end)");
   }
 
   /**
    * 绑定一个 agent 的 scope 到任务卡片：在该 agent 内监听其派生的
    * subagent/start、subagent/end（agent.ts 的 create/resume setup 调用）。
+   * 派生子代理时对子代理 scope 递归调用同一绑定，覆盖嵌套（workflow 式
+   * fan-out 的二级及以下子代理）——scope 形状按 dsh-agent 常见形态探测
+   * （child.ctx / child.agentCtx / child 自身），探测不到时静默降级为
+   * 仅直系子代理（与旧行为一致）。
    */
   bindAgentScope(agentCtx: any): void {
-    agentCtx.on("subagent/start", (info: any) => {
+    this.bindTaskScope(agentCtx);
+  }
+
+  /** 绑定一个 scope（含递归：已有子代理 + 新建子代理）。 */
+  private bindTaskScope(scope: any, parentAgent?: any): void {
+    if (!scope || typeof scope.on !== "function" || this.boundTaskScopes.has(scope)) return;
+    this.boundTaskScopes.add(scope);
+    const parent = parentAgent ?? scope?.agent;
+
+    scope.on("subagent/start", (info: any) => {
       try {
-        const parent = agentCtx.agent;
         const key = this.resolveKeyForSession(String(parent?.session?.id));
         if (!key) return;
-        this.upsertTask(key, String(info?.runId ?? info?.id), {
+        this.upsertTask(key, this.subagentTaskId(info), {
           kind: "subagent",
           id: String(info?.id ?? ""),
           label: this.subagentLabel(parent, info),
           status: "running",
           updatedAt: Date.now(),
         });
+        // 递归：给刚创建的子代理 scope 也绑定监听（嵌套子代理通知）。
+        // dsh 实际事件形状是 {runId, provider, id, local}，父 agent 上没有
+        // subagents 访问器——按子会话 id 从 agents 注册表解析活跃子代理；
+        // 子代理尚未发布时静默跳过（只跟踪到直系，与旧行为一致）。
+        try {
+          const child = this.ctx?.get?.("agents")?.get?.(String(info?.id));
+          if (child) this.bindTaskScope(child?.ctx ?? child, child);
+        } catch {
+          // 忽略
+        }
       } catch (err: any) {
         this.logger?.warn?.(`[wildfire] subagent/start handling failed: ${String(err)}`);
       }
     });
-    agentCtx.on("subagent/end", (info: any) => {
+    scope.on("subagent/end", (info: any) => {
       try {
-        const parent = agentCtx.agent;
         const key = this.resolveKeyForSession(String(parent?.session?.id));
         if (!key) return;
-        const failed = String(info?.stopReason ?? "") === "error";
-        this.upsertTask(key, String(info?.runId ?? info?.id), {
+        const failed = this.isSubagentFailed(info);
+        const killed = this.isSubagentKilled(info);
+        const status: DSHTaskItem["status"] = killed ? "killed" : failed ? "failed" : "done";
+        this.upsertTask(key, this.subagentTaskId(info), {
           kind: "subagent",
           id: String(info?.id ?? ""),
           label: this.subagentLabel(parent, info),
-          status: failed ? "failed" : "done",
-          ...(failed ? { reason: "子任务执行失败" } : {}),
+          status,
+          ...(status === "failed" ? { reason: this.subagentFailReason(info) } : {}),
+          ...(status === "killed" ? { reason: "子任务已终止" } : {}),
+          ...(info?.result ? { result: String(info.result).slice(0, 200) } : {}),
           updatedAt: Date.now(),
         });
       } catch (err: any) {
         this.logger?.warn?.(`[wildfire] subagent/end handling failed: ${String(err)}`);
       }
     });
+
+    // 已有子代理（如 resume 后 scope 里残留）：递归补绑
+    this.bindExistingChildren(parent);
   }
 
-  /** 子任务标签：优先 descriptor label（尽力而为），缺失时用 id 前缀。 */
+  /** 遍历 parent.subagents（Map 或对象）递归绑定。 */
+  private bindExistingChildren(parent: any): void {
+    if (!parent) return;
+    const children = parent?.subagents;
+    if (!children) return;
+    const entries =
+      typeof children.values === "function" ? [...children.values()] : Object.values(children);
+    for (const child of entries) {
+      if (!child) continue;
+      this.bindTaskScope(child?.ctx ?? child?.agentCtx ?? child, child);
+    }
+  }
+
+  /** 任务项 id：runId 优先（start/end 两事件一致才可原地覆盖）。 */
+  private subagentTaskId(info: any): string {
+    return String(info?.runId ?? info?.id ?? info?.taskId ?? "");
+  }
+
+  /** 失败判定：兼容 stopReason / status / error 多种字段形态。 */
+  private isSubagentFailed(info: any): boolean {
+    const sr = String(info?.stopReason ?? info?.status ?? "");
+    return sr === "error" || sr === "failed" || !!info?.error;
+  }
+
+  private isSubagentKilled(info: any): boolean {
+    const sr = String(info?.stopReason ?? info?.status ?? "");
+    return sr === "killed" || sr === "cancelled" || sr === "cancel" || sr === "aborted";
+  }
+
+  private subagentFailReason(info: any): string {
+    return String(info?.error ?? info?.reason ?? "子任务执行失败");
+  }
+
+  /**
+   * 把 agent 当前的后台任务同步进任务卡片（kind:"job"）。
+   * 在 turn/end 时调用：先清掉旧 job 项，再按 jobs.list(agent) 重建，
+   * 保证卡片里的后台任务与 jobs 服务一致（不再出现已消失的任务）。
+   */
+  private async syncJobs(key: string, sessionId: string): Promise<void> {
+    try {
+      const jobs = this.ctx?.get?.("jobs");
+      const agents = this.ctx?.get?.("agents");
+      const got = agents?.get?.(sessionId);
+      const agent = got?.agent ?? got;
+      if (!jobs || !agent) return;
+      const list = (await Promise.resolve(jobs.list(agent))) ?? [];
+      const byKey = this.taskItems.get(key) ?? new Map<string, DSHTaskItem>();
+      for (const [taskId, item] of [...byKey]) {
+        if (item.kind === "job") byKey.delete(taskId);
+      }
+      for (const job of list) {
+        const id = String(job?.id ?? "");
+        if (!id) continue;
+        const status = this.mapJobStatus(job?.status);
+        byKey.set(id, {
+          kind: "job",
+          id,
+          label: String(job?.label ?? ""),
+          status,
+          ...(status === "failed" ? { reason: "后台任务失败" } : {}),
+          ...(status === "killed" ? { reason: "后台任务已终止" } : {}),
+          updatedAt: Date.now(),
+        });
+      }
+      this.taskItems.set(key, byKey);
+      this.flushTaskCard(key);
+    } catch (err: any) {
+      this.logger?.warn?.(`[wildfire] task card job sync failed: ${String(err)}`);
+    }
+  }
+
+  /** 后台任务状态 → 卡片状态（客户端仅识别 running/done/failed/completed/killed）。 */
+  private mapJobStatus(status: any): DSHTaskItem["status"] {
+    switch (String(status ?? "")) {
+      case "running":
+      case "stopping":
+        return "running";
+      case "completed":
+        return "completed";
+      case "killed":
+      case "cancelled":
+        return "killed";
+      case "failed":
+      case "error":
+        return "failed";
+      default:
+        return "running";
+    }
+  }
+
+  /**
+   * 子任务标签：优先从 agents 注册表解析子代理的 descriptor/meta label
+   * （尽力而为），当前 dsh 无这些访问器时回退为 provider 名；
+   * 仍缺失时返回 undefined（客户端显示 id 前缀）。
+   */
   private subagentLabel(parent: any, info: any): string | undefined {
     try {
-      const childAgent = parent?.subagents?.get?.(String(info?.id));
+      const childAgent = this.ctx?.get?.("agents")?.get?.(String(info?.id));
       const label = childAgent?.descriptor?.label ?? childAgent?.meta?.label;
       if (typeof label === "string" && label.trim()) return label.trim();
     } catch {
       // 忽略
+    }
+    if (info && typeof info.provider === "string" && info.provider.trim()) {
+      return info.provider.trim();
     }
     return undefined;
   }
@@ -680,13 +828,20 @@ export class InteractionManager {
     if (existingId) {
       this.cards
         .updateCard(existingId, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload))
-        .catch((err: unknown) =>
-          this.logger?.warn?.(`[wildfire] task card update failed: ${String(err)}`)
-        );
+        .catch((err: unknown) => {
+          // 原地更新失败（如用户删了卡片/卡片不存在）：重置后补发一张新卡
+          this.logger?.warn?.(`[wildfire] task card update failed, re-sending: ${String(err)}`);
+          this.taskCardIds.delete(key);
+          this.flushTaskCard(key);
+        });
       return;
     }
-    // 发送中不重复发：并发 subagent/start 只发一张卡，messageId 返回后记录
-    if (this.taskCardPending.has(key)) return;
+    // 发送中不重复发：并发 subagent/start 只发一张卡，messageId 返回后记录；
+    // 期间的新状态记"脏"，sendCard 落定后补一次刷新（修并发丢失窗口）。
+    if (this.taskCardPending.has(key)) {
+      this.taskCardDirty.add(key);
+      return;
+    }
     this.taskCardPending.add(key);
     this.cards
       .sendCard(target, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload), 1)
@@ -698,6 +853,9 @@ export class InteractionManager {
       )
       .finally(() => {
         this.taskCardPending.delete(key);
+        if (this.taskCardDirty.delete(key)) {
+          this.flushTaskCard(key);
+        }
       });
   }
 
@@ -705,6 +863,7 @@ export class InteractionManager {
   resetTaskCards(key: string): void {
     this.taskCardIds.delete(key);
     this.taskCardPending.delete(key);
+    this.taskCardDirty.delete(key);
     this.taskItems.delete(key);
   }
 
@@ -712,6 +871,7 @@ export class InteractionManager {
   dispose(): void {
     this.taskCardIds.clear();
     this.taskCardPending.clear();
+    this.taskCardDirty.clear();
     this.taskItems.clear();
     for (const pending of this.pendingQuestions.values()) {
       clearTimeout(pending.timer);
@@ -964,6 +1124,10 @@ export class InteractionManager {
     const t = text.trim();
     const approved = this.config.approvedLabel;
     const denied = this.config.deniedLabel;
+    // 否定形式优先：`不<关键词>` 是反向选择（"不同意" 含 "同意"，直接 includes
+    // 会误放行；"不拒绝" 同理应放行）。
+    if (approved && t.includes(`不${approved}`)) return "rejected";
+    if (denied && t.includes(`不${denied}`)) return "allowed-once";
     if (approved && t.includes(approved)) return "allowed-once";
     if (denied && t.includes(denied)) return "rejected";
     if (/^(是|好|ok|yes|允许|同意|放行|可以|1)/i.test(t)) return "allowed-once";

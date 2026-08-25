@@ -41,7 +41,8 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
     {
       timeout: 30,
       reconnectInterval: 5000,
-      heartbeatInterval: 180000,
+      // 心跳 60s：与网关 HEARTBEAT_TIMEOUT（3min）匹配，静默失联约 2~4 分钟显示离线
+      heartbeatInterval: 60000,
       // 平台号：默认不配置 —— SDK 按运行环境自动探测（Linux=7 / macOS=4 / Windows=3），
       // 网关据此设置 im-server 的机器人在线平台（/robot/set_online）。
       platform: config.gatewayPlatform,

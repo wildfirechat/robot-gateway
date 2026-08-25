@@ -22,6 +22,27 @@ import { getWorkspaceConfig } from "./config.js";
 
 type RequiredWorkspaceConfig = Required<WildfireWorkspaceConfig>;
 
+/**
+ * 符号链接感知的路径规范化：向上找到第一个【已存在】的祖先并 realpath，
+ * 再把剩余（不存在的）路径段拼接回去。
+ * 用于对尚不存在的目录做围栏校验——否则路径中的符号链接
+ * （如 /data/link -> /etc）会让之后的 mkdir 实际落在围栏外。
+ */
+async function realpathPrefix(p: string): Promise<{ prefix: string; tail: string[] }> {
+  const tail: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return { prefix: await realpath(cur), tail };
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return { prefix: p, tail }; // 连根都不存在：原样返回
+      tail.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
 export class WorkspaceResolver {
   private config: RequiredWorkspaceConfig;
   private logger: any;
@@ -134,8 +155,13 @@ export class WorkspaceResolver {
       const roots = await Promise.all(
         this.config.allowedRoots.map((r) => realpath(r).catch(() => path.resolve(r)))
       );
+      // 已存在路径：realpath 直接命中（与旧行为一致）；
+      // 不存在路径：realpathPrefix 把已存在祖先的 realpath 与剩余段拼接，
+      // 使符号链接无法把待创建目录带出围栏。
+      const { prefix, tail } = await realpathPrefix(resolved);
+      const effective = tail.length > 0 ? path.join(prefix, ...tail) : prefix;
       const inside = roots.some(
-        (root) => root && (resolved === root || resolved.startsWith(root + path.sep))
+        (root) => root && (effective === root || effective.startsWith(root + path.sep))
       );
       if (!inside) return null;
     }

@@ -21,7 +21,9 @@
 
 ## 安装
 
-> **SDK 版本说明**：状态/进度推送依赖 `RobotServiceClient.updateConversationUserSetting`，该方法尚未发布到 npm。当前 `package.json` 以 `file:../client.js` 引用本仓库的本地 SDK 源码；待 SDK 新版本（≥1.0.6）发布后改回版本号依赖。`npm pack` 打包前需先发布 SDK，否则 file: 依赖在安装侧无法解析。
+> **前置要求**：`dsh plugin` 依赖 [pnpm](https://pnpm.io/)（等价于在 profile 目录执行 `pnpm add`）。未安装时先 `npm install -g pnpm`（或 `corepack enable pnpm`），否则 `dsh plugin` 报 `pnpm not found on PATH`。
+
+> **SDK 版本说明**：状态/进度推送依赖 `RobotServiceClient.updateConversationUserSetting`，该方法尚未发布到 npm。当前 `package.json` 以 `file:../client.js` 引用本仓库的本地 SDK 源码；待 SDK 新版本（≥1.0.6）发布后改回版本号依赖。**SDK 发布前**，`npm pack` 产物的 `file:../client.js` 相对依赖在安装侧（profile 目录）无法解析，需先按下面步骤 **1b** 改为本仓库绝对路径；SDK 发布后删除 1b 即可。
 
 ```bash
 # 1. 构建并打包
@@ -30,7 +32,13 @@ npm install
 npm run build
 npm pack
 
+# 1b. （仅 SDK 未发布时需要）把包内 SDK 依赖改为本仓库绝对路径
+mkdir -p /tmp/wf-pack && tar -xzf wildfirechat-dsh-wildfire-0.1.0.tgz -C /tmp/wf-pack
+node -e 'const fs=require("fs"),path=require("path");const p="/tmp/wf-pack/package/package.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));j.dependencies["@wildfirechat/robot-gateway-client-sdk"]="file:"+path.resolve("../client.js");fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n")'
+cd /tmp/wf-pack && tar -czf wildfirechat-dsh-wildfire-0.1.0-local.tgz package && cd -
+
 # 2. 安装到 dsh web profile
+#    SDK 已发布时用原始 tgz；未发布时用 1b 生成的 -local tgz
 dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
 
 # 3. 激活并配置：编辑 ~/.dsh/profiles/web/cordis.patch.yml，追加：
@@ -42,7 +50,8 @@ dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
 #         robotId: your_robot_id
 #         robotSecret: your_robot_secret
 
-# 4. 启动
+# 4. 启动（若 dsh web 已在运行，必须先停掉再启动，插件才会加载）
+pkill -f "dsh web"
 dsh web
 ```
 
@@ -261,6 +270,10 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 
 - **准入**（谁能触发机器人）：`whiteList`——启用时**机器人 owner 自动放行**（`includeOwner`，默认开）、静态 `allowedUsers`/`allowedGroups`、动态 `/allow` 名单任一命中即放行；未启用时全员可用
 - **管理**（谁能执行命令）：`access.adminUsers` / `adminGroups`；未配置管理员时，任一准入用户可执行
+- **遗留群处理**：插件只处理**注册表记录**的 DSH 群（防伪造）。重装 dsh / 更换机器后注册表丢失，IM 服务端会残留插件此前创建的群（机器人是群主、AI 线路）——这类"僵尸群"的消息原本会被静默忽略。插件现在对注册表未命中的群做特殊处置（判定条件：消息到达在 **AI 线路（`aiLine`，默认 2）** 且 `getGroupInfo` 确认**机器人是群主**）：
+  - **普通消息** → 仅返回一条提示（说明这是遗留 DSH 群、机器人不处理、销毁/重建方式），**绝不自动销毁**；同一群 5 分钟内只提示一次；
+  - **群内发送 `/destroy`**（明确销毁任务）→ 解散群 + 清理自动分配的工作区目录（目录名须为自动目录格式且位于 `workspace.root` 内）+ 提示；
+  - **普通用户群**（机器人非群主）→ 判定失败，完全静默。
 
 白名单动态命令（私聊=管理员，群聊=群主/管理员）：
 

@@ -443,7 +443,10 @@ export class AgentSessionManager {
     if (oldId === String(resumeOptions.resumeSessionId ?? "")) return null;
     try {
       const oldHandle = await agents.resume({ ...resumeOptions, resumeSessionId: SessionId(oldId) });
-      const oldCwd = oldHandle?.agent?.session?.meta?.cwd;
+      // dsh-session 的 Session 暴露的是 header（含创建时写入的 cwd），
+      // 没有 meta 字段——之前读 session.meta.cwd 恒为 undefined，导致
+      // "cwd 不一致则丢弃"的分支永远不执行（死代码）。
+      const oldCwd = oldHandle?.agent?.session?.header?.cwd;
       if (oldCwd === undefined || normalizeCwd(String(oldCwd)) === norm) {
         this.legacySessionByKey.set(key, oldId);
         this.persistEpochs();
@@ -893,13 +896,16 @@ export class AgentSessionManager {
     await this.flushEpochs().catch(() => {});
   }
 
-  /** Evict the least recently used session when over the cap. */
+  /** Evict the least recently used idle session when over the cap. */
   private evictIfNeeded(): void {
     if (this.sessions.size < this.config.maxSessions) return;
-    const oldest = [...this.sessions.values()].sort(
-      (a, b) => a.lastActivity - b.lastActivity
-    )[0];
-    if (!oldest) return;
+    // 只驱逐空闲会话：dispose 会 cancel 正在运行的 turn（machine.cancel），
+    // 若把运行中的会话当 LRU 驱逐，用户正在执行的任务会被静默取消。
+    const idle = [...this.sessions.values()]
+      .filter((managed) => managed.handle.agent?.status !== "running")
+      .sort((a, b) => a.lastActivity - b.lastActivity);
+    const oldest = idle[0];
+    if (!oldest) return; // 全部运行中：不驱逐，避免打断进行中的任务
     this.sessions.delete(oldest.sessionId);
     this.sessionIdToKey.delete(oldest.sessionId);
     oldest.handle.dispose().catch((err: unknown) =>

@@ -24,7 +24,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "check:sdk": "node scripts/check-sdk.mjs",
+    "prepublishOnly": "npm run build && npm run check:sdk"
   },
   "dependencies": {
     "@wildfirechat/robot-gateway-client-sdk": "file:../client.js",

@@ -27,19 +27,24 @@ export type DSHType = (typeof DSH_TYPE)[keyof typeof DSH_TYPE];
 /**
  * 任务进度卡片（208 DSH_TaskProgress）：会话内展示子任务/后台任务进度。
  * 一张卡片一个会话（首次 sendCard，之后 updateMessage 原地更新）。
+ * - subagent 项：来自 scoped 事件 subagent/start、subagent/end（含嵌套子代理，
+ *   见 interactive.ts bindTaskScope）。
+ * - job 项：turn/end 时从 jobs 服务同步（jobs.list(agent)，见 syncJobs）。
+ * 状态与鸿蒙客户端（hm-chat DshTaskProgressContentView）对齐：
+ * running / done / failed / completed / killed。
  */
 export interface DSHTaskItem {
   /** 任务种类：subagent=子代理任务；job=后台任务。 */
   kind: "subagent" | "job";
   /** 任务/子会话 id。 */
   id: string;
-  /** 任务标签（子任务 label，尽力而为；缺失时显示 id 前缀）。 */
+  /** 任务标签（子代理 label / 后台任务 label，尽力而为；缺失时客户端显示 id 前缀）。 */
   label?: string;
   /** 状态：running / done / failed / completed / killed。 */
   status: "running" | "done" | "failed" | "completed" | "killed";
   /** 失败原因（status=failed 时）。 */
   reason?: string;
-  /** 结束摘要（子任务最终输出截断）。 */
+  /** 结束摘要（子任务最终输出截断，客户端暂不渲染、预留）。 */
   result?: string;
   /** 最近更新时间（Unix ms）。 */
   updatedAt: number;

@@ -461,13 +461,17 @@ config:
 
 ### 1. 打包并安装插件
 
+> 前置：`dsh plugin` 依赖 pnpm（等价于在 profile 目录执行 `pnpm add`）。未安装时先 `npm install -g pnpm`（或 `corepack enable pnpm`）。
+
 ```bash
 cd dsh-plugin.js
 npm install
 npm run build
-npm pack                                  # 生成 @wildfirechat-dsh-wildfire-x.y.z.tgz
-dsh plugin --profile web add ./wildfire-dsh-1.0.0.tgz
+npm pack                                  # 生成 @wildfirechat/dsh-wildfire-x.y.z.tgz
+dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
 ```
+
+> **SDK 未发布时的临时安装**：状态/进度推送依赖 `RobotServiceClient.updateConversationUserSetting`（SDK ≥1.0.6 才有，尚未发布）。当前包以 `file:../client.js` 引用本仓库 SDK，`npm pack` 后该**相对**依赖在安装侧（profile 目录）解析不到。临时方案：解包 tgz，把该依赖改为本仓库**绝对路径**（`file:<仓库绝对路径>/client.js`）后重新打包再安装；SDK 发布并切回版本号依赖后删除此步骤（完整命令见 `dsh-plugin.js/README.md` 安装章节步骤 1b）。
 
 ### 2. 激活并配置
 
@@ -476,6 +480,7 @@ dsh plugin --profile web add ./wildfire-dsh-1.0.0.tgz
 ### 3. 启动与验证
 
 ```bash
+pkill -f "dsh web"                        # 若 dsh web 已在运行：先停，插件才会加载
 dsh web                                 # 启动（浏览器 GUI + 插件同时运行）
 # 日志中出现 [wildfire] connected as <robotId> 即连接成功
 ```

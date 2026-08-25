@@ -138,7 +138,18 @@ function dedupInfo(data: any): { key: string; isDuplicate: boolean } {
     return { key, isDuplicate: true };
   }
   recentInbound.set(key, now);
-  if (recentInbound.size > DEDUP_MAX_ENTRIES) recentInbound.clear();
+  if (recentInbound.size > DEDUP_MAX_ENTRIES) {
+    // 先清掉窗口内已过期的条目；仍超限时再删除最旧的一半。
+    // 旧实现直接整体 clear()：清空瞬间重复投递会漏过，破坏去重窗口。
+    for (const [k, t] of recentInbound) {
+      if (now - t >= DEDUP_WINDOW_MS) recentInbound.delete(k);
+    }
+    if (recentInbound.size > DEDUP_MAX_ENTRIES) {
+      const sorted = [...recentInbound.entries()].sort((a, b) => a[1] - b[1]);
+      const excess = sorted.length - Math.floor(DEDUP_MAX_ENTRIES / 2);
+      for (const [k] of sorted.slice(0, excess)) recentInbound.delete(k);
+    }
+  }
   return { key, isDuplicate: false };
 }
 
@@ -204,6 +215,33 @@ export async function handleIncomingMessage(
     // 统一归一化到 AI line 再处理（销毁/注销等语义与 line 无关，但保持
     // 会话/通知状态记录在 AI line 上）。
     await handleGroupNotification(api, payloadType, { ...conv, line: getAiLine(config) }, key);
+    return;
+  }
+
+  // DSH workspace groups: only groups in the plugin registry are processed.
+  // (The group extra marker alone is NOT trusted — see registry.ts.)
+  // 门槛放在 DSH_* 结构化消息与线路归一化【之前】：非 DSH 群的任何消息
+  // （含 207 DSH_Command、/stop、/help、wrong-line 提醒）一律忽略——
+  // 否则 207 面板指令可绕过注册表门槛（任意群的群主即可借面板执行
+  // /cwd /sandbox 等，且不受 allowCwdCommand/allowModelCommand 门控），
+  // wrong-line 提醒也会打扰非 DSH 群。
+  if (isGroup && !api.registry?.isDshGroup?.(String(conv.target))) {
+    // 注册表未命中：遗留 DSH 群（重装 dsh 后注册表丢失，但 IM 服务端残留
+    // 机器人创建的群）特殊处置——
+    // - 群内发送 /destroy（明确销毁任务）→ 校验（AI 线路 + 机器人是群主）
+    //   通过后解散群并清理自动目录；
+    // - 其他消息 → 仅返回提示（限频），绝不自动销毁；
+    // 普通用户群（机器人非群主）始终完全静默。
+    const trimmed = (text ?? "").trim();
+    if (/^\/destroy(?:-group)?\b/.test(trimmed)) {
+      if (await destroyOrphanGroup(api, sender, conv, config)) {
+        api.logger?.info?.(`[wildfire] orphan DSH group destroyed: ${conv.target}`);
+      } else {
+        api.logger?.info?.(`[wildfire] orphan destroy rejected for ${conv.target}: not an orphan DSH group`);
+      }
+    } else {
+      await maybeNotifyOrphanGroup(api, sender, conv, config);
+    }
     return;
   }
 
@@ -293,13 +331,6 @@ export async function handleIncomingMessage(
     return;
   }
 
-  // DSH workspace groups: only groups in the plugin registry are processed.
-  // (The group extra marker alone is NOT trusted — see registry.ts.)
-  if (isGroup && !api.registry?.isDshGroup?.(String(conv.target))) {
-    api.logger?.debug?.(`[wildfire] non-DSH group ignored: ${conv.target}`);
-    return;
-  }
-
   // Slash commands are always addressed at the robot: they take priority over
   // a pending card's custom answer (a `/` prefix is a command, not natural
   // language) and skip the group trigger policy below (which would silently
@@ -347,11 +378,16 @@ export async function handleIncomingMessage(
   const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
+  // try/finally：sendDirectReply 在客户端断开时抛异常，必须保证 release()
+  // 执行，否则该会话的队列槽永不释放，之后所有消息都会永久挂起。
   if (!cmdMatch && trimmed.startsWith("/")) {
-    await sendDirectReply(sender, conv, "未知命令，发送 /help 查看可用命令", api);
-    release();
-    if (sessionQueues.get(key) === slot) {
-      sessionQueues.delete(key);
+    try {
+      await sendDirectReply(sender, conv, "未知命令，发送 /help 查看可用命令", api);
+    } finally {
+      release();
+      if (sessionQueues.get(key) === slot) {
+        sessionQueues.delete(key);
+      }
     }
     return;
   }
@@ -477,8 +513,16 @@ export async function handleIncomingMessage(
 
   // 单聊 = 全局控制面板：普通文本（非命令）不进入 AI 对话，
   // 提示用户 AI 功能需在群聊（AI 线路）中使用。
+  // try/finally：与未知命令分支同理，防止 sendDirectReply 抛异常时队列槽泄漏。
   if (isSingle) {
-    await sendDirectReply(sender, conv, "单聊仅用于管理命令（/help 查看全部命令）。AI 对话请在群聊中使用。", api);
+    try {
+      await sendDirectReply(sender, conv, "单聊仅用于管理命令（/help 查看全部命令）。AI 对话请在群聊中使用。", api);
+    } finally {
+      release();
+      if (sessionQueues.get(key) === slot) {
+        sessionQueues.delete(key);
+      }
+    }
     return;
   }
 
@@ -597,9 +641,12 @@ export async function handleIncomingMessage(
     // Token 统计（usage/turn/context/cacheHitRatePct/speed）走 type=2 独立通道。
     // 与下方最终消息一致：无文本且无媒体 = cancelled（type 20）。
     const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0);
+    // NO_REPLY：模型决定不回复（流式 generating 推送已被 NO_REPLY 抑制，
+    // 终态必须同样不显示正文——用取消消息（type 20）收起占位气泡）。
+    const noReply = !noOutput && finalText.includes("NO_REPLY");
     api.interactions?.pushStatus(key, {
       state: "done",
-      reason: noOutput ? "cancelled" : "completed",
+      reason: noOutput || noReply ? "cancelled" : "completed",
     });
     // 统计独立于状态推送：即使无文本产出/出错也推当轮统计（有值才推）
     api.interactions?.pushMetrics(key, {
@@ -609,9 +656,11 @@ export async function handleIncomingMessage(
 
     // Always finalize the stream: without the terminal message the client
     // keeps showing the typing state forever. 有媒体产出但无正文 → completed 兜底
-    // 占位；完全无产出（无文本且无媒体）→ 发送"生成取消"(17)，客户端显示取消态，
-    // 不再把 "(no response)" 当作正常完成消息发出。
-    if (finalText.trim()) {
+    // 占位；完全无产出（无文本且无媒体）或 NO_REPLY → 发送"生成取消"(type 20)，
+    // 客户端显示取消态，不再把 "(no response)" 当作正常完成消息发出。
+    if (noReply) {
+      await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
+    } else if (finalText.trim()) {
       await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
     } else if (extracted?.media?.length) {
       await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
@@ -711,11 +760,15 @@ async function transcribeWithAsrServer(
   mediaUrl: string,
   logger?: any
 ): Promise<string | undefined> {
+  // 超时保护：ASR 服务无响应时不能让回合无限挂起（fetch 默认无超时）。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("ASR request timeout")), 30_000);
   try {
     const res = await fetch(asrServer, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "*/*" },
       body: JSON.stringify({ url: mediaUrl, noReuse: false, noLlm: false }),
+      signal: controller.signal,
     });
     if (!res.ok) {
       logger?.warn?.(`[wildfire] ASR request failed: status=${res.status}`);
@@ -750,6 +803,8 @@ async function transcribeWithAsrServer(
   } catch (e: any) {
     logger?.warn?.(`[wildfire] ASR request error: ${e.message}`);
     return undefined;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1775,6 +1830,17 @@ async function authorizePanelCmd(
   const access = api.access;
   if (!access) return false;
   const senderId = String(sender);
+  // 功能开关：面板指令不能绕过运营者关闭的功能（与文本命令路径一致，
+  // 见 handleIncomingMessage 的 featureOn 判断）。
+  const featureOn =
+    cmd === "cwd" || cmd === "ls"
+      ? api.config?.workspace?.allowCwdCommand
+      : cmd === "model" || cmd === "effort"
+        ? api.config?.model?.allowModelCommand
+        : cmd === "reset"
+          ? api.config?.workspace?.allowCwdCommand || api.config?.model?.allowModelCommand
+          : true;
+  if (!featureOn) return false;
   if (cmd === "cwd" || cmd === "ls") {
     return isGroup
       ? (await access.canManageWorkspace(senderId, String(conv.target), true)) ||
@@ -1864,6 +1930,160 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
   };
 }
 
+// ─────────────────── 遗留 DSH 群清理（注册表门槛的补充） ───────────────────
+
+/**
+ * 遗留 DSH 群处理（注册表门槛的补充）。
+ *
+ * 重装 dsh / 更换机器后注册表（~/.dsh/wildfire-groups.json）丢失，但 IM
+ * 服务端仍残留插件此前创建的群（机器人是群主、AI 线路）。这类僵尸群的消息
+ * 会被注册表门槛静默忽略，无法使用也无法清理。
+ *
+ * 处置策略（绝不因普通消息自动销毁）：
+ * - 群内发送 /destroy（明确销毁任务）→ destroyOrphanGroup：校验通过后解散群
+ *   + 清理自动分配的工作区目录 + 提示；
+ * - 其他消息 → maybeNotifyOrphanGroup：仅返回提示（限频），不销毁；
+ * - 普通用户群（机器人非群主）→ 两个函数都判定失败，完全静默。
+ */
+
+/**
+ * 校验一个未注册群是否为遗留 DSH 群（全部满足才算）：
+ * - 消息到达在 AI 线路（line === aiLine，默认 2）
+ * - getGroupInfo 确认机器人是群主（owner === robotId）——机器人创建的群
+ *   基本只能由插件 /create 产生；普通用户群（机器人非群主）判定失败
+ */
+async function checkOrphanGroup(
+  api: any,
+  groupId: string,
+  line: number,
+  config: WildfireConfig
+): Promise<boolean> {
+  if (line !== getAiLine(config)) return false;
+  const client = getClient();
+  if (!client) return false;
+  let info: any;
+  try {
+    info = await client.getGroupInfo(groupId);
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[wildfire] orphan check failed for ${groupId}: ${String(err?.message ?? err)}`
+    );
+    return false;
+  }
+  if (info?.code !== 0 || !info?.result) {
+    api.logger?.info?.(
+      `[wildfire] orphan check: group=${groupId} info unavailable (code=${String(info?.code)}), not orphan`
+    );
+    return false;
+  }
+  const owner = info?.result?.owner;
+  if (owner !== String(config.robotId)) {
+    api.logger?.info?.(
+      `[wildfire] orphan check: group=${groupId} owner=${String(owner)} != robot, not orphan`
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 销毁任务：解散遗留 DSH 群 + 清理自动目录 + 提示。
+ * 仅当 checkOrphanGroup 通过（AI 线路 + 机器人是群主）才执行；否则返回 false
+ * 保持静默。调用方为群内 /destroy 命令。
+ */
+async function destroyOrphanGroup(
+  api: any,
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  config: WildfireConfig
+): Promise<boolean> {
+  const groupId = String(conv.target);
+  if (!(await checkOrphanGroup(api, groupId, conv.line, config))) {
+    return false;
+  }
+
+  api.logger?.warn?.(
+    `[wildfire] orphan DSH group destroy requested, dismissing: ${groupId} (owner=robot, line=${conv.line})`
+  );
+  const client = getClient();
+  if (client) {
+    try {
+      const result = await client.dismissGroup(groupId, [getAiLine(config)], null);
+      const ok = (result as any)?.code === 0 || (result as any)?.isSuccess?.();
+      api.logger?.info?.(
+        `[wildfire] orphan group dismissed: ${groupId}, success=${ok}${(result as any)?.msg ? `, msg=${(result as any).msg}` : ""}`
+      );
+    } catch (err: any) {
+      api.logger?.warn?.(`[wildfire] orphan group dismiss failed: ${String(err?.message ?? err)}`);
+    }
+  }
+
+  // 清理自动分配的工作区目录（best effort）：自动目录为 <workspace.root>/<wsId>，
+  // wsId 是 sessionIdForConversation 的哈希段（20 位 hex）。仅删除名字匹配
+  // 自动目录格式且位于 root 内的目录，避免误删用户手动创建的同名目录。
+  try {
+    const wsId = sessionIdForConversation(`wildfire:group:${groupId}`, 0).slice("wildfire-".length);
+    if (/^[0-9a-f]{20}$/i.test(wsId)) {
+      const root = api.workspace?.root?.();
+      const dir = root ? pathJoin(root, wsId) : "";
+      if (dir && dir.startsWith(root + path.sep)) {
+        const st = await stat(dir).catch(() => null);
+        if (st?.isDirectory()) {
+          await rm(dir, { recursive: true, force: true });
+          api.logger?.info?.(`[wildfire] orphan workspace dir removed: ${dir}`);
+        }
+      }
+    }
+  } catch (err: any) {
+    api.logger?.warn?.(`[wildfire] orphan workspace cleanup failed: ${String(err?.message ?? err)}`);
+  }
+
+  try {
+    await sendDirectReply(
+      sender,
+      conv,
+      "已解散该遗留 DSH 工作区群（机器人创建但不在插件注册表中）并清理自动工作区目录。如需继续使用，请私聊机器人发送 /create 重新创建。",
+      api
+    );
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
+/** 提示冷却：同一群在冷却期内不重复发提示（防刷屏）。 */
+const orphanNotifiedAt = new Map<string, number>();
+const DSH_ORPHAN_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * 普通消息处置：仅提示，不销毁。校验通过（遗留 DSH 群）且不在冷却期内时，
+ * 回复一条说明（机器人不处理此群消息；销毁发 /destroy，重建私聊 /create）。
+ * 校验失败（普通用户群）完全静默，保持门槛的原始忽略行为。
+ */
+async function maybeNotifyOrphanGroup(
+  api: any,
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  config: WildfireConfig
+): Promise<void> {
+  const groupId = String(conv.target);
+  const last = orphanNotifiedAt.get(groupId);
+  if (last !== undefined && Date.now() - last < DSH_ORPHAN_NOTIFY_COOLDOWN_MS) return;
+  if (!(await checkOrphanGroup(api, groupId, conv.line, config))) return;
+  orphanNotifiedAt.set(groupId, Date.now());
+  api.logger?.info?.(`[wildfire] orphan DSH group noticed (no action): ${groupId}`);
+  try {
+    await sendDirectReply(
+      sender,
+      conv,
+      "该群是插件遗留的 DSH 工作区群（机器人创建但不在插件注册表中，可能因重装 dsh 导致注册表丢失），机器人不会处理此群的消息。如需销毁请在群内发送 /destroy；如需继续使用请私聊机器人发送 /create 重新创建。",
+      api
+    );
+  } catch {
+    // ignore
+  }
+}
+
 async function handleGroupNotification(
   api: any,
   payloadType: number,
@@ -1879,6 +2099,35 @@ async function handleGroupNotification(
   if (!record) {
     api.logger?.debug?.(`[wildfire] dismiss notification for non-DSH group: ${groupId}`);
     return;
+  }
+  // 防伪/防误删：108 解散通知可由自定义客户端伪造（任意 payload type 都可
+  // 投递给机器人），若直接按通知递归删除工作目录，任何能向该群发消息的人
+  // 都能触发。销毁前先 getGroupInfo 确认群确实已解散（解散后查询应失败）：
+  // - code===0 且 result 存在 → 群仍存在（疑似伪造通知）→ 不销毁
+  // - code===-1（SDK 传输层失败/未连接，无法验证）→ 不销毁，宁可留下目录
+  // - 其他非零码 → 服务端确认群已不存在 → 正常销毁
+  const client = getClient();
+  if (client) {
+    try {
+      const info = await client.getGroupInfo(groupId);
+      if (info?.code === 0 && info?.result) {
+        api.logger?.warn?.(
+          `[wildfire] dismiss notification for ${groupId} but the group still exists — skipping workspace destruction (possible spoofed notification)`
+        );
+        return;
+      }
+      if (info?.code === -1) {
+        api.logger?.warn?.(
+          `[wildfire] dismiss notification for ${groupId}: cannot verify group state (transport/not connected), skipping workspace destruction`
+        );
+        return;
+      }
+    } catch (err: any) {
+      api.logger?.warn?.(
+        `[wildfire] dismiss notification for ${groupId}: getGroupInfo check failed (${String(err?.message ?? err)}), skipping workspace destruction`
+      );
+      return;
+    }
   }
   api.logger?.info?.(`[wildfire] group dismissed, destroying workspace: ${groupId}`);
   await api.wildfireAgents.disposeWorkspace(key);

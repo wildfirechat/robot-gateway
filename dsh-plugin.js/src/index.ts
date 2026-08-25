@@ -55,8 +55,11 @@ export function apply(ctx: any, config: any): void {
   }
   // dsh's default logger only buffers messages (no console sink), so in a
   // GUI-less profile nothing would be visible. Export to stderr ourselves.
+  // `levels.default` 必须 ≥ warn(2)：cordis 的导出过滤是 `threshold < level`
+  // 即跳过，缺省 threshold=1 会把 warn 也过滤掉（与默认缓冲出口同样的问题）。
   try {
     ctx.logger?.exporter?.({
+      levels: { default: 2 },
       export: (message: any) => {
         const time = new Date(message.ts).toISOString().slice(11, 19);
         const args = (message.args ?? [])
@@ -299,12 +302,29 @@ export function apply(ctx: any, config: any): void {
         if (connectPromise) return connectPromise;
         connectPromise = (async () => {
           let attempt = 0;
+          let authReported = false;
           for (;;) {
             try {
               await startClient(api, cfg);
               break;
-            } catch (err) {
+            } catch (err: any) {
               attempt += 1;
+              // 鉴权失败（凭据/配置错误）与网络故障分开处理：
+              // 前者是永久性错误，只报错一次，之后按固定 60s 慢速重试
+              // （等运营者修正配置后自动恢复），不再指数退避刷屏；
+              // 后者保持指数退避直至网关恢复。
+              if (err?.code === "AUTH_FAILED") {
+                if (!authReported) {
+                  authReported = true;
+                  logger.error?.(
+                    `[wildfire] ${String(err)} — will retry every 60s until fixed`
+                  );
+                } else {
+                  logger.info?.(`[wildfire] auth retry pending (attempt ${attempt})`);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 60_000));
+                continue;
+              }
               const delay = Math.min(30_000, 5_000 * 2 ** Math.min(attempt - 1, 4));
               // error level: dsh's default logger level hides warn in GUI-less profiles
               logger.error?.(

@@ -58,9 +58,20 @@ function isImageExt(name: string): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(name);
 }
 
+/** 出站/入站媒体下载的大小上限（64MB，防恶意/异常 mediaUrl 撑爆内存）。 */
+const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
+
+/** 入站媒体下载超时（ms）。fetch 默认无超时，服务端不响应会让回合无限挂起。 */
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+
 /**
  * Download a remote media URL to a local temp file.
  * Returns the local path, or null on failure.
+ *
+ * 安全约束：remoteUrl 来自消息 payload（可被任意用户构造），因此
+ * - 仅允许 http/https（file://、ftp:// 等一律拒绝）；
+ * - 30s 超时；
+ * - 64MB 大小上限（流式累计，超限中止）。
  */
 export async function downloadToTemp(
   remoteUrl: string,
@@ -68,16 +79,46 @@ export async function downloadToTemp(
   logger?: any
 ): Promise<{ path: string; ext: string } | null> {
   try {
+    let parsed: URL;
+    try {
+      parsed = new URL(remoteUrl);
+    } catch {
+      logger?.warn?.(`[wildfire-media] download rejected (invalid URL): ${remoteUrl}`);
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      logger?.warn?.(`[wildfire-media] download rejected (non-http(s) scheme): ${parsed.protocol}//`);
+      return null;
+    }
     await mkdir(downloadDir, { recursive: true });
     const urlPath = remoteUrl.split("?")[0];
     const ext = (urlPath.split(".").pop()?.toLowerCase() ?? "bin").replace(/[^a-z0-9]/g, "");
     const safeExt = /^[a-z0-9]{1,8}$/.test(ext) ? ext : "bin";
     const localPath = path.join(downloadDir, `wildfire-${randomUUID()}.${safeExt}`);
-    const resp = await fetch(remoteUrl);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-    const buf = Buffer.from(await resp.arrayBuffer());
-    await writeFile(localPath, buf);
-    return { path: localPath, ext: safeExt };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("media download timeout")), MEDIA_DOWNLOAD_TIMEOUT_MS);
+    try {
+      const resp = await fetch(remoteUrl, { signal: controller.signal });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      if (!resp.body) throw new Error("no response body");
+      const chunks: Buffer[] = [];
+      let total = 0;
+      const reader = resp.body.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_MEDIA_BYTES) {
+          throw new Error(`media too large (over ${MAX_MEDIA_BYTES} bytes)`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+      const buf = Buffer.concat(chunks);
+      await writeFile(localPath, buf);
+      return { path: localPath, ext: safeExt };
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (e: any) {
     logger?.warn?.(`[wildfire-media] download failed for ${remoteUrl}: ${e.message}`);
     return null;
