@@ -332,9 +332,13 @@ export class AgentSessionManager {
         provider: selection.provider,
         model: selection.model,
       },
-      setup: (agentCtx: any) => {
+      setup: async (agentCtx: any) => {
         installModelSelection(agentCtx, selectionRef);
         this.agentScopeBinder?.(agentCtx);
+        // web profile 下 base 工具被 dsh-web-app 禁用、改由 preset 按会话
+        // 挂载——不挂 preset 的 agent 没有任何工具（模型只能输出工具调用
+        // 文本而无法执行）。mount 内部已捕获所有失败，不阻塞 agent 创建。
+        await this.mountAgentPreset(agentCtx);
       },
     };
     const createOptions = {
@@ -344,9 +348,10 @@ export class AgentSessionManager {
         provider: selection.provider,
         model: selection.model,
       },
-      setup: (agentCtx: any) => {
+      setup: async (agentCtx: any) => {
         installModelSelection(agentCtx, selectionRef);
         this.agentScopeBinder?.(agentCtx);
+        await this.mountAgentPreset(agentCtx);
       },
     };
 
@@ -603,6 +608,34 @@ export class AgentSessionManager {
     this.cwdByKey.delete(key);
     this.persistEpochs();
     this.logger?.info?.(`[wildfire-agent] workspace session disposed: key=${key}`);
+  }
+
+  /**
+   * 给 agent 挂载 dsh agent-preset（工具/prompt/委托后端来源，web profile 下
+   * base 全局工具被 dsh-web-app 禁用、改由 preset 按会话挂载——不挂 preset 的
+   * agent 没有任何工具，模型只能输出工具调用文本而无法真正执行）。
+   *
+   * 在 agent 的 setup(agentCtx) 中调用（agent 发布前完成）。失败时静默降级：
+   * agent 无工具继续运行（与旧行为一致），不阻塞 agent 创建。
+   */
+  private async mountAgentPreset(agentCtx: any): Promise<void> {
+    try {
+      const presets = this.ctx?.get?.("agentPresets") ?? agentCtx?.get?.("agentPresets");
+      if (!presets) {
+        this.logger?.warn?.(
+          "[wildfire-agent] agentPresets service unavailable — agent will have no tools"
+        );
+        return;
+      }
+      await presets.mount(agentCtx, this.config.preset);
+      this.logger?.info?.(
+        `[wildfire-agent] agent preset mounted: ${this.config.preset}`
+      );
+    } catch (err: any) {
+      this.logger?.warn?.(
+        `[wildfire-agent] agent preset mount failed (${String(err?.message ?? err)}), agent may have no tools`
+      );
+    }
   }
 
   /**

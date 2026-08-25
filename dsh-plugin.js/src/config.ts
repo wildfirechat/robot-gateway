@@ -34,6 +34,15 @@ export interface WildfireSessionConfig {
   idleTimeoutMs?: number;
   /** Max concurrent agent sessions. Default 200. */
   maxSessions?: number;
+  /**
+   * 挂载到每个 IM agent 的 dsh agent-preset id（工具/prompt/委托后端来源）。
+   * 默认 "standard"（功能完整的编码 Agent）。
+   *
+   * 注意：web profile 下 dsh-base 的全局工具被 dsh-web-app 禁用、改为按会话
+   * 挂载 preset——不挂载 preset 的 agent 会【没有任何工具】（模型只能输出
+   * 工具调用文本而无法真正执行）。此配置即插件创建的 IM agent 挂载的 preset。
+   */
+  preset?: string;
 }
 
 export interface WildfireStreamingConfig {
@@ -259,6 +268,7 @@ export function getSessionConfig(config: WildfireConfig): Required<WildfireSessi
   return {
     idleTimeoutMs: config.session?.idleTimeoutMs ?? 24 * 60 * 60 * 1000,
     maxSessions: config.session?.maxSessions ?? 200,
+    preset: config.session?.preset ?? "standard",
   };
 }
 

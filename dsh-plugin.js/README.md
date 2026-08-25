@@ -159,6 +159,7 @@ dsh --profile wildfire
 | `whiteList.persistFile` | 否 | 动态 `/allow` 名单持久化文件，默认 `~/.dsh/wildfire-allowlist.json` |
 | `session.idleTimeoutMs` | 否 | 会话空闲回收时间，默认 24h |
 | `session.maxSessions` | 否 | 最大并发 Agent 会话数，默认 200 |
+| `session.preset` | 否 | 每个 IM agent 挂载的 dsh agent-preset id，**默认 `standard`（无需配置即可用）**——功能完整的编码 Agent（bash/fs/skill/goal/plan/subagent 等全套工具）。背景：web profile 下 dsh-base 全局工具被 `dsh-web-app` 禁用、改由 preset 按会话挂载，插件已自动为每个 agent 挂载该默认 preset；仅需更换 preset 时才配置此项 |
 | `streaming.throttleMs` | 否 | 流式推送节流（毫秒），默认 300 |
 | `streaming.initialPlaceholder` | 否 | 占位消息文本，默认 `…` |
 | `workspace.mode` | 否 | 工作目录模式：`global`（默认）/ `per-session` / `mapped` |

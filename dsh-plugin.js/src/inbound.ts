@@ -1830,17 +1830,11 @@ async function authorizePanelCmd(
   const access = api.access;
   if (!access) return false;
   const senderId = String(sender);
-  // 功能开关：面板指令不能绕过运营者关闭的功能（与文本命令路径一致，
-  // 见 handleIncomingMessage 的 featureOn 判断）。
-  const featureOn =
-    cmd === "cwd" || cmd === "ls"
-      ? api.config?.workspace?.allowCwdCommand
-      : cmd === "model" || cmd === "effort"
-        ? api.config?.model?.allowModelCommand
-        : cmd === "reset"
-          ? api.config?.workspace?.allowCwdCommand || api.config?.model?.allowModelCommand
-          : true;
-  if (!featureOn) return false;
+  // 注意：面板（207 DSH_Command）不做 allowCwdCommand/allowModelCommand 功能
+  // 开关检查——那是针对斜杠【文本命令】的门控；AI 面板是客户端正式管理入口，
+  // 且非注册群的 207 已被注册表门槛拦截（防借面板绕过），此处只做授权检查
+  // （私聊=管理员，群聊=创建者/管理员）。若在此叠加功能开关，未开启开关的
+  // 部署中面板改 cwd/model 会静默失效。
   if (cmd === "cwd" || cmd === "ls") {
     return isGroup
       ? (await access.canManageWorkspace(senderId, String(conv.target), true)) ||
