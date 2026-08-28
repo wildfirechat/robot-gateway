@@ -129,3 +129,18 @@ export function safePreview(value: string, maxLen = 120): string {
 export function conversationKey(isGroup: boolean, targetId: string): string {
   return (isGroup ? `wildfire:group:${targetId}` : `wildfire:user:${targetId}`).toLowerCase();
 }
+
+/** 结构化深比较（键顺序无关），用于状态去重等场景。 */
+export function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  return ka.every(
+    (k) =>
+      Object.prototype.hasOwnProperty.call(b, k) &&
+      deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])
+  );
+}

@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto";
 import type { WildfireConfig } from "./config.js";
 import { getInteractionConfig } from "./config.js";
+import { deepEqual } from "./utils.js";
 import {
   DSH_TYPE,
   summarizeApproval,
@@ -432,6 +433,7 @@ export class InteractionManager {
    * 所以累计字段（model/cwd/sessionId/usage/context/cacheHitRatePct）不会
    * 因某次推送没带而丢失。清除语义：state=running（新回合开始）会清除
    * reason/error；state≠waiting_user 时 interaction 不发送。
+   * 去重语义：flush 结果与最后一次【已发送】状态完全一致时跳过网络推送。
    */
   pushStatus(key: string, data: RuntimeState): void {
     this.logger?.info?.(
@@ -474,8 +476,9 @@ export class InteractionManager {
   }
 
   private flushStateForKey(key: string, acc: RuntimeState & { key: string }): void {
-    const prev = this.fullState.get(key) ?? {};
-    const next: Record<string, unknown> = { ...prev };
+    // prev = 该会话最后一次【已发送】的完整状态快照（发送按 best-effort，失败不回滚）
+    const prev = this.fullState.get(key);
+    const next: Record<string, unknown> = { ...(prev ?? {}) };
     const state = acc.state ?? (next.state as string) ?? "running";
     next.state = state;
     if (acc.phase !== undefined) {
@@ -506,6 +509,9 @@ export class InteractionManager {
     if (acc.sessionId !== undefined) next.sessionId = acc.sessionId;
     if (acc.goal !== undefined) next.goal = acc.goal;
     if (acc.progress !== undefined) next.progress = acc.progress;
+    // 状态去重：与最后一次已发送状态完全一致时跳过推送，
+    // 省一次 updateConversationUserSetting 往返（300ms 合并 + 去重双层节流）
+    if (prev && deepEqual(prev, next)) return;
     this.fullState.set(key, next);
     this.cards
       .setConversationState(key, next)

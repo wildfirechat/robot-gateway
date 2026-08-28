@@ -693,6 +693,12 @@ export class AgentSessionManager {
           });
           break;
         }
+        case "tool/result": {
+          // 工具结束 → 模型思考结果：活动相从 tool 切回 thinking（IM 状态栏显示 Think）。
+          // 之前缺失此分支，工具间隙 phase 停留在上一个工具名上。
+          handlers?.onProgress?.({ phase: "thinking" });
+          break;
+        }
         case "assistant/message": {
           const joined = (event.data?.message?.content ?? [])
             .filter((block: any) => block.type === "text")
