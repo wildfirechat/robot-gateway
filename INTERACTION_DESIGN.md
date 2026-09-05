@@ -479,5 +479,184 @@ inbound 消息 → 先拦截通知类型（105 AddGroupMember / 108 DismissGroup
 
 ---
 
-**文档版本**：1.5（决策 12-17：模型运行时目录 / /sandbox 会话级切换 / 斜杠命令优先 / PC 端 DSH 会话 UI / 项目根目录+目录浏览+缺失目录创建确认 / 会话策略与群名联动）
-**状态**：待客户端 SDK / im-server 评审
+## 9. 协议通用化 v2：Agent Interaction Protocol（不限于 DSH）
+
+> 本章把 200-209 号段与 scope=31 通道从"DSH 专属方言"升级为**通用 Agent 交互协议**：
+> 任何接入野火 IM 的 Agent（DSH / openclaw / botfather / 自研 …）都能复用同一套
+> 卡片、状态、面板与遥控通道。**DSH 降级为第一个 provider**。
+>
+> 兼容原则：**全部走 `ver` 字段的加法演进，旧卡片/旧客户端/历史消息永远可读**；
+> 载荷只增字段、不改既有字段语义；新客户端对 v1 与 v2 双分支渲染。
+>
+> 形态假设（默认，见待定问题 T2）：**单会话单 agent**——一个会话同时只有一个
+> provider 在写状态/发卡。多 agent 并存的合并语义另议（§9.8）。
+
+### 9.1 Agent 身份信封（所有通道共用）
+
+```ts
+interface AgentRef {
+  provider: "dsh" | "openclaw" | /* 开放枚举 */ ;
+  agentId: string;      // provider 内唯一
+  label?: string;       // 展示名（默认 provider 名）
+  model?: string;       // 当前模型（可选，展示用）
+}
+```
+
+- **消息卡（200/202/206/208）**、**scope=31 type 1/2/3/4** 的 payload 顶层统一加 `agent?: AgentRef`
+- **缺省（无 `agent` 字段）= 会话默认 agent**：老客户端、v1 载荷行为完全不变
+- 类型常量语义改名（`DSH_Question` → 通用 `Agent_Question`），**线上只认数字 200**；
+  `DSH_*` 保留为 `provider="dsh"` 的方言别名，SDK/代码命名迁移不做硬性要求（见 §9.7）
+- **IM 层的 agent 标识 = 机器人用户 uid**（不区分 provider/agentId）：scope=31 的
+  **写入 key 由 im-server 按请求身份追加机器人 uid**，详见 §9.2——机器人 API 本身不变
+
+### 9.2 scope=31 槽位扩展（已按 key 级分区实现）
+
+**key 格式（服务端已改，无兼容期）**：`${convType}-${convLine}-${convTarget}_${type}_${机器人uid}`
+——每次写入由 im-server 依据请求机器人身份拼出完整 key，**多机器人各占一条 entry，
+天然按 key 分区、无读改写冲突**（取代早期 payload `byAgent` 合并设想）。
+
+| type | 语义（v2，通用） | 键 |
+|------|-----------------|----|
+| 1 | 运行状态：`RuntimeState` 字段已中立（state/phase/model/cwd/error…） | `..._1_<机器人uid>` |
+| 2 | 计量：usage/turn/context/speed… | `..._2_<机器人uid>` |
+| 3 | 面板数据（schema 化见下） | `..._3_<机器人uid>` |
+| **4（新增）** | **agents 在场列表**：`{ agents: [{ ...AgentRef, robotUid, statusText?, lastActiveTs }] }` —— 会话内有哪些机器人 agent；**客户端据此把消息发送者 uid ↔ 状态 entry 后缀对应起来**（多机器人会话的唯一权威来源） | `..._4`（会话级，无 uid 后缀，由第一个在场 agent 维护） |
+| 5-9 | 预留 | - |
+
+- 客户端**不预知机器人 uid**：读取统一为「前缀 + 槽位」扫描 scope=31 设置表
+  （`getUserSettings(31)` + `startsWith(\`<convType>-<line>-<target>_<type>_\`)`，后缀通配）——
+  vue `dshState.js` / hm `dshState.ets` 已实现；单机器人会话命中唯一 entry
+- 多机器人同会话：多条 entry 并存；**展示归属按消息 sender uid 匹配 entry 后缀**，
+  无目录时取首个匹配（type=4 落地后改权威对应）
+- 面板数据 schema：`{ sections: [{ title, items: [{ label, value, valueType? }] }] }`（渲染无关）
+
+### 9.3 206 → AgentGoal（ver:2，目标卡通用化）
+
+```json
+{
+  "ver": 2, "gid": "<flow-id>",
+  "agent": { "provider": "dsh", "agentId": "…", "label": "DSH" },
+  "title": "把聊天界面升级为 Agent 终端",      // 目标标题（原 objective）
+  "state": "active" | "paused" | "blocked" | "complete" | "cancelled",
+  "stage": "计划审批中",                       // 当前阶段自由文本
+  "progress": 35,                             // 0-100（可选）
+  "milestones": [ { "label": "协议定稿", "done": true },
+                  { "label": "插件实现", "done": false } ],
+  "updatedAt": 1787470162762
+}
+```
+
+- **DSH → 通用映射**：`objective→title`；`phase→state`（同名字段，语义一致）；
+  `roundsStarted` 不再暴露——映射为 `stage:"round N"` 或折叠进 milestones（由插件映射层翻译，
+  客户端永远不需要知道"round"）
+- **v1 兼容**：客户端 `ver` 缺失时按 v1 渲染（objective/phase/roundsStarted）
+- `cancelled` 为 v2 新增终态（DSH goal 无取消态，其它 agent 可用）
+
+### 9.4 207 → AgentCommand（遥控通道通用化）
+
+- 载荷加 `agent?` 路由（缺省 = 会话默认 agent）
+- **op 分两层**：
+  - **公共集**（任何 agent 必须支持）：`query`（读状态/面板）、`set`（改参数）、
+    `interrupt`（打断当前回合，新增）、`ping`（探活）
+  - **专有集**：`cmd` 文本透传，由 provider 的适配器解析——`/model`、`/effort`、`/cwd`、
+    `/sandbox`、`/plan`、`/compact`、`/reset` 是 **DSH 的词表**，客户端永不解析、不渲染（透明消息不变）
+- 回执语义不变：`query`/`set` 结果写 type=3（sections schema）+ type=1 `lastChange`；
+  `interrupt` 应答走普通消息或 type=1 状态
+- 客户端无需改动（207 对客户端本就透明），只补公共 op 的幂等/超时约定文档
+
+### 9.5 208 → AgentTask（ver:2，任务列表通用化）
+
+```json
+{
+  "ver": 2, "flowId": "<run-instance>", "updatedAt": 1787470162762,
+  "agent": { "provider": "dsh", "agentId": "…" },
+  "tasks": [{
+    "id": "t-1", "label": "编写协议文档",
+    "kind": "subagent" | "job" | "step" | "tool" | "phase" | "…",  // 开放字符串
+    "status": "running" | "done" | "failed" | "cancelled" | "waiting",
+    "detail": "当前说明", "reason": "失败原因",
+    "progress": 60, "updatedAt": 1787470162762
+  }]
+}
+```
+
+- **status 收敛为通用五态**；兼容别名（仅展示层）：v1 `completed`→done、`killed`→cancelled
+- **kind 从协议概念降为开放字符串**：`subagent`/`job` 只是 DSH 的具体取值；客户端按
+  未知 kind 通用渲染（图标 map + `⚪` 兜底，现状已天然兼容）
+- 卡片更新方式不变：同 `flowId` 的消息由插件 `updateMessage` 原地更新
+
+### 9.6 客户端渲染规范 v2
+
+- **ver 探测**：`content.ver === 2` 走新字段，否则 v1 分支；两类都渲染，不做迁移刷新
+- **206**：展示 title + stage/progress 进度条 + milestones 勾选；无 milestones 时仅 title/stage
+- **208**：图标分类仅用于配色（agent/tool/subagent/job 已知色 + 默认灰），**渲染不依赖 kind 语义**
+- **多 agent 展示**：收到 type=4 且 `agents.length > 1` 时，卡与状态条前缀 agent label；
+  单 agent（缺省）时与现状完全一致，不加前缀
+
+### 9.7 落地清单（实现顺序）
+
+| 层 | 文件（代表） | 改动 |
+|----|-------------|------|
+| 协议定义 | `dsh-plugin.js/src/protocol.ts` | AgentRef/ver2 类型；AgentGoal/AgentTask v2 载荷；type=4 载荷 |
+| 映射层 | `interactive.ts`/`agent.ts`/`inbound.ts`/`index.ts` | goal/subagent/job 事件 → v2 载荷翻译；type=3 sections schema；type=4 写入；op=interrupt |
+| vue-pc-chat | `Dsh{Goal,TaskProgress,Question,Approval}ContentView.vue`、`dshState.js`、`DshAgentPanel.vue` | ver 双分支；status 别名；type=4/多 agent 前缀 |
+| hm-chat | `custom_message/Dsh*.ets`、`dshState.ets` | 同上（ArkTS） |
+| ios-chat | 待切 dsh 分支后 | 按同一协议实现，无需再设计 |
+
+> 命名迁移（可选、不阻塞）：`DSH_QUESTION`→`AGENT_QUESTION` 等常量改名仅影响可读性，
+> 建议随 provider 化一起做，避免未来第三份代码再复制 DSH 命名。
+
+### 9.8 决策记录与待定
+
+**新增已定决策（接 §7）：**
+
+| # | 决策 |
+|---|------|
+| 19 | 200-209 段 + scope=31 = **通用 Agent 交互协议**；`AgentRef` 信封入所有载荷；DSH 为第一个 provider |
+| 20 | scope=31 新增 **type=4 agents 在场列表**；type 1/2/3 键名与读取路径不变，载荷加 `agent` |
+| 21 | 206/208 升级 **ver:2** 通用载荷（AgentGoal/AgentTask），DSH 事件经映射层翻译；v1 永久兼容 |
+| 22 | 207 op 拆**公共集（query/set/interrupt/ping）**与 **provider 专有 cmd 词表** |
+
+**新增待定问题（接 §7 待定）：**
+
+- T2：**多 agent 同会话**——已按 **key 级分区**实现（机器人 uid 进 key，见 §9.2）：
+  单会话多机器人各自写独立 entry、客户端前缀扫描。剩余歧义仅在**展示归属**
+  （多 entry 时哪个对应哪个机器人）——由 type=4 agents 目录 + 消息 sender uid 对应解决，
+  单机器人会话无歧义，不影响当前形态
+- T3：会话身份抽象——`sessionId: wildfire-<hash>` 与群 `extra {"dsh":true}` 标记是 DSH 味，
+  多 provider 接入时是否需要 provider 前缀的会话 key 与"agent 在场"激活语义（写 type=4 的时机/写者）
+- T4：`ver` 兼容测试矩阵——老客户端收到 v2 卡、新客户端收到 v1 卡、历史消息重渲染，三态回归用例
+
+### 9.9 实现状态（v2.2，五端通用 agent 化落地完成）
+
+**已完成（协议层通用化，与 DSH 解耦）：**
+
+| 层 | 内容 | 验证 |
+|----|------|------|
+| 插件 `protocol.ts` | 规范常量 **`AGENT_TYPE`**（200-209）+ `AgentRef` + 通用载荷类型（`AgentQuestion/Answer/Approval/Goal/Task/Command*`）；`ver:2` 的 goal/task 通用字段（title/state/stage/updatedAt/flowId 等）；`DSH_TYPE` 仅保留为兼容别名 | tsc ✓ |
+| 插件发射点 | `sendGoal` 归一化（objective/phase/roundsStarted → title/state/stage + v1 兼容字段）；任务卡发 `ver:2` + flowId | tsc ✓ |
+| vue-pc-chat | `MessageContentType.AGENT_*` 常量、`Agent*MessageContent` 类（真改名，0 残留） | node --check ✓ |
+| hm-chat client | `MESSAGE_CONTENT_TYPE_AGENT_*`、`Agent*MessageContent/Data/Item` 类 | hvigor ✓ |
+| hm-chat uikit | 卡片视图 struct → `Agent*ContentView`（文件名保留 Dsh*） | hvigor ✓ |
+| android-chat | `ContentType_Agent_*` 常量、`Agent*MessageContent` 类（7 文件 git mv）、goal ver2（displayTitle/displayPhase/阶段行）、徽标 DSH→AI | `:client+:uikit` javac ✓ |
+| ios-chat | `WFCCAgent*MessageContent`、`WFCUAgent*`（State/Cell/VC）符号改名（文件与 pbxproj 未动）、goal ver2（title/stage fallback）、徽标 DSH→AI | WFChatClient+WFChatUIKit 模拟器 BUILD ✓ |
+| flutter-chat | `MESSAGE_CONTENT_TYPE_AGENT_*`、`Agent*MessageContent/CellBuilder/Panel/State` 改名、goal ver2（含 cancelled 灰态）、plugin key → `agent_settings` | imclient+chat analyze 0 errors（与基线一致）✓ |
+
+**状态通道（scope=31）**：key v2（`..._<type>_<机器人uid>`）五端读取全部改为「前缀扫描」——
+vue/hm（settings 全量取 + startsWith）、android（`ChatManager.getUserSettings(31)`）、
+ios（`getUserSettings:scope` 本地库全量）、flutter（`Imclient.getUserSettings(31)`）；
+事件驱动刷新不变、无轮询；插件写入零改动（服务端按请求身份补 uid）。
+
+**goal 卡（206）**：五端均已容忍 ver:2（title/state/stage/updatedAt，stage 展示），v1 载荷渲染逐字节不变。
+
+**遗留（有意保留，不影响协议）**：
+- flutter-chat 流式消息**尚无 Markdown 渲染**（仅 linkify）——功能缺口，非本轮范围，建议后续按
+  flutter_markdown 或富文本组件补齐（参考其它端表格/列表效果）
+- 各端文件路径/资源名/视图持有者（`dsh*.ets/.js/.dart/.java/.m`、`Dsh*MessageContentViewHolder`、
+  `WFCUDsh*.{h,m}` 文件名、`{"dsh":true}` 群标记、`WFCUDsh*Notification` 字符串）保留为
+  内部命名——如需彻底去 DSH 可后续做纯文件级重命名（无协议影响）
+
+---
+
+**文档版本**：2.2（§9.9 五端实现状态：AGENT_* 与 scope31 key v2 已落地 插件/vue/hm/android/ios/flutter；flutter markdown 缺口与文件级命名列为遗留）
+**状态**：插件与五端客户端已实现；待各端回归验证（goal/task v2 渲染、多机器人 entry、问答/审批链路）

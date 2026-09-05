@@ -1,8 +1,8 @@
 /**
  * DSH group registry — the ONLY source of truth for "this group is a DSH
- * workspace" (see INTERACTION_DESIGN.md §4.1.2: the group `extra` marker can
- * be tampered with by any member in the Wildfire IM permission model, so
- * admission must come from a plugin-owned persisted registry).
+ * workspace". Admission must come from this plugin-owned persisted registry:
+ * group `extra` is writable by any member in the Wildfire IM permission model
+ * (and is no longer written by this plugin), so it can never serve as identity.
  *
  * Persisted file: ~/.dsh/wildfire-groups.json
  */
@@ -55,7 +55,7 @@ export class DshGroupRegistry {
     }
   }
 
-  /** Whether this group is a DSH workspace (registry hit — extra marker alone is NOT trusted). */
+  /** Whether this group is a DSH workspace (registry hit). */
   isDshGroup(groupId: string): boolean {
     return this.groups.has(groupId);
   }

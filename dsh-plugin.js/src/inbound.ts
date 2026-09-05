@@ -8,6 +8,8 @@
 
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, realpath, stat, rm } from "node:fs/promises";
 import {
   TextMessageContent,
@@ -44,16 +46,80 @@ import {
   type PreparedMedia,
 } from "./media.js";
 import {
-  DSH_TYPE,
+  AGENT_TYPE,
   parseContent,
-  type DSHAnswerPayload,
-  type DSHApprovalResultPayload,
-  type DSHCommandPayload,
+  type AgentAnswerPayload,
+  type AgentApprovalResultPayload,
+  type AgentCommandPayload,
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
 
 const pathJoin = path.join;
+
+// ===== 会话处理模式（interrupt=后到打断先到 / queue=原串行排队），按会话 key 持久化 =====
+type ConvMode = "interrupt" | "queue";
+const convModesFile = (): string => pathJoin(homedir(), ".dsh", "wildfire-convmodes.json");
+let convModes: Map<string, ConvMode> | null = null;
+
+function loadConvModes(): Map<string, ConvMode> {
+  if (convModes) return convModes;
+  convModes = new Map();
+  try {
+    const raw = readFileSync(convModesFile(), "utf8");
+    const parsed = JSON.parse(raw);
+    const modes = parsed?.modes;
+    if (modes && typeof modes === "object") {
+      for (const [k, v] of Object.entries(modes)) {
+        if (v === "interrupt" || v === "queue") convModes.set(k, v as ConvMode);
+      }
+    }
+  } catch {
+    // 首次运行/文件损坏：保持默认 interrupt
+  }
+  return convModes;
+}
+
+function persistConvModes(): void {
+  try {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of convModes ?? new Map()) obj[k] = v;
+    const file = convModesFile();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ modes: obj }, null, 2), "utf8");
+  } catch {
+    // 持久化失败不阻塞运行
+  }
+}
+
+/** 当前会话处理模式，未设置默认 interrupt。 */
+function getConvMode(key: string): ConvMode {
+  return loadConvModes().get(key) ?? "interrupt";
+}
+
+function setConvMode(key: string, mode: ConvMode): void {
+  loadConvModes().set(key, mode);
+  persistConvModes();
+}
+
+// ===== 多机器人命令寻址：/cmd [robotId|别名]，仅被指向的机器人执行 =====
+const ROBOT_TOKEN_RE = /^robot[-_]?[a-z0-9]+$/i;
+
+/** 形如 robot_xxx / robot1 / robot-2 的 token，视为“机器人 id”。 */
+function isRobotTokenLike(token: string): boolean {
+  return ROBOT_TOKEN_RE.test(token);
+}
+
+/** token 是否指向本机器人（robotId 全名、去 robot_ 前缀、或 config.robotAliases）。 */
+function robotTokenMatches(token: string, config: any): boolean {
+  const t = (token || "").trim().toLowerCase();
+  const rid = String(config?.robotId || "").toLowerCase();
+  if (!rid) return false;
+  const aliases: string[] = Array.isArray(config?.robotAliases)
+    ? config.robotAliases.map((a: unknown) => String(a).toLowerCase())
+    : [];
+  return t === rid || t === rid.replace(/^robot[-_]?/, "") || aliases.includes(t);
+}
 // Per-session serialization: only one agent turn per IM conversation at a time.
 const sessionQueues = new Map<string, Promise<void>>();
 
@@ -219,7 +285,7 @@ export async function handleIncomingMessage(
   }
 
   // DSH workspace groups: only groups in the plugin registry are processed.
-  // (The group extra marker alone is NOT trusted — see registry.ts.)
+  // （群 extra 不再写任何 dsh 标记，也从不作为依据——注册表是唯一生效依据。）
   // 门槛放在 DSH_* 结构化消息与线路归一化【之前】：非 DSH 群的任何消息
   // （含 207 DSH_Command、/stop、/help、wrong-line 提醒）一律忽略——
   // 否则 207 面板指令可绕过注册表门槛（任意群的群主即可借面板执行
@@ -242,7 +308,12 @@ export async function handleIncomingMessage(
     } else {
       await maybeNotifyOrphanGroup(api, sender, conv, config);
     }
-    return;
+    // 机器人 owner 在“未注册群”中执行 /bind-workspace：放行到下方命令处理，注册当前群。
+    // （普通群/非 owner 仍保持静默忽略）
+    if (!(isRobotOwner(String(sender), api) && /^\/bind(?:-workspace)?(?:\s|$)/.test((text ?? "").trim()))) {
+      return;
+    }
+    api.logger?.info?.(`[wildfire] owner bind-workspace allowed in unregistered group: group=${conv.target}`);
   }
 
   // ========== 会话分流（按 line 判定） ==========
@@ -300,27 +371,32 @@ export async function handleIncomingMessage(
   // Structured DSH replies (201 DSH_Answer / 203 DSH_ApprovalResult).
   if (isDshType) {
     const isAdmin = api.access?.canRunCommand?.(String(sender)) ?? false;
-    if (payloadType === DSH_TYPE.ANSWER) {
-      const answer = parseContent<DSHAnswerPayload>(payload);
+    if (payloadType === AGENT_TYPE.ANSWER) {
+      const answer = parseContent<AgentAnswerPayload>(payload);
       if (answer && api.interactions?.handleAnswer(key, answer, String(sender), isAdmin)) {
         api.logger?.info?.(`[wildfire] DSH_Answer consumed: key=${key}`);
         return;
       }
-    } else if (payloadType === DSH_TYPE.APPROVAL_RESULT) {
-      const result = parseContent<DSHApprovalResultPayload>(payload);
+    } else if (payloadType === AGENT_TYPE.APPROVAL_RESULT) {
+      const result = parseContent<AgentApprovalResultPayload>(payload);
       if (result && api.interactions?.handleApprovalResult(key, result, String(sender), isAdmin)) {
         api.logger?.info?.(`[wildfire] DSH_ApprovalResult consumed: key=${key}`);
         return;
       }
-    } else if (payloadType === DSH_TYPE.COMMAND) {
+    } else if (payloadType === AGENT_TYPE.COMMAND) {
       // 207 DSH_Command：AI 面板静默指令（透明消息，不显示）。query=组合查询
       // 写 type=3；set=更新（执行命令，变更写 type=1 lastChange + 刷新 type=3）。
       // [诊断] error 级日志：GUI-less profile 隐藏 debug，用 error 确认 payload 是否完整到达
       api.logger?.error?.(
         `[wildfire] DSH_Command received: content=${String(payload?.content).slice(0, 200)}, searchable=${String(payload?.searchableContent).slice(0, 80)}`
       );
-      const command = parseContent<DSHCommandPayload>(payload);
+      const command = parseContent<AgentCommandPayload>(payload);
       if (command) {
+        if (command.robotId && String(command.robotId) !== String(config.robotId)) {
+          // 面板指令指向其它机器人：本实例忽略
+          api.logger?.info?.(`[wildfire] DSH_Command addressed to another robot (${command.robotId}), ignored`);
+          return;
+        }
         await handleDshCommand(api, key, command, String(sender), conv);
         return;
       }
@@ -335,14 +411,20 @@ export async function handleIncomingMessage(
   // a pending card's custom answer (a `/` prefix is a command, not natural
   // language) and skip the group trigger policy below (which would silently
   // drop e.g. `/cwd /path` — no @mention, no question mark, no keyword).
-  const trimmed = text.trim();
+  let trimmed = text.trim();
   const isSlashCommand = trimmed.startsWith("/");
 
   // `/stop` must interrupt a running turn, so it cannot wait behind the
   // per-conversation queue (the running turn holds the slot) nor be consumed
   // as a pending card's text answer. Any admitted session member may stop.
   if (/^\/stop\b/.test(trimmed)) {
-    await handleStopCommand(api, key, sender, conv);
+    const stopTarget = trimmed.slice(5).trim().split(/\s+/, 1)[0] || "";
+    if (stopTarget && isRobotTokenLike(stopTarget) && !robotTokenMatches(stopTarget, config)) {
+      // 该 /stop 指向其它机器人（如 /stop robot1）——本实例忽略
+      api.logger?.info?.(`[wildfire] /stop addressed to another robot (${stopTarget}), ignored`);
+    } else {
+      await handleStopCommand(api, key, sender, conv);
+    }
     return;
   }
 
@@ -353,6 +435,16 @@ export async function handleIncomingMessage(
   if (!isSlashCommand && api.interactions?.handleTextReply(key, text, String(sender), api.access?.canRunCommand?.(String(sender)))) {
     api.logger?.info?.(`[wildfire] message consumed as interaction reply: key=${key}`);
     return;
+  }
+
+  // 后到打断先到（仅 interrupt 模式；queue 模式保持原串行排队）：
+  // 若本会话正在执行上一轮（正常对话消息），立即取消它——被取消回合走
+  // “取消收尾”(type 20 收起气泡)，新消息随后立即开始新一轮。
+  // 仅用于群聊中的正常对话消息；管理命令与 /stop 不打断（各自有处理）。
+  if (getConvMode(key) === "interrupt" && isGroup && !isSlashCommand && shouldRespondToGroupMessage(text, data, config)) {
+    if (interruptRunningTurn(api, key)) {
+      api.logger?.info?.(`[wildfire] new message interrupts running turn: key=${key}`);
+    }
   }
 
   // Serialize per conversation: agent turns AND management commands share the
@@ -375,7 +467,7 @@ export async function handleIncomingMessage(
 
   // Management commands: `/cwd` works in private and group chat; the rest are
   // private-chat only. All are admin-gated when admins are configured.
-  const cmdMatch = trimmed.match(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
+  const cmdMatch = trimmed.match(/^\/(bind(?:-workspace)?|cwd|ls|model|effort|mode|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
   // try/finally：sendDirectReply 在客户端断开时抛异常，必须保证 release()
@@ -394,6 +486,33 @@ export async function handleIncomingMessage(
   if (cmdMatch) {
     try {
       const cmd = cmdMatch[1];
+      // 多机器人寻址：命令可携带目标机器人（/stop robot1 / robot_xxx）。
+      // 首参是机器人 token 时：指向本机 → 剥离后继续；指向其它机器人 → 忽略。
+      {
+        const restAfterCmd = trimmed.slice(cmdMatch[0].length).trim();
+        const firstTok = restAfterCmd.split(/\s+/, 1)[0] || "";
+        if (firstTok && isRobotTokenLike(firstTok)) {
+          if (!robotTokenMatches(firstTok, config)) {
+            api.logger?.info?.(`[wildfire] /${cmd} addressed to another robot (${firstTok}), ignored`);
+            return;
+          }
+          trimmed = trimmed.replace(new RegExp(`^\/${cmd}\s+${firstTok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\b`), `/${cmd}`);
+        }
+      }
+      // /bind-workspace：仅群内、仅机器人 owner 可执行——把当前群注册为 DSH 工作区群
+      // （非 owner 直接忽略；owner 的命令只由“自己的机器人”处理）。
+      if (cmd === "bind" || cmd === "bind-workspace") {
+        if (!isRobotOwner(String(sender), api)) {
+          api.logger?.info?.(`[wildfire] /${cmd} ignored: sender=${String(sender)} is not robot owner (owner=${api.robotOwner})`);
+          return;
+        }
+        if (!isGroup) {
+          await sendDirectReply(sender, conv, "/bind-workspace 仅支持在群内执行", api);
+          return;
+        }
+        await handleBindWorkspaceCommand(api, trimmed.replace(/^\/bind(?:-workspace)?\s*/, "").trim(), String(sender), conv);
+        return;
+      }
       // Per-command feature gate: /cwd and /ls need the workspace feature,
       // /model and /effort need the model feature; /reset needs either;
       // allowlist and workspace-lifecycle commands are always available (access-gated).
@@ -501,6 +620,21 @@ export async function handleIncomingMessage(
         await sendDirectReply(sender, conv, "无权限执行管理命令（请联系管理员）", api);
         return;
       }
+      if (cmd === "mode") {
+        const modeArg = trimmed.replace(/^\/mode(?:\s|$)/, "").trim().toLowerCase();
+        if (modeArg === "interrupt" || modeArg === "queue") {
+          setConvMode(key, modeArg);
+          await sendDirectReply(
+            sender,
+            conv,
+            modeArg === "interrupt" ? "会话处理模式 → 打断（后到打断先到，已写盘）" : "会话处理模式 → 排队（串行等待，已写盘）",
+            api
+          );
+        } else {
+          await sendDirectReply(sender, conv, `当前模式: ${getConvMode(key)}。用法: /mode interrupt（打断）| /mode queue（排队）`, api);
+        }
+        return;
+      }
       await handleCommand(api, key, cmd, trimmed, sender, conv, isGroup);
       return;
     } finally {
@@ -573,7 +707,9 @@ export async function handleIncomingMessage(
 
     const stream = new ThrottledStream(
       async (fullText: string) => {
-        if (fullText.includes("NO_REPLY")) return;
+        // 只有整段文本就是“NO_REPLY”（精确匹配）才视为停止信号；
+        // 正文里恰好提到 NO_REPLY 词不允许被误判成不回复。
+        if (fullText.trim().toUpperCase() === "NO_REPLY") return;
         await sendStreamingReply(sender, conv, fullText, streamId, "generating", logger);
       },
       streaming.throttleMs
@@ -643,10 +779,15 @@ export async function handleIncomingMessage(
     const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0);
     // NO_REPLY：模型决定不回复（流式 generating 推送已被 NO_REPLY 抑制，
     // 终态必须同样不显示正文——用取消消息（type 20）收起占位气泡）。
-    const noReply = !noOutput && finalText.includes("NO_REPLY");
+    // 精确匹配才算 NO_REPLY（大小写不敏感、允许首尾空白）：
+    // 避免模型回复正文中恰好包含 "NO_REPLY" 字样被误判成“不回复”而整条取消。
+    const noReply = !noOutput && finalText.trim().toUpperCase() === "NO_REPLY";
+    // 回合被取消（/stop 或上游中断）：即使取消前已流出部分文本，也不作为“完成”提交，
+    // 一律发送取消消息(type 20)收起占位气泡。
+    const cancelled = String(outcome?.reason ?? "").toLowerCase() === "cancelled";
     api.interactions?.pushStatus(key, {
       state: "done",
-      reason: noOutput || noReply ? "cancelled" : "completed",
+      reason: noOutput || noReply || cancelled ? "cancelled" : "completed",
     });
     // 统计独立于状态推送：即使无文本产出/出错也推当轮统计（有值才推）
     api.interactions?.pushMetrics(key, {
@@ -658,7 +799,8 @@ export async function handleIncomingMessage(
     // keeps showing the typing state forever. 有媒体产出但无正文 → completed 兜底
     // 占位；完全无产出（无文本且无媒体）或 NO_REPLY → 发送"生成取消"(type 20)，
     // 客户端显示取消态，不再把 "(no response)" 当作正常完成消息发出。
-    if (noReply) {
+    if (cancelled || noReply) {
+      // 不需要回复（回合被取消 / NO_REPLY）：发送取消消息 type 20，客户端删除生成中/已生成气泡
       await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
     } else if (finalText.trim()) {
       await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
@@ -1458,6 +1600,84 @@ async function handleAllowCommand(
 }
 
 /**
+ * 打断当前会话正在执行的回合（后到消息优先）。
+ * 取消会使正在 dispatch 的回合以 reason=cancelled 收尾 → 插件发送 type 20 收起气泡。
+ * 返回是否确实取消了运行中的回合。
+ */
+function interruptRunningTurn(api: any, key: string): boolean {
+  try {
+    const agents = api.ctx?.get?.("agents");
+    const sessionId = api.wildfireAgents?.peekSessionId?.(key);
+    const agent = agents?.get?.(sessionId);
+    if (!agent || agent.status !== "running") return false;
+    agent.cancel({ kind: "supersede" });
+    return true;
+  } catch (err: any) {
+    api.logger?.warn?.(`[wildfire] interrupt running turn failed: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/** 机器人 owner 判定：owner 的命令只由“自己的机器人”的 agent 执行。 */
+function isRobotOwner(senderId: string, api: any): boolean {
+  const owner = api?.robotOwner;
+  return !!owner && String(senderId) === String(owner);
+}
+
+/**
+ * `/bind-workspace [auto|<路径>]` — 群内命令（仅机器人 owner）：
+ * 把当前群注册为本机器人的 DSH 工作区群并绑定工作区目录。
+ * 与 /create 不同：群已存在（通常是 owner 把机器人拉进来的群），不新建群。
+ */
+async function handleBindWorkspaceCommand(
+  api: any,
+  arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const client = getClient();
+  if (!client) {
+    await sendTip(sender, conv, "机器人未连接", api);
+    return;
+  }
+  const config: WildfireConfig = api.config;
+  const groupId = String(conv.target);
+
+  // 1. 解析工作区目录：显式路径（root/allowedRoots 内）或自动分配
+  let dir: string | null = null;
+  let dirLabel = "自动分配";
+  if (arg && arg !== "auto") {
+    const canon = await api.workspace.validateUserPath(arg);
+    if (!canon) {
+      await sendTip(sender, conv, "无效目录，或不在允许的工作目录范围内", api);
+      return;
+    }
+    dir = canon;
+    dirLabel = "显式路径";
+  }
+  if (!dir) {
+    const wsId = sessionIdForConversation(`wildfire:group:${groupId}`, 0).slice("wildfire-".length);
+    const root = api.workspace.root();
+    dir = pathJoin(root, wsId);
+    dirLabel = "自动分配";
+  }
+  await api.workspace.resolve(`wildfire:group:${groupId}`, sessionIdForConversation(`wildfire:group:${groupId}`, 0));
+
+  // 2. 注册为本机器人的 DSH 工作区群（认可群；注册表是唯一生效依据）。
+  //    不再向群 extra 写任何 dsh 标记：群 extra 可被任意成员篡改且无消费方，
+  //    准入/身份一律以插件本地持久化注册表（~/.dsh/wildfire-groups.json）为准。
+  api.registry?.register(groupId, String(sender), dir);
+
+  api.logger?.info?.(`[wildfire] /bind-workspace done: group=${groupId}, owner=${sender}, dir=${dir} (${dirLabel})`);
+  await sendTip(
+    sender,
+    conv,
+    `✅ 已把当前群绑定为本机器人工作区群：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）\n\n本群消息现在会由机器人处理。`,
+    api
+  );
+}
+
+/**
  * `/create [工作区]` — create a DSH workspace group via the robot
  * (single-chat control panel, admin-gated). Workspace selection (4.1.3):
  *   /create            → catalog list if configured, else auto
@@ -1516,13 +1736,13 @@ async function handleCreateGroupCommand(
   }
 
   // 2. create the group (owner is the robot; members = creator + robot)
+  //    不再写群 extra dsh 标记（可被任意成员篡改、无消费方；DSH 群身份以本地注册表为准）。
   const groupName = arg && !Number.isNaN(Number(arg)) && catalog[Number(arg) - 1]
     ? `DSH-${catalog[Number(arg) - 1].label ?? catalog[Number(arg) - 1].id}`
     : `DSH-工作区`;
   const groupInfo = {
     name: groupName,
     portrait: "",
-    extra: JSON.stringify({ dsh: true }),
     // 仅成员邀请（Wildfire JoinType: 0=开放, 1=验证, 2=仅成员邀请）——INTERACTION_DESIGN §4.1.1
     join_type: 2,
   };
@@ -1746,7 +1966,7 @@ async function handleGoalCommand(
 async function handleDshCommand(
   api: any,
   key: string,
-  command: DSHCommandPayload,
+  command: AgentCommandPayload,
   sender: string,
   conv: { type: number; target: string; line: number }
 ): Promise<void> {
@@ -1763,7 +1983,7 @@ async function handleDshCommand(
 
   if (command.op === "set") {
     const cmdText = (command.cmd ?? "").trim();
-    const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|destroy(?:-group)?)\b/);
+    const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|mode|destroy(?:-group)?)\b/);
     if (!m) {
       api.logger?.warn?.(`[wildfire] DSH_Command set: unsupported cmd=${cmdText}`);
       return;
@@ -1772,12 +1992,35 @@ async function handleDshCommand(
     if (!(await authorizePanelCmd(api, cmd, sender, conv, isGroup))) {
       api.interactions?.pushStatus(key, { error: `无权限执行 /${cmd}` });
       api.logger?.warn?.(`[wildfire] DSH_Command set denied: cmd=/${cmd}, sender=${sender}, key=${key}`);
+      // 明确提示（可见消息）：该机器人的面板设置仅 owner 可修改
+      try {
+        await sendTip(
+          sender,
+          conv,
+          `⚠️ 无法修改：该机器人的 AI 面板设置仅其 owner 可操作（/${cmd} 未执行）。请用该机器人的 owner 账号修改。`,
+          api
+        );
+      } catch (err: any) {
+        api.logger?.warn?.(`[wildfire] DSH_Command deny tip failed: ${err?.message ?? err}`);
+      }
       return;
     }
     // 销毁当前群：解散群组 + 销毁会话 + 删工作区目录 + 清注册（面板确认后执行）
     if (cmd === "destroy" || cmd === "destroy-group") {
       api.logger?.warn?.(`[wildfire] DSH_Command set: DESTROY group=${conv.target}, by=${sender}`);
       await handleDestroyGroupCommand(api, String(conv.target), sender, conv);
+      return;
+    }
+    // 会话模式（interrupt/queue）：面板也可切换，改后以 lastChange 提示（状态栏可见）
+    if (cmd === "mode") {
+      const modeArg = cmdText.replace(/^\/mode\s*/, "").trim().toLowerCase();
+      if (modeArg === "interrupt" || modeArg === "queue") {
+        setConvMode(key, modeArg);
+        api.interactions?.pushStatus(key, { lastChange: `会话模式 → ${modeArg === "interrupt" ? "打断（后到打断先到）" : "排队（串行等待）"}` });
+      } else {
+        api.interactions?.pushStatus(key, { lastChange: `/mode 参数需为 interrupt 或 queue（当前 ${getConvMode(key)}）` });
+      }
+      api.logger?.info?.(`[wildfire] DSH_Command set mode: key=${key}, mode=${modeArg || "(invalid)"}, by=${sender}`);
       return;
     }
     // 确保会话激活：新目录（未建立过会话）时先 getAgent 创建/resume，

@@ -48,6 +48,19 @@ export function apply(ctx: any, config: any): void {
           "路径必须是绝对路径且位于当前工作区内（工作区外的文件会被拒绝，请先复制到工作区）。" +
           "插件会把标记对应的文件作为图片/文件消息发送，并从回复文本中移除标记。",
       });
+      // 不回复约定（方案 B：消息照常进入 agent 上下文，由 agent 决定本条是否回复）：
+      // agent 认为不需要文字回复时，整条只输出 NO_REPLY；插件检测到整段等于
+      // NO_REPLY 会发送取消消息(type 20)，不向用户发送正文。
+      scope.systemPrompt.context({
+        name: "wildfire:no-reply",
+        order: 230,
+        text: () =>
+          "不回复约定：用户消息会被正常处理并计入上下文，但如果你判断本条不需要文字回复" +
+          "（例如用户明确说“别回复/不要回复”，或你只是确认收到而没有要补充的内容），" +
+          "则整条回复只输出一个词 NO_REPLY（不含引号、不附带任何其它文字）。" +
+          "插件检测到整段文本等于 NO_REPLY 时会把生成气泡取消（type 20），不会向用户发送正文。" +
+          "注意：正常回复的正文中不要出现 NO_REPLY 字样（会被误判为不回复）。",
+      });
     });
   } catch {
     // systemPrompt service unavailable — the convention still works if the

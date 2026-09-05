@@ -20,19 +20,20 @@ import type { WildfireConfig } from "./config.js";
 import { getInteractionConfig } from "./config.js";
 import { deepEqual } from "./utils.js";
 import {
-  DSH_TYPE,
+  AGENT_TYPE,
   summarizeApproval,
   summarizeGoal,
   summarizeQuestion,
   summarizeTasks,
-  type DSHTaskItem,
-  type DSHTaskProgressPayload,
-  type DSHAnswerPayload,
-  type DSHApprovalPayload,
-  type DSHApprovalResultPayload,
-  type DSHGoalPayload,
-  type DSHQuestionItem,
-  type DSHQuestionPayload,
+  type AgentTaskItem,
+  type AgentTaskProgressPayload,
+  type AgentAnswerPayload,
+  type AgentApprovalPayload,
+  type AgentApprovalResultPayload,
+  type AgentGoalPayload,
+  type AgentGoalState,
+  type AgentQuestionItem,
+  type AgentQuestionPayload,
 } from "./protocol.js";
 
 /** 目标工具状态（goal tool，随 DSH_Goal 卡片推送）。 */
@@ -299,7 +300,7 @@ export class InteractionManager {
    * Handle a structured DSH_Answer (201). Returns true when consumed.
    * Plain text replies are handled by `handleTextReply`.
    */
-  handleAnswer(key: string, payload: DSHAnswerPayload, sender: string, isAdmin = false): boolean {
+  handleAnswer(key: string, payload: AgentAnswerPayload, sender: string, isAdmin = false): boolean {
     const question = this.pendingQuestions.get(key);
     if (!question || question.qid !== payload.qid) return false;
     if (!isAdmin && question.ownerSender && sender && sender !== question.ownerSender) {
@@ -324,7 +325,7 @@ export class InteractionManager {
    */
   handleApprovalResult(
     key: string,
-    payload: DSHApprovalResultPayload,
+    payload: AgentApprovalResultPayload,
     sender: string,
     isAdmin = false
   ): boolean {
@@ -584,12 +585,29 @@ export class InteractionManager {
       );
   }
 
-  /** Send a goal card (DSH_Goal) to a conversation. */
-  sendGoal(key: string, data: DSHGoalPayload): void {
+  /**
+   * Send a goal card (DSH_Goal, ver:2) to a conversation.
+   * 归一化发射：调用方传 v1/DSH 语义字段（objective/phase/roundsStarted）时，
+   * 统一转成通用 v2 载荷（title/state/stage/updatedAt），并保留 v1 字段供旧客户端回退。
+   */
+  sendGoal(key: string, data: AgentGoalPayload): void {
     const target = this.getConversation(key);
     if (!target) return;
+    const payload: AgentGoalPayload = {
+      ver: 2,
+      gid: data.gid,
+      title: data.title ?? data.objective ?? "",
+      state: (data.state ?? data.phase ?? "active") as AgentGoalState,
+      stage: data.stage ?? (data.roundsStarted !== undefined ? `round ${data.roundsStarted}` : undefined),
+      progress: data.progress,
+      updatedAt: Date.now(),
+      // v1 兼容字段（旧客户端回退渲染）
+      objective: data.objective,
+      phase: data.phase,
+      roundsStarted: data.roundsStarted,
+    };
     this.cards
-      .sendCard(target, DSH_TYPE.GOAL, data, summarizeGoal(data), 1)
+      .sendCard(target, AGENT_TYPE.GOAL, payload, summarizeGoal(payload), 1)
       .catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire] goal card send failed: ${String(err)}`)
       );
@@ -604,7 +622,7 @@ export class InteractionManager {
   /** key → 任务卡片发送中（sendCard 未 resolve 前不重复发，避免并发产生多张孤儿卡）。 */
   private taskCardPending = new Set<string>();
   /** key → taskId → 任务项。 */
-  private taskItems = new Map<string, Map<string, DSHTaskItem>>();
+  private taskItems = new Map<string, Map<string, AgentTaskItem>>();
   /** 已绑定 subagent 事件监听的 agent scope（WeakSet：防重复绑定，也防递归死循环）。 */
   private boundTaskScopes = new WeakSet<object>();
   /** key → 任务卡发送中收到的"脏"标记：sendCard 落定后补一次刷新（修并发丢失窗口）。 */
@@ -684,7 +702,7 @@ export class InteractionManager {
         if (!key) return;
         const failed = this.isSubagentFailed(info);
         const killed = this.isSubagentKilled(info);
-        const status: DSHTaskItem["status"] = killed ? "killed" : failed ? "failed" : "done";
+        const status: AgentTaskItem["status"] = killed ? "killed" : failed ? "failed" : "done";
         this.upsertTask(key, this.subagentTaskId(info), {
           kind: "subagent",
           id: String(info?.id ?? ""),
@@ -750,7 +768,7 @@ export class InteractionManager {
       const agent = got?.agent ?? got;
       if (!jobs || !agent) return;
       const list = (await Promise.resolve(jobs.list(agent))) ?? [];
-      const byKey = this.taskItems.get(key) ?? new Map<string, DSHTaskItem>();
+      const byKey = this.taskItems.get(key) ?? new Map<string, AgentTaskItem>();
       for (const [taskId, item] of [...byKey]) {
         if (item.kind === "job") byKey.delete(taskId);
       }
@@ -776,7 +794,7 @@ export class InteractionManager {
   }
 
   /** 后台任务状态 → 卡片状态（客户端仅识别 running/done/failed/completed/killed）。 */
-  private mapJobStatus(status: any): DSHTaskItem["status"] {
+  private mapJobStatus(status: any): AgentTaskItem["status"] {
     switch (String(status ?? "")) {
       case "running":
       case "stopping":
@@ -814,10 +832,10 @@ export class InteractionManager {
   }
 
   /** 记录/更新一个任务项并刷新卡片。 */
-  private upsertTask(key: string, taskId: string, item: DSHTaskItem): void {
+  private upsertTask(key: string, taskId: string, item: AgentTaskItem): void {
     let byKey = this.taskItems.get(key);
     if (!byKey) {
-      byKey = new Map<string, DSHTaskItem>();
+      byKey = new Map<string, AgentTaskItem>();
       this.taskItems.set(key, byKey);
     }
     byKey.set(taskId, item);
@@ -828,12 +846,24 @@ export class InteractionManager {
   private flushTaskCard(key: string): void {
     const target = this.getConversation(key);
     if (!target) return;
-    const items = [...(this.taskItems.get(key) ?? new Map<string, DSHTaskItem>()).values()];
-    const payload: DSHTaskProgressPayload = { tasks: items, updatedAt: Date.now() };
+    const items = [...(this.taskItems.get(key) ?? new Map<string, AgentTaskItem>()).values()];
+    // 没有任务时不发送/不原地清空任务卡（避免"暂无任务"噪音消息）：无任务状态
+    // 由 scope=31 状态通道（会话标题栏 idle/done 等）表达；已有卡保留最后一次有内容展示。
+    if (items.length === 0) {
+      this.taskCardDirty.delete(key);
+      return;
+    }
+    // ver:2 通用任务卡：kind/status 为开放枚举（subagent/job 是 DSH provider 的具体取值）
+    const payload: AgentTaskProgressPayload = {
+      ver: 2,
+      flowId: key,
+      tasks: items,
+      updatedAt: Date.now(),
+    };
     const existingId = this.taskCardIds.get(key);
     if (existingId) {
       this.cards
-        .updateCard(existingId, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload))
+        .updateCard(existingId, AGENT_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload))
         .catch((err: unknown) => {
           // 原地更新失败（如用户删了卡片/卡片不存在）：重置后补发一张新卡
           this.logger?.warn?.(`[wildfire] task card update failed, re-sending: ${String(err)}`);
@@ -850,7 +880,7 @@ export class InteractionManager {
     }
     this.taskCardPending.add(key);
     this.cards
-      .sendCard(target, DSH_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload), 1)
+      .sendCard(target, AGENT_TYPE.TASK_PROGRESS, payload, summarizeTasks(payload), 1)
       .then((messageId) => {
         if (messageId) this.taskCardIds.set(key, messageId);
       })
@@ -907,12 +937,12 @@ export class InteractionManager {
       throw new Error("ask requires at least one question");
     }
     const qid = randomUUID();
-    const data: DSHQuestionPayload = { qid, questions };
+    const data: AgentQuestionPayload = { qid, questions };
     let cardMessageId: string | undefined;
     try {
       cardMessageId = await this.cards.sendCard(
         target,
-        DSH_TYPE.QUESTION,
+        AGENT_TYPE.QUESTION,
         data,
         summarizeQuestion(data),
         1
@@ -944,14 +974,14 @@ export class InteractionManager {
   /**
    * One-off question card outside the agent ask_user flow — used by commands
    * such as `/cwd` create-confirmation. Same DSH_Question card + text-answer
-   * machinery as `ask()`, but resolves with the raw DSHAnswerPayload (or null
+   * machinery as `ask()`, but resolves with the raw AgentAnswerPayload (or null
    * on timeout / when another card is already pending for this conversation).
    */
   async askDirect(
     key: string,
-    questions: DSHQuestionItem[],
+    questions: AgentQuestionItem[],
     opts: { timeoutMs?: number; ownerSender?: string } = {}
-  ): Promise<DSHAnswerPayload | null> {
+  ): Promise<AgentAnswerPayload | null> {
     const target = this.getConversation(key);
     if (!target) return null;
     if (this.pendingQuestions.has(key)) {
@@ -961,12 +991,12 @@ export class InteractionManager {
     if (!Array.isArray(questions) || questions.length === 0) return null;
 
     const qid = randomUUID();
-    const data: DSHQuestionPayload = { qid, questions };
+    const data: AgentQuestionPayload = { qid, questions };
     let cardMessageId: string | undefined;
     try {
       cardMessageId = await this.cards.sendCard(
         target,
-        DSH_TYPE.QUESTION,
+        AGENT_TYPE.QUESTION,
         data,
         summarizeQuestion(data),
         1
@@ -983,7 +1013,7 @@ export class InteractionManager {
     this.pushStatus(key, { state: "waiting_user", interaction: "question" });
     const ownerSender = opts.ownerSender ?? target.sender;
     const timeoutMs = opts.timeoutMs ?? this.config.askUserTimeoutMs;
-    return new Promise<DSHAnswerPayload | null>((resolve) => {
+    return new Promise<AgentAnswerPayload | null>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingQuestions.delete(key);
         this.logger?.warn?.(`[wildfire] askDirect timed out: key=${key}`);
@@ -996,7 +1026,7 @@ export class InteractionManager {
         key,
         qid,
         questions,
-        resolve: (value: any) => resolve(value as DSHAnswerPayload),
+        resolve: (value: any) => resolve(value as AgentAnswerPayload),
         timer,
         ownerSender,
         cardMessageId,
@@ -1011,7 +1041,7 @@ export class InteractionManager {
     if (this.pendingApprovals.has(key)) return "unavailable";
 
     const aid = randomUUID();
-    const data: DSHApprovalPayload = {
+    const data: AgentApprovalPayload = {
       aid,
       toolName: req?.toolName ?? "工具",
       ...(req?.reason ? { reason: req.reason } : {}),
@@ -1020,7 +1050,7 @@ export class InteractionManager {
     try {
       cardMessageId = await this.cards.sendCard(
         target,
-        DSH_TYPE.APPROVAL,
+        AGENT_TYPE.APPROVAL,
         data,
         summarizeApproval(data),
         1
@@ -1068,7 +1098,7 @@ export class InteractionManager {
     this.cards
       .updateCard(
         messageId,
-        kind === "question" ? DSH_TYPE.QUESTION : DSH_TYPE.APPROVAL,
+        kind === "question" ? AGENT_TYPE.QUESTION : AGENT_TYPE.APPROVAL,
         cardStatusPayload(kind, state, extra),
         state
       )
@@ -1083,7 +1113,7 @@ export class InteractionManager {
   }
 
   /** Normalize a structured DSH_Answer against the original questions. */
-  private normalizeAnswers(payload: DSHAnswerPayload, questions: any[]): any {
+  private normalizeAnswers(payload: AgentAnswerPayload, questions: any[]): any {
     const byId = new Map(questions.map((q) => [q.id, q]));
     const answers = (payload.answers ?? []).map((a) => {
       const q = byId.get(a.id);
