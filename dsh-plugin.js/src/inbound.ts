@@ -305,7 +305,20 @@ export async function handleIncomingMessage(
   const quoteDiag = quote
     ? `QUOTE_OK uid=${quote.u ?? ""} from=${quote.i ?? ""} name=${quote.n ?? ""} digest=${safePreview(String(quote.d ?? ""), 200)}`
     : `payload keys=${Object.keys(payload ?? {}).join(",")}; binaryContent=${preview(payload?.binaryContent)}; base64edData=${preview(payload?.base64edData)}; content=${preview(payload?.content)}; extra=${preview(payload?.extra)}`;
-  const line = `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key} ${quoteDiag}\n`;
+  // [诊断] @提及：打印 mentionedType/mentionedTarget 原始值与命中判定，便于核对客户端 @ 是否正确
+  const mentionDiag = (() => {
+    const mt = (payload as any)?.mentionedType;
+    const mts = (payload as any)?.mentionedTarget;
+    let mtsText = "";
+    try {
+      mtsText = Array.isArray(mts) ? JSON.stringify(mts) : String(mts ?? "");
+    } catch {
+      mtsText = String(mts ?? "");
+    }
+    const mine = Array.isArray(mts) && mts.includes(String((config as any)?.robotId ?? ""));
+    return `mentionedType=${String(mt ?? "")} mentionedTarget=${mtsText} robotId=${String((config as any)?.robotId ?? "")} targetedMe=${mine}`;
+  })();
+  const line = `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key} ${quoteDiag} ${mentionDiag}\n`;
   api.logger?.info?.(line.trim());
   try {
     // 控制台日志可能不可读（stdout 进终端），额外追加到 ~/.dsh/wildfire-quote.log 供诊断
@@ -802,14 +815,63 @@ export async function handleIncomingMessage(
       }
     }
 
+    // [@提及] 把本条消息 @ 了谁（uid → 显示名）并入模型上下文，让模型感知被点名对象。
+    // mentionedType：1=@指定用户（mentionedTarget 为 uid 数组），2=@所有人。
+    // 名字解析失败静默回退 uid；不阻塞主流程。
+    let mentionContext = "";
+    try {
+      const mtRaw = (payload as any)?.mentionedType;
+      const mtsRaw = (payload as any)?.mentionedTarget;
+      if (Number(mtRaw) === 2) {
+        mentionContext = "[本条消息 @了所有人]";
+      } else if (Number(mtRaw) === 1 && Array.isArray(mtsRaw) && mtsRaw.length > 0) {
+        const uids = mtsRaw.filter((u: any) => typeof u === "string" && u.length > 0);
+        if (uids.length > 0) {
+          const named = await Promise.all(
+            uids.map(async (uid: string) => {
+              let name = uid;
+              try {
+                const msdk = getClient();
+                if (msdk && typeof msdk.getUserInfo === "function") {
+                  const r = await msdk.getUserInfo(uid);
+                  const ui = r && typeof r === "object" ? (r as any)?.result : null;
+                  if (ui) {
+                    const n = ui.displayName || ui.name || ui.userId;
+                    if (n) name = String(n);
+                  }
+                }
+              } catch {
+                // 名字解析失败按 uid 展示
+              }
+              return name === uid ? uid : `${name}(${uid})`;
+            })
+          );
+          mentionContext = `[本条消息 @了：${named.join("、")}]`;
+        }
+      }
+    } catch {
+      mentionContext = "";
+    }
+    if (mentionContext) {
+      logger?.info?.(`[wildfire] mention context: ${safePreview(mentionContext, 160)}`);
+    }
+
     let bodyText = transcript || media?.text || text;
     // File messages: keep the file name from the payload alongside the path note.
     if (payloadType === MESSAGE_TYPE_FILE && media && text && !transcript) {
       bodyText = `${text}；${media.text}`;
     }
+    // 前置上下文：@提及 + 引用（两者都非空时各自成段）
+    let ctxPrefix = "";
+    if (mentionContext) {
+      ctxPrefix += `${mentionContext}\n`;
+    }
     if (quotedFullText) {
       const quotedSender = (quote && (quote.n || quote.i)) || "未知";
-      bodyText = `[用户 ${sender} 引用了 ${quotedSender} 的一条消息(uid=${String(quote?.u ?? "")})，被引原文：\n${quotedFullText}\n]\n${bodyText}`;
+      ctxPrefix += `[用户 ${sender} 引用了 ${quotedSender} 的一条消息(uid=${String(quote?.u ?? "")})，被引原文：\n${quotedFullText}\n]\n`;
+    }
+    if (ctxPrefix) {
+      bodyText = ctxPrefix + bodyText;
     }
 
     // 回合开始：刷新会话信息（sessionId/cwd/model，best effort）。
