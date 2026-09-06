@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { mkdir, readdir, realpath, stat, rm } from "node:fs/promises";
 import {
   TextMessageContent,
@@ -29,10 +29,12 @@ import {
   CONV_TYPE_SINGLE,
   CONV_TYPE_GROUP,
   CONV_TYPE_CHANNEL,
+  MESSAGE_TYPE_TEXT,
   MESSAGE_TYPE_FILE,
   MESSAGE_TYPE_IMAGE,
   MESSAGE_TYPE_VOICE,
   conversationKey,
+  decodeQuoteFromPayload,
   extractPayloadInfo,
   safePreview,
   shouldRespondToGroupMessage,
@@ -273,6 +275,45 @@ export async function handleIncomingMessage(
   api.logger?.info?.(
     `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key}, text=${safePreview(text)}`
   );
+
+  // [诊断] 引用消息：客户端把被引消息信息 base64 放在 payload.binaryContent
+  // （本网关收到的 payload 该二进制字段名为 base64edData），
+  // 形如 {"quote":{u,i,n,d}}，正文 searchableContent 不含引用原文。
+  // 为便于核对机器人实际收到什么，每条文本消息都追加诊断到 ~/.dsh/wildfire-quote.log：
+  // QUOTE_OK（解析到引用）/ 否则打印 payload 各候选字段的解码预览。
+  const quote = decodeQuoteFromPayload(payload);
+  const preview = (v: unknown, max = 240): string => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") {
+      // base64 二进制串：尝试 utf8 解码出可读 JSON
+      try {
+        const dec = Buffer.from(v, "base64").toString("utf8");
+        if (dec.includes("{") && !dec.includes("\uFFFD")) {
+          return `decoded=${safePreview(dec, max)}`;
+        }
+      } catch {
+        // ignore
+      }
+      return safePreview(v, max);
+    }
+    try {
+      return safePreview(JSON.stringify(v), max);
+    } catch {
+      return String(v).slice(0, max);
+    }
+  };
+  const quoteDiag = quote
+    ? `QUOTE_OK uid=${quote.u ?? ""} from=${quote.i ?? ""} name=${quote.n ?? ""} digest=${safePreview(String(quote.d ?? ""), 200)}`
+    : `payload keys=${Object.keys(payload ?? {}).join(",")}; binaryContent=${preview(payload?.binaryContent)}; base64edData=${preview(payload?.base64edData)}; content=${preview(payload?.content)}; extra=${preview(payload?.extra)}`;
+  const line = `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key} ${quoteDiag}\n`;
+  api.logger?.info?.(line.trim());
+  try {
+    // 控制台日志可能不可读（stdout 进终端），额外追加到 ~/.dsh/wildfire-quote.log 供诊断
+    mkdirSync(homedir() + "/.dsh", { recursive: true });
+    appendFileSync(homedir() + "/.dsh/wildfire-quote.log", `${new Date().toISOString()} ${line}`, "utf8");
+  } catch (e: any) {
+    api.logger?.warn?.(`[wildfire] quote log file append failed: ${String(e?.message ?? e)}`);
+  }
 
   // Group notifications (104-125) are system events: handle lifecycle before
   // whitelist / filters / dispatch (see INTERACTION_DESIGN.md §4.3.1).
@@ -715,10 +756,60 @@ export async function handleIncomingMessage(
       streaming.throttleMs
     );
 
+    // [引用] 按 uid 拉取被引消息全文并并入模型输入：机器人只能查到“自己参与会话”中的
+    // 消息（IM server 约束）。成功 → 把原文带进上下文（客户端引用自带的 d 只是 48 字
+    // 摘要）；失败/无权限/SDK 无该方法 → 静默降级，仍用摘要，不影响正常对话。
+    let quotedFullText = "";
+    // 落盘诊断（getMessage 拉取结果也写进 ~/.dsh/wildfire-quote.log，控制台可能不可读）
+    const appendQuoteDiag = (msg: string): void => {
+      try {
+        mkdirSync(homedir() + "/.dsh", { recursive: true });
+        appendFileSync(homedir() + "/.dsh/wildfire-quote.log", `${new Date().toISOString()} ${msg}\n`, "utf8");
+      } catch {
+        // 忽略落盘失败
+      }
+    };
+    if (quote && quote.u !== undefined && quote.u !== null && quote.u !== "" && payloadType === MESSAGE_TYPE_TEXT) {
+      const qsdk = getClient();
+      if (!qsdk || typeof qsdk.getMessage !== "function") {
+        logger?.warn?.("[wildfire] getMessage unavailable: gateway client SDK 无 getMessage（需更新 client.js 并重启 dsh/gateway）");
+        appendQuoteDiag(`[wildfire] QUOTE_FETCH_FAIL uid=${String(quote.u)} reason=sdk-no-getMessage`);
+      } else {
+        try {
+          const imr = await qsdk.getMessage(String(quote.u));
+          const od = imr && typeof imr === "object" ? (imr as any)?.result : null;
+          const pl = od && typeof od === "object" ? (od as any)?.payload : null;
+          if (pl && typeof pl === "object") {
+            let label = "";
+            const mediaType = Number(pl.mediaType ?? 0);
+            if (mediaType > 0) {
+              label = mediaType === 1 ? "[图片]" : mediaType === 2 ? "[语音]" : mediaType === 3 ? "[视频]"
+                : mediaType === 4 ? "[文件]" : mediaType === 5 ? "[头像]" : mediaType === 7 ? "[贴纸]" : "[媒体]";
+            }
+            const content = String(pl.searchableContent ?? pl.content ?? "").trim();
+            quotedFullText = ((content ? label + content : label) || "").slice(0, 4000);
+            appendQuoteDiag(`[wildfire] QUOTE_FETCH_OK uid=${String(quote.u)} len=${quotedFullText.length} head=${safePreview(quotedFullText, 80)}`);
+          } else {
+            appendQuoteDiag(`[wildfire] QUOTE_FETCH_FAIL uid=${String(quote.u)} reason=no-result imr=${safePreview(JSON.stringify(imr ?? {}), 160)}`);
+          }
+        } catch (e: any) {
+          logger?.warn?.(`[wildfire] getMessage(quote uid=${String(quote.u)}) failed: ${String(e?.message ?? e)}`);
+          appendQuoteDiag(`[wildfire] QUOTE_FETCH_FAIL uid=${String(quote.u)} reason=exception err=${safePreview(String(e?.message ?? e), 200)}`);
+        }
+      }
+      if (quotedFullText) {
+        logger?.info?.(`[wildfire] quote full text fetched: uid=${String(quote.u)} len=${quotedFullText.length}`);
+      }
+    }
+
     let bodyText = transcript || media?.text || text;
     // File messages: keep the file name from the payload alongside the path note.
     if (payloadType === MESSAGE_TYPE_FILE && media && text && !transcript) {
       bodyText = `${text}；${media.text}`;
+    }
+    if (quotedFullText) {
+      const quotedSender = (quote && (quote.n || quote.i)) || "未知";
+      bodyText = `[用户 ${sender} 引用了 ${quotedSender} 的一条消息(uid=${String(quote?.u ?? "")})，被引原文：\n${quotedFullText}\n]\n${bodyText}`;
     }
 
     // 回合开始：刷新会话信息（sessionId/cwd/model，best effort）。

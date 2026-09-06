@@ -12,6 +12,50 @@ export const MESSAGE_TYPE_IMAGE = 3;
 export const MESSAGE_TYPE_VIDEO = 4;
 export const MESSAGE_TYPE_FILE = 5;
 
+/**
+ * 解析客户端「引用消息」：野火客户端发引用时，把被引消息信息 base64 编码放在
+ * payload.binaryContent（本网关收到的 payload 里该二进制字段名为 base64edData，
+ * 见入站日志 keys），形如 {"quote":{"u":messageUid,"i":userId,"n":userName,
+ * "d":digest/原文摘要}}（文本正文仍在 searchableContent，不含引用原文）。
+ * 返回解码后的 quote 对象；无引用/解析失败返回 null。
+ * 解码容错与 vue-pc-chat TextMessageContent.decode 一致：
+ * - base64 字符串可能带尾随垃圾 → 截到最后一个 '}'；
+ * - "u" 可能是数值或字符串，JSON 解析都能处理。
+ */
+export function decodeQuoteFromPayload(payload: any): any {
+  const b64 = payload?.binaryContent ?? payload?.base64edData ?? payload?.localBinaryContent;
+  if (!b64) {
+    return null;
+  }
+  try {
+    let buf: Buffer;
+    if (typeof b64 === "string") {
+      buf = Buffer.from(b64, "base64");
+    } else if (b64 instanceof Uint8Array) {
+      buf = Buffer.from(b64);
+    } else {
+      buf = Buffer.from(new Uint8Array(b64 as ArrayBuffer));
+    }
+    let str = buf.toString("utf8");
+    const end = str.lastIndexOf("}");
+    if (end >= 0) {
+      str = str.slice(0, end + 1);
+    }
+    // long 精度保护：wire 上 quote 的 "u"(被引消息uid) 是裸 JSON 数字，直接 JSON.parse
+    // 会变成 JS double 丢精度（超过 Number.MAX_SAFE_INTEGER 时相邻 uid 会碰撞）。与
+    // vue-pc-chat TextMessageContent.decode 同款处理：先把 "u":<digits> 替换成带引号
+    // 的字符串再 parse，保证返回的 uid 是精确字符串。
+    str = str.replace(/"u"\s*:\s*(\d+)/, '"u":"$1"');
+    const obj = JSON.parse(str);
+    if (!obj || typeof obj !== "object") {
+      return null;
+    }
+    return obj.quote ? obj.quote : obj;
+  } catch {
+    return null;
+  }
+}
+
 /** Conversation type constants (Wildfire IM). */
 export const CONV_TYPE_SINGLE = 0;
 export const CONV_TYPE_GROUP = 1;

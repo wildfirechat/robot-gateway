@@ -179,6 +179,13 @@ func (c *RobotServiceClient) UpdateMessage(messageID int64, payload *protocol.Me
 	return invoke[struct{}](c, "updateMessage", params)
 }
 
+// GetMessage 按消息 uid 获取单条消息，只能获取机器人参与会话中的消息。
+// messageUID 是 int64（Go 原生强类型，无 JS 端精度问题）。对应网关/IM 的 getMessage 方法。
+func (c *RobotServiceClient) GetMessage(messageUID int64) (*protocol.IMResult[protocol.OutputMessageData], error) {
+	params := []interface{}{messageUID}
+	return invoke[protocol.OutputMessageData](c, "getMessage", params)
+}
+
 // UpdateConversationUserSetting 设置会话级用户设置（scope=31），会话内所有用户（机器人除外）
 // 都会收到 key 为 convType-line-target_type 的用户设置变更。
 // conv 为会话（私聊 target 为对方 uid，群聊 target 为 groupId）；settingType 为设置类型；value 为 JSON 字符串。

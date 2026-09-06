@@ -93,6 +93,23 @@ export class RobotServiceClient {
     // ==================== 消息相关 API ====================
 
     /**
+     * 获取单条消息（只能获取机器人参与会话中的消息）。
+     * 对应 Java RobotService.getMessage(long messageUid)。
+     *
+     * 注意：messageUid 是超大的 long（可能超过 2^53），JS number 无法精确保存，
+     * 必须传字符串（string），内部以字符串原样透传给网关（网关按 JSON 字符串解析为
+     * long）；传 number 会直接返回错误，避免静默丢精度。
+     * @param {string} messageUid - 消息 uid（超长 long，必须传字符串）
+     * @returns {Promise<IMResult>} - result 为消息数据（含 searchableContent 等）
+     */
+    async getMessage(messageUid) {
+        if (typeof messageUid !== 'string') {
+            return new IMResult(-1, 'messageUid 是超长 long，必须传字符串（JS number 会丢失精度）', null);
+        }
+        return this.invoke('getMessage', [messageUid]);
+    }
+
+    /**
      * 发送消息
      * @param {Conversation} conversation - 会话对象
      * @param {MessagePayload} payload - 消息内容

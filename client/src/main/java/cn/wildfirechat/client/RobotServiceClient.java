@@ -184,6 +184,17 @@ public class RobotServiceClient {
     }
 
     /**
+     * 获取单条消息（只能获取机器人参与会话中的消息）。
+     * messageUid 为 long，Java 原生无精度问题（JS 端需用字符串，见 JS SDK getMessage）。
+     * @param messageUid 消息 uid
+     * @return 消息数据（payload.searchableContent 为文本正文；引用被引原文取此处）
+     */
+    public IMResult<OutputMessageData> getMessage(long messageUid) {
+        return invoke("getMessage", Arrays.asList(messageUid),
+                new com.google.gson.reflect.TypeToken<IMResult<OutputMessageData>>(){}.getType());
+    }
+
+    /**
      * 设置会话级用户设置（scope=31），会话内所有用户（机器人除外）都会收到
      * key为convType-line-target_type的用户设置变更
      * @param conversation 会话；私聊target为对方用户uid，群聊target为groupId

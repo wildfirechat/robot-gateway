@@ -39,6 +39,9 @@ declare module "@wildfirechat/robot-gateway-client-sdk" {
     addGroupMembers(groupId: string, members: string[], to?: string | null, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
     muteGroupMember(groupId: string, members: string[], mute: boolean, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
     getGroupMembers(groupId: string): Promise<{ code: number; msg?: string; result?: Array<{ member_id?: string; type?: number }> }>;
+    /** 获取单条消息（只能获取机器人参与会话中的消息）。messageUid 是超长 long，
+     *  JS 必须传字符串（number 会丢精度），网关响应里同时提供 messageUidString 字符串字段。 */
+    getMessage(messageUid: string): Promise<{ code: number; msg?: string; result?: any; isSuccess?: () => boolean }>;
   }
 }
 
