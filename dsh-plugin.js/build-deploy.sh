@@ -22,6 +22,9 @@ NODE_BIN="/Users/rain/.nvm/versions/node/v22.22.0/bin/node"
 PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
 LOG_FILE="$HOME/.dsh/dsh-wildfire.log"
 SDK_SRC="$PLUGIN_DIR/../client.js"
+# 固定 pnpm 版本：`pnpm@latest` 会解析到 corepack 缓存里可能损坏的新版本
+# （曾出现 12.3.4 缺 bin/pnpm.cjs，导致 install 失败、profile 被 rm 后起不来）。
+PNPM_VERSION="${PNPM_VERSION:-11.25.0}"
 
 echo "==> 1/5 构建 (tsc)"
 cd "$PLUGIN_DIR"
@@ -42,9 +45,23 @@ else
 fi
 
 echo "==> 4/5 安装到 profile ($PROFILE)"
-rm -rf "$PROFILE_DIR/node_modules/@wildfirechat/dsh-wildfire" \
+INSTALLED="$PROFILE_DIR/node_modules/@wildfirechat/dsh-wildfire"
+BACKUP_DIR=""
+if [ -d "$INSTALLED" ]; then
+  BACKUP_DIR="$(mktemp -d)"
+  cp -R "$INSTALLED" "$BACKUP_DIR/dsh-wildfire"
+fi
+rm -rf "$INSTALLED" \
        "$PROFILE_DIR/node_modules/.pnpm/@wildfirechat+dsh-wildfire@"*
-corepack pnpm@latest --dir "$PROFILE_DIR" install "$PLUGIN_DIR/$TGZ" 2>&1 | grep -v "^\s*$" | tail -2
+if ! corepack pnpm@"$PNPM_VERSION" --dir "$PROFILE_DIR" install "$PLUGIN_DIR/$TGZ" 2>&1 | tail -3; then
+  echo "!! pnpm install 失败（pnpm@$PNPM_VERSION）"
+  if [ -n "$BACKUP_DIR" ]; then
+    echo "   回滚到安装前的插件版本，避免 profile 起不来"
+    rm -rf "$INSTALLED"
+    cp -R "$BACKUP_DIR/dsh-wildfire" "$INSTALLED"
+  fi
+  exit 1
+fi
 
 echo "==> 5/5 重启插件（杀全部旧进程）"
 pkill -f "bin/dsh --profile $PROFILE" 2>/dev/null || true

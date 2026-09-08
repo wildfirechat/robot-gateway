@@ -18,6 +18,7 @@ import { DshGroupRegistry } from "./registry.js";
 import { buildPayload } from "./protocol.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { TextMessageContent } from "@wildfirechat/server-sdk";
+import { panelDebug } from "./panelDebug.js";
 
 export const name = "wildfire";
 
@@ -256,6 +257,15 @@ export function apply(ctx: any, config: any): void {
           } else {
             logger.info?.(
               `[wildfire] conversation panel data set: key=${key}, type=${conversation.type}, target=${conversation.target}, value=${JSON.stringify(payload)}`
+            );
+            // 诊断：记录写出的 type=3 载荷（客户端应读到的最新值）
+            const p: any = payload;
+            panelDebug(
+              logger,
+              `panel.write type=3 conv=${conversation.type}-${conversation.line}-${conversation.target} ` +
+                `sandbox=${p?.sandbox?.current ?? "-"} model=${p?.model?.current ?? "-"} ` +
+                `effort=${p?.effort?.current ?? "-"} plan=${JSON.stringify(p?.plan ?? null)} ` +
+                `cwd=${p?.cwd ?? "-"} sessionId=${p?.sessionId ?? "-"} bytes=${JSON.stringify(payload).length}`
             );
           }
         },

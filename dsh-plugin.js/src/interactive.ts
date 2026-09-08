@@ -22,9 +22,11 @@ import { deepEqual } from "./utils.js";
 import {
   AGENT_TYPE,
   summarizeApproval,
+  summarizeCommandResult,
   summarizeGoal,
   summarizeQuestion,
   summarizeTasks,
+  type AgentCommandResultPayload,
   type AgentTaskItem,
   type AgentTaskProgressPayload,
   type AgentAnswerPayload,
@@ -573,15 +575,36 @@ export class InteractionManager {
 
   /**
    * 推送 AI 面板数据（scope=31, type=3）。覆盖式：每次组合查询/更新后整份刷新。
+   * 不含 dirs（目录列表不受控，走 209 按需应答，见 INTERACTION_DESIGN.md §10）。
    */
   pushPanelData(key: string, data: Record<string, unknown>): void {
     if (!data || typeof data !== "object") return;
     this.fullPanelData.set(key, data);
-    this.logger?.info?.(`[wildfire] pushPanelData: key=${key}, model=${(data.model as any)?.current ?? "-"}, dirs=${(data.dirs as any[])?.length ?? 0}`);
+    this.logger?.info?.(
+      `[wildfire] pushPanelData: key=${key}, model=${(data.model as any)?.current ?? "-"}`
+    );
     this.cards
       .setConversationPanelData(key, data)
       .catch((err: unknown) =>
         this.logger?.warn?.(`[wildfire] conversation panel data update failed: ${String(err)}`)
+      );
+  }
+
+  /**
+   * 发送 207 指令的应答（209 Agent_Command_Result，persistFlag=4 Transparent：
+   * 不落库、不显示、不计数）。当前用于 op=dirs 目录列表按需获取。
+   * 目标 = 该会话最近一次入站消息的会话（群/私聊）+ 同一 line。
+   */
+  sendCommandResult(key: string, data: AgentCommandResultPayload): void {
+    const target = this.getConversation(key);
+    if (!target) {
+      this.logger?.warn?.(`[wildfire] sendCommandResult: no conversation target for key=${key}`);
+      return;
+    }
+    this.cards
+      .sendCard(target, AGENT_TYPE.COMMAND_RESULT, data, summarizeCommandResult(data), 4)
+      .catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire] command result send failed: ${String(err)}`)
       );
   }
 

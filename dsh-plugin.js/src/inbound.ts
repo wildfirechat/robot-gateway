@@ -25,6 +25,7 @@ import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConf
 import { getClient } from "./clients.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
+import { panelDebug } from "./panelDebug.js";
 import {
   CONV_TYPE_SINGLE,
   CONV_TYPE_GROUP,
@@ -53,6 +54,7 @@ import {
   type AgentAnswerPayload,
   type AgentApprovalResultPayload,
   type AgentCommandPayload,
+  type AgentCommandResultPayload,
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
@@ -1566,6 +1568,7 @@ async function handleSandboxCommand(
     return;
   }
   if (!session) {
+    panelDebug(api?.logger, `/sandbox key=${key} mode=${arg} 会话未激活（session 未解析到），未写入 override`);
     await sendTip(sender, conv, "会话未激活（请先发送一条消息激活会话）", api);
     return;
   }
@@ -1576,6 +1579,12 @@ async function handleSandboxCommand(
     return;
   }
   api.logger?.info?.(`[wildfire] /sandbox: key=${key}, mode=${arg}, by=${sender}`);
+  // 诊断：写入后立刻回读 override，确认事件已进入会话日志
+  panelDebug(
+    api?.logger,
+    `/sandbox key=${key} mode=${arg} by=${sender} session=${session?.id ?? "-"} ` +
+      `overrideAfter=${policy.overrideOf(session) ?? "-"} default=${policy.defaultMode} events=${session?.events?.length ?? "-"}`
+  );
   await sendTip(
     sender,
     conv,
@@ -2129,7 +2138,29 @@ async function handleDshCommand(
     const data = await buildPanelData(api, key);
     api.interactions?.pushPanelData(key, data);
     api.logger?.info?.(
-      `[wildfire] DSH_Command query: key=${key}, model=${(data.model as any)?.current ?? "-"}, dirs=${(data.dirs as string[])?.length ?? 0}`
+      `[wildfire] DSH_Command query: key=${key}, model=${(data.model as any)?.current ?? "-"}`
+    );
+    panelDebug(
+      api?.logger,
+      `panel.query key=${key} robotId=${command.robotId ?? "-"} seq=${command.seq ?? "-"} ` +
+        `sandbox=${(data.sandbox as any)?.current ?? "-"} model=${(data.model as any)?.current ?? "-"} ` +
+        `effort=${(data.effort as any)?.current ?? "-"} plan=${JSON.stringify(data.plan ?? null)}`
+    );
+    return;
+  }
+
+  // op=dirs：目录列表按需获取，应答走 209（透明消息），不写设置表（§10）
+  if (command.op === "dirs") {
+    const result = await buildDirsResult(api, key, command);
+    api.interactions?.sendCommandResult?.(key, result);
+    api.logger?.info?.(
+      `[wildfire] DSH_Command dirs: key=${key}, seq=${command.seq ?? "-"}, robotId=${command.robotId ?? "-"}, ` +
+        `dirs=${result.dirs?.length ?? 0}/${result.total ?? 0}, truncated=${result.truncated ?? false}`
+    );
+    panelDebug(
+      api?.logger,
+      `panel.dirs key=${key} robotId=${command.robotId ?? "-"} seq=${command.seq ?? "-"} ` +
+        `root=${result.root ?? "-"} dirs=${result.dirs?.length ?? 0}/${result.total ?? 0}`
     );
     return;
   }
@@ -2188,6 +2219,14 @@ async function handleDshCommand(
     const data = await buildPanelData(api, key).catch(() => undefined);
     if (data) api.interactions?.pushPanelData(key, data);
     api.logger?.info?.(`[wildfire] DSH_Command set: key=${key}, cmd=${cmdText}, by=${sender}`);
+    if (data) {
+      panelDebug(
+        api?.logger,
+        `panel.set key=${key} cmd=${cmdText} robotId=${command.robotId ?? "-"} ` +
+          `sandbox=${(data.sandbox as any)?.current ?? "-"} model=${(data.model as any)?.current ?? "-"} ` +
+          `effort=${(data.effort as any)?.current ?? "-"} plan=${JSON.stringify(data.plan ?? null)}`
+      );
+    }
     return;
   }
 }
@@ -2271,15 +2310,21 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
   }
   // 沙箱当前值（会话未激活时用部署默认）
   let sandboxCurrent = "workspace-write";
+  let sandboxDebug = "policy=unavailable";
   try {
     const policy = api.ctx?.get?.("sandboxPolicy");
     if (policy) {
       const agent = api.ctx?.get?.("agents")?.get?.(sessionId);
       const session = agent?.session;
-      sandboxCurrent = session ? (policy.overrideOf(session) ?? policy.defaultMode) : policy.defaultMode;
+      const override = session ? policy.overrideOf(session) : undefined;
+      sandboxCurrent = session ? (override ?? policy.defaultMode) : policy.defaultMode;
+      sandboxDebug =
+        `agentFound=${!!agent} sessionFound=${!!session} override=${override ?? "-"} ` +
+        `default=${policy.defaultMode} events=${session?.events?.length ?? "-"} ` +
+        `live=${(api.wildfireAgents?.listLiveAgents?.() ?? []).length}`;
     }
-  } catch {
-    // 保持默认
+  } catch (err: any) {
+    sandboxDebug = `policy error: ${err?.message ?? String(err)}`;
   }
   // 计划模式当前值（会话未激活时为关）
   let planOn = false;
@@ -2293,22 +2338,14 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
   } catch {
     // 保持关
   }
-  // 目录列表：项目根目录子目录（面板目录选择）
-  const dirs: string[] = [];
-  try {
-    const root = api.workspace?.root?.();
-    if (root) {
-      const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
-      dirs.push(
-        ...entries
-          .filter((e) => e.isDirectory())
-          .map((e) => e.name)
-          .sort((a, b) => a.localeCompare(b))
-      );
-    }
-  } catch {
-    // 目录列表为空时面板显示提示
-  }
+  // 诊断：面板聚合结果（含沙箱解析过程）
+  panelDebug(
+    api?.logger,
+    `panel.build key=${key} sessionId=${sessionId} ${sandboxDebug} ` +
+      `model=${modelSel ? `${modelSel.provider}/${modelSel.model}` : "-"} ` +
+      `effort=${modelSel?.reasoningEffort ?? "-"} plan=${planOn} cwd=${cwd ?? "-"}`
+  );
+  // 注意：不含 dirs——目录列表不受控，走 209 按需应答（op=dirs），见 INTERACTION_DESIGN.md §10
   return {
     model: { current: modelSel ? `${modelSel.provider}/${modelSel.model}` : "", options: modelOptions },
     effort: { current: modelSel?.reasoningEffort ?? "", options: effortOptions },
@@ -2316,7 +2353,46 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
     plan: { on: planOn },
     cwd,
     sessionId,
-    dirs,
+  };
+}
+
+/** 目录列表应答上限（单条消息 im-server 64KB / robot 网关 60KB，3000 条远低于阈值）。 */
+const DIRS_RESULT_MAX = 3000;
+
+/**
+ * op=dirs：项目根目录一级子目录列表，应答走 209 Agent_Command_Result（透明消息）。
+ * 从 type=3 面板数据里移出：目录数量不受控，会把设置值撑爆（§10）。
+ */
+async function buildDirsResult(api: any, key: string, command: AgentCommandPayload): Promise<AgentCommandResultPayload> {
+  const root = (() => {
+    try {
+      return String(api.workspace?.root?.() ?? "");
+    } catch {
+      return "";
+    }
+  })();
+  let dirs: string[] = [];
+  if (root) {
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    dirs = entries
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+  }
+  const total = dirs.length;
+  const truncated = total > DIRS_RESULT_MAX;
+  const sessionId = api.wildfireAgents?.peekSessionId?.(key) ?? "";
+  const cwd = await api.workspace?.peek?.(key, sessionId).catch(() => undefined);
+  return {
+    ver: 1,
+    op: "dirs",
+    seq: command.seq,
+    robotId: command.robotId,
+    cwd: cwd ?? "",
+    root,
+    dirs: truncated ? dirs.slice(0, DIRS_RESULT_MAX) : dirs,
+    total,
+    truncated,
   };
 }
 

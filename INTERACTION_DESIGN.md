@@ -523,9 +523,10 @@ interface AgentRef {
 | **4（新增）** | **agents 在场列表**：`{ agents: [{ ...AgentRef, robotUid, statusText?, lastActiveTs }] }` —— 会话内有哪些机器人 agent；**客户端据此把消息发送者 uid ↔ 状态 entry 后缀对应起来**（多机器人会话的唯一权威来源） | `..._4`（会话级，无 uid 后缀，由第一个在场 agent 维护） |
 | 5-9 | 预留 | - |
 
-- 客户端**不预知机器人 uid**：读取统一为「前缀 + 槽位」扫描 scope=31 设置表
-  （`getUserSettings(31)` + `startsWith(\`<convType>-<line>-<target>_<type>_\`)`，后缀通配）——
-  vue `dshState.js` / hm `dshState.ets` 已实现；单机器人会话命中唯一 entry
+- 客户端**不预知机器人 uid**：读取统一为「前缀 + 槽位」查询 scope=31 设置表——
+  SDK 提供带 key 前缀的查询（`getUserSettingsLike(scope, prefix)` / `getUserSettings:keyPrefix:`）后，
+  客户端按前缀直查（native 过滤），不再全量拉取后自行 startsWith 筛选；
+  单机器人会话命中唯一 entry
 - 多机器人同会话：多条 entry 并存；**展示归属按消息 sender uid 匹配 entry 后缀**，
   无目录时取首个匹配（type=4 落地后改权威对应）
 - 面板数据 schema：`{ sections: [{ title, items: [{ label, value, valueType? }] }] }`（渲染无关）
@@ -642,9 +643,12 @@ interface AgentRef {
 | ios-chat | `WFCCAgent*MessageContent`、`WFCUAgent*`（State/Cell/VC）符号改名（文件与 pbxproj 未动）、goal ver2（title/stage fallback）、徽标 DSH→AI | WFChatClient+WFChatUIKit 模拟器 BUILD ✓ |
 | flutter-chat | `MESSAGE_CONTENT_TYPE_AGENT_*`、`Agent*MessageContent/CellBuilder/Panel/State` 改名、goal ver2（含 cancelled 灰态）、plugin key → `agent_settings` | imclient+chat analyze 0 errors（与基线一致）✓ |
 
-**状态通道（scope=31）**：key v2（`..._<type>_<机器人uid>`）五端读取全部改为「前缀扫描」——
-vue/hm（settings 全量取 + startsWith）、android（`ChatManager.getUserSettings(31)`）、
-ios（`getUserSettings:scope` 本地库全量）、flutter（`Imclient.getUserSettings(31)`）；
+**状态通道（scope=31）**：key v2（`..._<type>_<机器人uid>`），读取统一为「前缀查询」——
+vue/android/hm/ios 已改用 SDK 前缀查询接口（`getUserSettingsLike(scope, prefix)` /
+`ChatManager.getUserSettingsLike(scope, keyPrefix)` / `getUserSettings:keyPrefix:`，native 按
+key 前缀过滤，不再全量读取后筛选）；精确 key（指定机器人 uid 的 type=3 面板）走单键
+`getUserSetting`。flutter 端 imclient SDK 尚无前缀查询接口，暂保持 `Imclient.getUserSettings(31)`
+全量读 + 筛选，待 SDK 补齐后同类替换。
 事件驱动刷新不变、无轮询；插件写入零改动（服务端按请求身份补 uid）。
 
 **goal 卡（206）**：五端均已容忍 ver:2（title/state/stage/updatedAt，stage 展示），v1 载荷渲染逐字节不变。
@@ -658,5 +662,80 @@ ios（`getUserSettings:scope` 本地库全量）、flutter（`Imclient.getUserSe
 
 ---
 
-**文档版本**：2.2（§9.9 五端实现状态：AGENT_* 与 scope31 key v2 已落地 插件/vue/hm/android/ios/flutter；flutter markdown 缺口与文件级命名列为遗留）
-**状态**：插件与五端客户端已实现；待各端回归验证（goal/task v2 渲染、多机器人 entry、问答/审批链路）
+## 10. 目录列表按需获取（209 Agent_Command_Result，v2.3）
+
+### 10.1 背景与约束
+
+面板数据（scope=31 `..._3_<机器人uid>`）原先内联项目根目录子目录 `dirs`。该列表**不受控**（项目根下有多少子目录就有多少条），而单条设置值有上限（当前 schema `t_user_setting._value varchar(4096)`；`server`/`server_commercial` 一致）。且写库失败是**静默**的：`DatabaseStore.persistUserSetting` 的 `catch (SQLException)` 只打日志、`finally` 仍 `callback.onSuccess()`，于是内存缓存与推送照常成功——表现为「当下能用、broker 重启后丢」。
+
+实测（本机部署）：`root=/Users/rain/Workspace`、`dirs=194` 时整条面板载荷 3744/4096 字符，余量仅 352；再加目录即超限，且超限是**整条 JSON 失效**（model/effort/sandbox 一起坏）。
+
+**结论**：`dirs` 从 type=3 移除，改为**按需应答**——客户端需要时发 207 `op=dirs`，插件用 **209** 透明消息回传。设置通道只承载定长小字段（瘦身后约 600 字节），彻底消除超限风险。
+
+### 10.2 类型号
+
+| 类型 | 名称 | 方向 | persistFlag | 说明 |
+|------|------|------|-------------|------|
+| 209 | `Agent_Command_Result` | 机器人→用户 | 4（Transparent） | 207 指令的应答通道（当前仅 `op=dirs`）；不落库、不显示、不计数 |
+
+### 10.3 请求（207 Agent_Command）
+
+```json
+{ "op": "dirs", "seq": 12345, "robotId": "robot_xxx_yyy" }
+```
+
+- `op` 新增取值 **`dirs`**（与 query/set/interrupt/ping 并列）。
+- `seq`：客户端自增序号（或毫秒取模），应答原样回显用于关联；同一会话可有多个 pending。
+- `robotId`：目标机器人（多机器人会话寻址）；应答带同一个 robotId。
+
+### 10.4 应答（209 Agent_Command_Result）
+
+```json
+{
+  "ver": 1,
+  "op": "dirs",
+  "seq": 12345,
+  "robotId": "robot_xxx_yyy",
+  "cwd": "/Users/rain/Workspace/robot-gateway",
+  "root": "/Users/rain/Workspace",
+  "dirs": ["a", "b"],
+  "total": 194,
+  "truncated": false
+}
+```
+
+- 发送目标 = 请求所在会话（群/私聊）+ 同一 line；`persistFlag=4`（Transparent）；`searchableContent="📂 AI 目录列表（N）"`。
+- `dirs`：**目录名**（非全路径），按名称升序；来自 `workspace.root()`（项目根）的一级子目录；`root` 为其父目录。
+- 上限：插件截断到 **3000** 条并置 `truncated=true`（单条消息 im-server 64KB / robot 网关 60KB，3000 条远低于阈值）。
+- 客户端必须按 `seq` 匹配 pending 请求；`seq` 不匹配或已超时的应答直接丢弃。
+
+### 10.5 客户端行为
+
+1. 打开 AI 面板：只读 type=3（**不含 dirs**）。兼容：若 type=3 仍带 `dirs`（老插件），直接使用。
+2. 用户点「切换目录」：优先用缓存（同一面板会话内 TTL 60s）；无缓存则发 207 `op=dirs` 并显示加载态；收到匹配 209 后渲染候选。
+3. 超时 5s 重试一次；仍失败显示「获取目录失败，请重试」，保留手动输入路径的兜底（`/cwd <路径>`）。
+4. 兼容老插件：若 `op=dirs` 无应答（老插件不识别该 op），超时后回退读 type=3 的 `dirs`（可能为空）。
+
+> 已知小限制：群内多个成员同时请求时 `seq` 可能碰撞（各端序号来源不同）。因为同一会话的目录列表对所有成员一致，误匹配只会多刷一次同样的列表，可接受；若将来要严格匹配，可在应答里加 `requester`（请求者 uid）由客户端校验。
+
+### 10.6 兼容性
+
+- 209 是 Transparent 消息：各端消息列表均以 `messageId != 0` 过滤（hm `isDisplayMessage`、pc `store._isDisplayMessage`、ios `WFCUMessageListViewController.m:3025`、android `ConversationFragment.isDisplayableMessage`、flutter `conversation_view_model`），**老客户端收到 209 只是静默丢弃**，不会出现「未知消息」气泡。
+- 老客户端（只读 type=3 dirs）在新插件下目录候选为空 → 提示「未获取到目录列表」，可手动 `/cwd <路径>`；升级后自动恢复。
+
+### 10.7 落地清单
+
+| 层 | 文件（代表） | 改动 |
+|----|-------------|------|
+| server 预定义 | `common/.../ProtoConstants.java` | `Agent_Command_Result = 209`（号段注释 200-209） |
+| 插件 | `protocol.ts` / `inbound.ts` | `AGENT_TYPE.COMMAND_RESULT`、`AgentCommandResultPayload`、`buildPanelData` 去 dirs、`op=dirs` 分支发 209 |
+| hm-chat | `client/.../messageContentType.ets`、`agentCommandResultMessageContent.ets`、`messageConfig.ets`、`uikit/.../AgentPanelView.ets` | 内容类 + 类型常量 + 工厂/flag 注册 + 面板按需请求/匹配 |
+| android-chat | `client/.../MessageContentType.java`、`message/agent/AgentCommandResultMessageContent.java`、内容工厂/flag 表、`AgentAiSettingsDialog.java` | 同上 |
+| ios-chat | `WFCCAgentMessageContents.{h,m}`、内容工厂/持久化表、`WFCUAgentPanelViewController.m` | 同上 |
+| vue-pc-chat | `src/wfc/messages/messageContentType.js`、`agentCommandResultMessageContent.js`、`client/messageConfig.js`、`AgentPanel.vue` | 同上 |
+| flutter-chat | `imclient/lib/message/agent_message_content.dart`、`chat/lib/utils/agent_state.dart`、`chat/lib/conversation/agent_panel.dart` | 同上 |
+
+---
+
+**文档版本**：2.3（§10 目录列表按需获取：209 Agent_Command_Result 应答通道，dirs 移出 scope=31 type=3）
+**状态**：插件与五端客户端已实现（v2.2 通用化）+ 209 目录应答通道（v2.3）

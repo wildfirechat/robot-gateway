@@ -29,7 +29,7 @@ export const AGENT_TYPE = {
   GOAL: 206, // 机器人→用户 目标进度卡片（ver:2 通用载荷，见 AgentGoalPayload）
   COMMAND: 207, // 用户→机器人 AI 面板指令（透明消息，客户端不渲染）
   TASK_PROGRESS: 208, // 机器人→用户 任务进度卡片（ver:2 通用载荷，updateMessage 原地更新）
-  // 209 保留
+  COMMAND_RESULT: 209, // 机器人→用户 207 指令的应答（透明消息，客户端不渲染；见 §10）
 } as const;
 
 export type AgentType = (typeof AGENT_TYPE)[keyof typeof AGENT_TYPE];
@@ -140,18 +140,45 @@ export interface AgentTaskProgressPayload {
  * - op=query  → 组合查询：agent 聚合面板数据写入 scope=31 type=3，不回复消息
  * - op=set    → 更新：cmd 为 provider 词表命令（如 DSH 的 "/model xxx"），
  *               执行后写 type=1 状态 lastChange 并刷新 type=3
+ * - op=dirs   → 目录列表按需获取：应答走 209 Agent_Command_Result（透明消息），
+ *               不再内联在 type=3 里（列表不受控，会撑爆设置值；见 §10）
  * 公共 op（interrupt/ping）为协议扩展点，由各 provider 按需实现。
  */
 export interface AgentCommandPayload {
-  op: "query" | "set" | "interrupt" | "ping";
+  op: "query" | "set" | "interrupt" | "ping" | "dirs";
   /** op=set 时的 provider 词表命令。 */
   cmd?: string;
-  /** 客户端请求序号（幂等/去重）。 */
+  /** 客户端请求序号（幂等/去重/应答关联）。 */
   seq?: number;
   /** 目标 agent（缺省 = 会话默认 agent）。 */
   agent?: AgentRef;
   /** 目标机器人（多机器人会话寻址；缺省 = 本消息会话对应的机器人）。 */
   robotId?: string;
+}
+
+/**
+ * Agent_Command_Result (209) — 207 指令的应答载荷（机器人→用户，persistFlag=4 Transparent）。
+ * 当前仅 op=dirs（目录列表按需获取，见 INTERACTION_DESIGN.md §10）。
+ * 客户端按 seq 关联 pending 请求；seq 不匹配或已超时的应答直接丢弃。
+ */
+export interface AgentCommandResultPayload {
+  ver: 1;
+  /** 对应请求的 op（当前只有 dirs）。 */
+  op: "dirs" | string;
+  /** 回显请求 207 的 seq。 */
+  seq?: number;
+  /** 目标机器人（与请求一致；多机器人会话寻址）。 */
+  robotId?: string;
+  /** 应答时的当前工作目录（绝对路径）。 */
+  cwd?: string;
+  /** 目录列表的来源目录（项目根，绝对路径；dirs 是它的一级子目录）。 */
+  root?: string;
+  /** 目录名列表（非全路径，按名称升序）。 */
+  dirs?: string[];
+  /** 截断前的目录总数。 */
+  total?: number;
+  /** 是否因超过上限被截断。 */
+  truncated?: boolean;
 }
 
 /** Build a message payload object (shape consumed by the Wildfire SDK sendMessage). */
@@ -202,4 +229,13 @@ export function summarizeTasks(data: AgentTaskProgressPayload): string {
   const total = data.tasks.length;
   if (total === 0) return "🧩 任务：无";
   return running > 0 ? `🧩 任务 ${total}（${running} 运行中）` : `🧩 任务 ${total}（${data.tasks.every((t) => t.status === "failed") ? "全部失败" : "全部完成"}）`;
+}
+
+/** Human summary for a 207 command result (209; searchableContent — not rendered). */
+export function summarizeCommandResult(data: AgentCommandResultPayload): string {
+  if (data?.op === "dirs") {
+    const n = data.dirs?.length ?? 0;
+    return data.truncated ? `📂 AI 目录列表（${n}/${data.total ?? n}，已截断）` : `📂 AI 目录列表（${n}）`;
+  }
+  return "📂 AI 指令应答";
 }
