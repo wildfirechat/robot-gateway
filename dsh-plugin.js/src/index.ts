@@ -280,9 +280,13 @@ export function apply(ctx: any, config: any): void {
       // Resolve the working directory for each conversation before agent creation.
       (key, sessionId) => api.workspace.resolve(key, sessionId),
       // Resolve the model selection for each conversation before agent creation.
-      (key) => api.models.resolve(key),
+      // The live session (resume path) lets the resolver honour the session's
+      // durable model/effort record; the override provider reports an explicit
+      // runtime switch that still needs to be written into the session log.
+      (key: string, session?: any) => api.models.resolve(key, session),
       // 在每个 agent scope 绑定 subagent 事件 → 任务卡片（scoped 事件全局监听不到）
-      (agentCtx: any) => api.interactions.bindAgentScope(agentCtx)
+      (agentCtx: any) => api.interactions.bindAgentScope(agentCtx),
+      (key: string) => api.models.peekOverride(key)
     ),
   };
 

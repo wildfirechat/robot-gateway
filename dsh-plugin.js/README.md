@@ -368,7 +368,9 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 | `/goal <groupId> pause` / `resume` | 暂停/恢复群目标（goal 循环暂停≠停止当前任务，停止用 `/stop`） |
 | `/plan [on\|off]` | 查看/开关当前会话的计划模式（私聊 admin / 群内创建者或管理员；退出计划时 plan-review 走提问卡片） |
 | `/compact` | 手动压缩当前会话上下文（权限同上；回复折叠的节点/token 数） |
-| `/sandbox [模式]` | 查看/切换当前会话的沙箱权限模式（read-only 只读 / workspace-write 仅写工作区 / danger-full-access 完全放开；下一次工具调用生效，随会话持久化；权限同上） |
+| `/sandbox [模式]` | 查看/切换当前会话的沙箱权限模式（与权限预设同名时 sandbox+审批一起对齐；下一次工具调用生效，随会话持久化；权限同上） |
+| `/approval [ask\|never]` | 查看/设置当前会话的审批策略（`never` = 不弹审批、越权直接拒绝；权限同上） |
+| `/session` | 查看当前 IM 会话对应的 dsh 会话信息：sessionId / epoch / 工作目录 / 激活状态 / 模型与推理等级（含来源）/ 沙箱与审批 / 计划模式 / 累计 token 与上下文 / 事件数 / 会话日志路径（**不创建会话**）。会话未激活（如刚重启 dsh）时仍按持久化的 `/cwd` 绑定算出真实 sessionId，并从磁盘会话日志读出模型/沙箱/审批/计划，不会显示预览 id 与部署默认值（权限同上） |
 
 通用命令（私聊+群聊，准入成员可用）：
 
@@ -384,10 +386,12 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 模型选择按以下优先级解析（会话级覆盖，**下一条消息生效、上下文保留**）：
 
 ```
-/model、/effort 运行时覆盖  >  model.map  >  model.default 预设  >  DSH 当前选择
+/model、/effort 运行时覆盖  >  会话持久记录  >  model.map  >  model.default 预设  >  DSH 当前选择
 ```
 
-模型与推理等级**分开设置**：`/model` 只切模型（保留当前推理等级），`/effort` 只调推理等级。可选模型来自 **DSH 运行时目录**（`ctx.llm.listProviders()` + `listModels()`，与 web UI 模型选择器同源），`model.allowed` 预设仅作可选快捷方式，`model.default` 与 `model.map` 设定默认与按会话固定。
+**模型/推理等级是「工作现场属性」**：`/model`、`/effort` 除了立即生效，还会把选择写成会话日志里的 `model/selection` 事件；resume 一个已存在的会话（重启 dsh、`/cwd` 切走再切回）时按「最后一条 `model/selection` → 最后一次请求的 `request/header`」恢复，而不是回落到配置默认。由于 dsh 的 GUI 模型选择器读同一份记录，IM 与 GUI 两侧保持一致；`model.map` / `model.default` 只决定**新会话**的初始选择。注意会话按「会话 key × 工作目录」派生，所以每个目录各自记住自己最后用的模型；`/reset` 会换新会话 id，回到配置默认。
+
+模型与推理等级**分开设置**：`/model` 只切模型（保留当前推理等级），`/effort` 只调推理等级。可选模型来自 **DSH 运行时目录**（`ctx.llm.listProviders()` + `listModels()`，与 web UI 模型选择器同源），`model.allowed` 预设仅作可选快捷方式，`model.default` 与 `model.map` 设定新会话的默认与按会话固定。
 
 `allowModelCommand: true` 时，私聊命令：
 
@@ -420,7 +424,7 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 - **状态可见**：Agent 生命周期（运行中/思考/工具/等待输入/空闲）经 scope=31 会话级用户设置实时推送，客户端渲染状态徽标
 - **任务控制**：`/stop` 中断当前任务；`/goal` 长任务创建/暂停/恢复；`/jobs` 后台任务汇总
 - **多群工作区**：每群独立工作目录，`/cwd` 动态绑定并持久化
-- **模型/推理等级**：`/model`、`/effort` 会话级切换
+- **模型/推理等级**：`/model`、`/effort` 按会话（工作现场）切换并写入会话日志，重启/切目录后 resume 自动恢复
 - **长任务**：DSH goal 机制承载长时任务
 
 ## 目录结构

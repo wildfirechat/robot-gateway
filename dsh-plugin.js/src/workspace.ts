@@ -200,6 +200,11 @@ export class WorkspaceResolver {
     this.persistOverrides();
   }
 
+  /** 该会话当前的运行时目录 override（`/cwd` 绑定）；没有则 undefined。 */
+  peekOverride(key: string): string | undefined {
+    return this.overrides.get(key);
+  }
+
   /** Remove the runtime override for a conversation (back to configured modes). */
   clearOverride(key: string): void {
     this.overrides.delete(key);

@@ -2,14 +2,19 @@
  * Per-conversation model / reasoning-effort selection.
  *
  * Resolution order (first match wins):
- *   runtime override (from `/model` / `/effort` commands)
+ *   runtime override (from `/model` / `/effort` commands, this process)
+ *   > session durable record (`model/selection` event / `request/header`)
  *   > `model.map[conversationKey]` (or bare id)
  *   > `model.default` preset
  *   > dsh `agentDefaultModel.currentSelection()`
  *
- * Unlike the workspace (cwd), the model selection is session-LIVE: applying a
- * new selection to an existing agent takes effect on its next request, so a
- * model switch does NOT reset the conversation context.
+ * The durable record makes model/effort a **workspace property**: a resumed
+ * session keeps what it was last using (per sessionId = conversation × cwd)
+ * instead of snapping back to the deployment default. `/model` and `/effort`
+ * write both the live selection and the session record.
+ *
+ * Unlike the workspace (cwd), applying a selection to an existing agent takes
+ * effect on its next request, so a model switch does NOT reset the context.
  */
 
 import type { WildfireConfig, WildfireModelConfig } from "./config.js";
@@ -46,10 +51,24 @@ export class ModelSelector {
     this.logger = logger;
   }
 
-  /** Resolve the effective selection for a conversation key. */
-  async resolve(key: string): Promise<ModelSelection> {
+  /**
+   * Resolve the effective selection for a conversation key.
+   *
+   * @param key - IM conversation key.
+   * @param session - live dsh session, when available. Its durable record
+   *   (last `model/selection` event, else the last `request/header` config)
+   *   makes the model/effort a **workspace property**: a resumed session keeps
+   *   what it was last using instead of snapping back to the deployment default.
+   *
+   * Precedence: runtime override (this process) > session's durable record >
+   * `model.map[key]` > `model.default` > dsh `agentDefaultModel`.
+   */
+  async resolve(key: string, session?: any): Promise<ModelSelection> {
     const override = this.overrides.get(key);
     if (override) return { ...override };
+
+    const durable = readDurableSelection(session);
+    if (durable) return durable;
 
     const mappedId = this.mapLookup(key);
     if (mappedId) {
@@ -82,8 +101,14 @@ export class ModelSelector {
   }
 
   /** Alias for resolve(); used by `/model` queries. */
-  async peek(key: string): Promise<ModelSelection> {
-    return this.resolve(key);
+  async peek(key: string, session?: any): Promise<ModelSelection> {
+    return this.resolve(key, session);
+  }
+
+  /** The in-memory runtime override for a conversation, if any. */
+  peekOverride(key: string): ModelSelection | undefined {
+    const override = this.overrides.get(key);
+    return override ? { ...override } : undefined;
   }
 
   /** Apply a preset by id as the conversation's runtime override. */
@@ -168,5 +193,90 @@ export class ModelSelector {
     const stripped = key.replace(/^wildfire:(user|group):/i, "");
     if (stripped !== key && this.config.map[stripped]) return this.config.map[stripped];
     return undefined;
+  }
+}
+
+/**
+ * 会话（工作现场）里记录的上次模型选择。
+ *
+ * 两个来源，都是 dsh 自己写进会话日志的持久事实：
+ *  1. `model/selection` —— 显式切换意图（本插件 `/model` `/effort` 与 dsh GUI 都会写）；
+ *  2. `request/header`  —— 最近一次真实请求实际用的 provider/model/effort。
+ *
+ * 0.1.2 移除了 `session.events`（改用 `snapshotEvents()`）；两者都做兼容。
+ */
+export function readDurableSelection(session: any): ModelSelection | undefined {
+  if (!session) return undefined;
+  try {
+    const events: any[] = session.snapshotEvents?.() ?? session.events ?? [];
+    const fromEvents = readDurableSelectionFromEvents(events);
+    if (fromEvents) return fromEvents;
+    const header = session.requestHeader?.()?.config;
+    if (header?.provider && header?.model) {
+      return {
+        provider: String(header.provider),
+        model: String(header.model),
+        ...(header.reasoningEffort ? { reasoningEffort: String(header.reasoningEffort) } : {}),
+      };
+    }
+  } catch {
+    // 日志/头部读取失败：按「没有记录」处理，落回配置默认
+  }
+  return undefined;
+}
+
+/** 读取事件流里最后一条指定类型事件的 `data`（倒序扫描）。 */
+export function readLastEventData(
+  events: readonly any[] | undefined,
+  type: string
+): any | undefined {
+  if (!events || events.length === 0) return undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]?.type === type) return events[i].data ?? {};
+  }
+  return undefined;
+}
+
+/**
+ * 从事件流（磁盘上的会话日志）里恢复模型选择，**无需激活会话**：
+ * 最后一条 `model/selection` → 最后一条 `request/header` 的 config。
+ */
+export function readDurableSelectionFromEvents(
+  events: readonly any[] | undefined
+): ModelSelection | undefined {
+  const selection = readLastEventData(events, "model/selection");
+  if (selection?.provider && selection?.model) {
+    return {
+      provider: String(selection.provider),
+      model: String(selection.model),
+      ...(selection.reasoningEffort ? { reasoningEffort: String(selection.reasoningEffort) } : {}),
+    };
+  }
+  const config = readLastEventData(events, "request/header")?.header?.config;
+  if (config?.provider && config?.model) {
+    return {
+      provider: String(config.provider),
+      model: String(config.model),
+      ...(config.reasoningEffort ? { reasoningEffort: String(config.reasoningEffort) } : {}),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * 把选择写进会话日志（`model/selection`），使模型/推理等级成为**会话级**
+ * 持久状态：重启或切换目录后 resume 该会话时由 {@link readDurableSelection}
+ * 恢复。dsh GUI 的模型选择器读同一份记录，因此两侧保持一致。
+ */
+export function persistSelection(session: any, selection: ModelSelection, logger?: any): void {
+  if (!session?.append) return;
+  try {
+    session.append("model/selection", {
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+    });
+  } catch (err: any) {
+    logger?.warn?.(`[wildfire-model] persist model selection failed: ${String(err?.message ?? err)}`);
   }
 }

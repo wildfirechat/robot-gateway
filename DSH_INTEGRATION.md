@@ -367,7 +367,9 @@ model:
   allowModelCommand: true          # 开启 /model /effort 命令（管理员门控）
 ```
 
-**解析优先级**：`/model`、`/effort` 运行时覆盖 > `model.map` > `model.default` 预设 > DSH `agentDefaultModel.currentSelection()`
+**解析优先级**：`/model`、`/effort` 运行时覆盖 > 会话持久记录（`model/selection` / `request/header`） > `model.map` > `model.default` 预设 > DSH `agentDefaultModel.currentSelection()`
+
+**会话级持久化（工作现场属性）**：`/model`、`/effort` 除立即生效外，还向会话日志追加 `model/selection` 事件；resume（重启 dsh、`/cwd` 切走再切回）时按该记录恢复，`request/header` 作为兜底，因此模型与推理等级跟随「会话 key × 工作目录」，不会回落到配置默认。dsh GUI 的模型选择器读同一份记录，IM 与 GUI 保持一致；`model.map` / `model.default` 只决定新会话的初始值。
 
 **命令**（私聊 + 管理员）——模型与推理等级**分开设置**：
 
@@ -402,8 +404,10 @@ DSH 的沙箱策略（`dsh-sandbox-policy`）是文件安全的唯一硬围栏�
 
 | 命令 | 权限 | 行为 |
 |------|------|------|
-| `/sandbox` | 私聊=管理员；群=创建者/管理员 | 查看当前模式（区分"会话覆盖/部署默认"）+ 可选模式列表 |
-| `/sandbox <mode>` | 同上 | 切换模式：`read-only` 只读 / `workspace-write` 仅写工作区 / `danger-full-access` 完全放开 |
+| `/sandbox` | 私聊=管理员；群=创建者/管理员 | 查看当前模式（区分"会话覆盖/部署默认"）+ 审批策略 + 可选模式列表 |
+| `/sandbox <mode>` | 同上 | 与权限预设同名时走预设（sandbox+approval 一起对齐）；否则只切沙箱：`read-only` 只读 / `workspace-write` 仅写工作区 / `danger-full-access` 完全放开 |
+| `/approval <ask\|never>` | 同上 | 查看/设置审批策略（`never` 时 dsh 不 emit `approval/request`，需要审批的操作直接拒绝、不弹卡片） |
+| `/session` | 同上 | 查看当前会话的 dsh 会话信息（sessionId/epoch/cwd/状态/模型与来源/沙箱与审批/计划/累计 token/事件数/日志路径），**不创建会话**；未激活时按持久化 `/cwd` 绑定算出真实 sessionId，并从磁盘会话日志（`sessionPersistence.inspect`，15s 缓存）读出模型/沙箱/审批/计划，不显示预览 id 与部署默认值 |
 
 - 实现：`setSandboxMode(session, mode)` 写入**会话日志的 `sandbox/mode` 事件**——重放即状态，随会话 resume 持久化，**下一次工具调用生效**；无需 profile 重启
 - 群内为**共享会话**，创建者/管理员切换对全群生效；升级到 `danger-full-access` 属危险操作，仅创建者/管理员可执行

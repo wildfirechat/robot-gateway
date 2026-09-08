@@ -21,15 +21,23 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { WildfireSessionConfig } from "./config.js";
-import type { ModelSelection } from "./model.js";
+import { persistSelection, readDurableSelection, type ModelSelection } from "./model.js";
 
 type RequiredSessionConfig = Required<WildfireSessionConfig>;
 
 /** Resolves the working directory for a conversation before agent creation. */
 export type CwdProvider = (key: string, sessionId: string) => Promise<string>;
 
-/** Resolves the model selection for a conversation before agent creation. */
-export type ModelProvider = (key: string) => Promise<ModelSelection>;
+/**
+ * Resolves the model selection for a conversation before agent creation.
+ * @param key - IM conversation key.
+ * @param session - live session when one already exists (resume path), so the
+ *   resolver can honour the session's durable model/effort record.
+ */
+export type ModelProvider = (key: string, session?: any) => Promise<ModelSelection>;
+
+/** Reads the in-memory runtime override for a conversation (if any). */
+export type ModelOverrideProvider = (key: string) => ModelSelection | undefined;
 
 /** Extra content blocks for a user turn (images via the attachment service). */
 export interface DispatchExtras {
@@ -142,6 +150,16 @@ export function normalizeCwd(cwd: string): string {
   return path.resolve(cwd);
 }
 
+/** 两个模型选择是否等价（provider/model/推理等级三者一致）。 */
+function sameSelection(a: ModelSelection | undefined, b: ModelSelection | undefined): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.provider === b.provider &&
+    a.model === b.model &&
+    (a.reasoningEffort ?? "") === (b.reasoningEffort ?? "")
+  );
+}
+
 export class AgentSessionManager {
   private ctx: any;
   private logger: any;
@@ -150,6 +168,7 @@ export class AgentSessionManager {
   private modelProvider: ModelProvider;
   /** 绑定 agent scope 的回调（subagent 事件等 scoped 监听，index.ts 注入）。 */
   private agentScopeBinder?: AgentScopeBinder;
+  private modelOverrideProvider?: ModelOverrideProvider;
   private sessions = new Map<string, ManagedSession>();
   /** 会话重建计数：key → cwd → epoch（仅 log 损坏/冲突时递增）。 */
   private epochByKeyCwd = new Map<string, Map<string, number>>();
@@ -255,7 +274,8 @@ export class AgentSessionManager {
     config: RequiredSessionConfig,
     cwdProvider: CwdProvider,
     modelProvider: ModelProvider,
-    agentScopeBinder?: AgentScopeBinder
+    agentScopeBinder?: AgentScopeBinder,
+    modelOverrideProvider?: ModelOverrideProvider
   ) {
     this.ctx = ctx;
     this.logger = logger;
@@ -263,6 +283,7 @@ export class AgentSessionManager {
     this.cwdProvider = cwdProvider;
     this.modelProvider = modelProvider;
     this.agentScopeBinder = agentScopeBinder;
+    this.modelOverrideProvider = modelOverrideProvider;
 
     // Bridge the durable session firehose to per-conversation subscribers.
     ctx.on("session/event", (session: any, event: SessionEvent) => {
@@ -413,6 +434,34 @@ export class AgentSessionManager {
       }
     }
 
+    // 会话级（工作现场）模型选择：
+    //  - 有运行时 override（本进程内显式切换过）→ 落盘成 model/selection，
+    //    重启/切目录后 resume 该会话仍能恢复；
+    //  - 否则读取会话已记录的选择（model/selection 事件 / request/header），
+    //    覆盖配置默认，让 resume 的会话保持上次用的模型与推理等级。
+    try {
+      const override = this.modelOverrideProvider?.(key);
+      const durable = readDurableSelection(handle.agent.session);
+      if (override) {
+        // 显式选择：立即生效 + 落盘（不依赖 modelProvider 是否已把它解析出来）
+        if (!sameSelection(selectionRef.current, override)) selectionRef.current = { ...override };
+        if (!sameSelection(durable, override)) {
+          persistSelection(handle.agent.session, override, this.logger);
+          this.logger?.info?.(
+            `[wildfire-agent] persisted model selection: key=${key}, ${override.provider}/${override.model}${override.reasoningEffort ? ` (effort=${override.reasoningEffort})` : ""}`
+          );
+        }
+      } else if (durable && !sameSelection(durable, selection)) {
+        selectionRef.current = { ...durable };
+        this.logger?.info?.(
+          `[wildfire-agent] restored model selection from session: key=${key}, ${durable.provider}/${durable.model}${durable.reasoningEffort ? ` (effort=${durable.reasoningEffort})` : ""}`
+        );
+      }
+    } catch (err: unknown) {
+      this.logger?.warn?.(`[wildfire-agent] model selection restore/persist failed: ${String(err)}`);
+    }
+    const effective = selectionRef.current ?? selection;
+
     const managed: ManagedSession = {
       key,
       sessionId,
@@ -425,7 +474,7 @@ export class AgentSessionManager {
     this.sessions.set(sessionId, managed);
     this.sessionIdToKey.set(sessionId, key);
     this.logger?.info?.(
-      `[wildfire-agent] session created: key=${key}, sessionId=${sessionId}, cwd=${norm}, model=${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (effort=${selection.reasoningEffort})` : ""}`
+      `[wildfire-agent] session created: key=${key}, sessionId=${sessionId}, cwd=${norm}, model=${effective.provider}/${effective.model}${effective.reasoningEffort ? ` (effort=${effective.reasoningEffort})` : ""}`
     );
     return handle.agent;
   }
@@ -511,11 +560,20 @@ export class AgentSessionManager {
    * the conversation. Returns false when no live session exists (the override
    * still applies to the next created session via `modelProvider`).
    */
+  /**
+   * Apply a new model selection to a live conversation. The selection is
+   * session-LIVE (takes effect on the agent's next request without resetting
+   * the conversation) and durable: it is appended to the session log as
+   * `model/selection`, so a restart or a `/cwd` round-trip restores it.
+   * Returns false when no live session exists (the in-memory override still
+   * applies to the next created session via `modelProvider`).
+   */
   applyModelLive(key: string, selection: ModelSelection): boolean {
     const sessionId = this.peekSessionId(key);
     const managed = this.sessions.get(sessionId);
     if (!managed) return false;
     managed.selection.current = { ...selection };
+    persistSelection(managed.handle.agent.session, selection, this.logger);
     this.logger?.info?.(
       `[wildfire-agent] model applied live: key=${key}, ${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (effort=${selection.reasoningEffort})` : ""}`
     );
@@ -808,7 +866,46 @@ export class AgentSessionManager {
    */
   async snapshotMetrics(key: string): Promise<Partial<TurnMetrics> | undefined> {
     const agent = await this.getAgent(key);
-    const snap = this.readProjections(agent?.session);
+    return this.metricsFromProjections(this.readProjections(agent?.session));
+  }
+
+  /**
+   * 读取**已激活**会话的累计统计，不创建 agent（`/session` 查询用）。
+   * 会话未激活时返回 undefined。
+   */
+  peekMetrics(key: string): Partial<TurnMetrics> | undefined {
+    const managed = this.sessions.get(this.peekSessionId(key));
+    if (!managed) return undefined;
+    return this.metricsFromProjections(this.readProjections(managed.handle.agent.session));
+  }
+
+  /**
+   * 会话诊断信息（不创建 agent；`/session` 与面板查询用）。
+   * @param key - IM 会话 key。
+   * @param cwdOverride - 已解析出的工作目录（未激活时由 workspace resolver 提供，
+   *   含持久化的 `/cwd` 绑定），用于算出**真实** sessionId 而不是预览 id。
+   */
+  peekSessionInfo(
+    key: string,
+    cwdOverride?: string
+  ): {
+    sessionId: string;
+    epoch: number;
+    cwd?: string;
+    live: boolean;
+    resolved: boolean;
+  } {
+    const cached = this.cwdByKey.get(key);
+    const cwd = cached ?? (cwdOverride ? normalizeCwd(cwdOverride) : undefined);
+    const epoch = cwd ? this.epochOf(key, cwd) : this.legacyEpochByKey.get(key) ?? 0;
+    const sessionId = cwd
+      ? this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, cwd, epoch)
+      : sessionIdForConversation(key, this.legacyEpochByKey.get(key) ?? 0);
+    return { sessionId, epoch, cwd, live: this.sessions.has(sessionId), resolved: cwd !== undefined };
+  }
+
+  /** 把投影快照映射成推送用的累计指标（无 usage 时 undefined）。 */
+  private metricsFromProjections(snap: ProjectionSnapshot | undefined): Partial<TurnMetrics> | undefined {
     if (!snap?.usage) return undefined;
     const usage = snap.usage;
     const ctx = snap.context;

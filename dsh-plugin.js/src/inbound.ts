@@ -58,8 +58,84 @@ import {
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
+import {
+  readDurableSelection,
+  readDurableSelectionFromEvents,
+  readLastEventData,
+  type ModelSelection,
+} from "./model.js";
 
 const pathJoin = path.join;
+
+/**
+ * 读取会话当前生效的模型选择。
+ * 传入 live session，让 `ModelSelector` 能读到会话级持久记录
+ * （`model/selection` / `request/header`）——显示值、图片能力判断与
+ * 实际请求保持一致。
+ */
+async function peekModelSelection(api: any, key: string): Promise<ModelSelection | undefined> {
+  let session: any;
+  try {
+    session = api.ctx?.get?.("agents")?.get?.(api.wildfireAgents.peekSessionId(key))?.session;
+  } catch {
+    session = undefined;
+  }
+  try {
+    return await api.models?.peek?.(key, session);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 未激活会话的持久状态（模型/沙箱/审批/计划/事件数）。
+ * 直接读磁盘上的会话日志（`sessionPersistence.inspect/load`），**不创建 agent**，
+ * 这样重启 dsh 后第一条消息之前，面板与 `/session` 也能显示真实值。
+ * 带 15s 缓存：面板轮询时不必反复解压长日志；会话一旦激活就走 live 路径。
+ */
+interface PersistedSessionState {
+  exists: boolean;
+  model?: ModelSelection;
+  sandbox?: string;
+  approval?: string;
+  planOn?: boolean;
+  eventCount?: number;
+}
+
+const persistedStateCache = new Map<string, { at: number; state: PersistedSessionState }>();
+const PERSISTED_STATE_TTL_MS = 15_000;
+
+async function readPersistedSessionState(
+  api: any,
+  sessionId: string
+): Promise<PersistedSessionState> {
+  if (!sessionId) return { exists: false };
+  const hit = persistedStateCache.get(sessionId);
+  if (hit && Date.now() - hit.at < PERSISTED_STATE_TTL_MS) return hit.state;
+
+  let events: any[] | undefined;
+  try {
+    const persistence = api.ctx?.get?.("sessionPersistence");
+    const inspection = persistence?.inspect
+      ? await persistence.inspect(sessionId)
+      : await persistence?.load?.(sessionId);
+    events = Array.isArray(inspection?.events) ? inspection.events : undefined;
+  } catch {
+    events = undefined; // 会话不存在 / 日志损坏：按「无历史会话」处理
+  }
+  const state: PersistedSessionState = events
+    ? {
+        exists: true,
+        model: readDurableSelectionFromEvents(events),
+        sandbox: readLastEventData(events, "sandbox/mode")?.mode,
+        approval: readLastEventData(events, "approval/policy")?.policy,
+        planOn: readLastEventData(events, "plan/mode")?.active === true,
+        eventCount: events.length,
+      }
+    : { exists: false };
+  persistedStateCache.set(sessionId, { at: Date.now(), state });
+  return state;
+}
 
 // ===== 会话处理模式（interrupt=后到打断先到 / queue=原串行排队），按会话 key 持久化 =====
 type ConvMode = "interrupt" | "queue";
@@ -523,7 +599,7 @@ export async function handleIncomingMessage(
 
   // Management commands: `/cwd` works in private and group chat; the rest are
   // private-chat only. All are admin-gated when admins are configured.
-  const cmdMatch = trimmed.match(/^\/(bind(?:-workspace)?|cwd|ls|model|effort|mode|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|kick|invite|mute|unmute|members)\b/);
+  const cmdMatch = trimmed.match(/^\/(bind(?:-workspace)?|cwd|ls|model|effort|mode|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|session|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
   // try/finally：sendDirectReply 在客户端断开时抛异常，必须保证 release()
@@ -880,7 +956,7 @@ export async function handleIncomingMessage(
     try {
       const sessionId = agents.peekSessionId(key);
       const cwd = await api.workspace.peek(key, sessionId).catch(() => undefined);
-      const model = await api.models?.peek?.(key).catch?.(() => undefined);
+      const model = await peekModelSelection(api, key);
       api.interactions?.pushStatus(key, {
         sessionId,
         ...(cwd ? { cwd } : {}),
@@ -1126,7 +1202,7 @@ async function handleCommand(
   conv: { type: number; target: string; line: number },
   isGroup: boolean
 ): Promise<void> {
-  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|kick|invite|mute|unmute|members)\s*/, "").trim();
+  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|session|kick|invite|mute|unmute|members)\s*/, "").trim();
   switch (cmd) {
     case "help":
       await handleHelpCommand(api, sender, conv, isGroup);
@@ -1154,6 +1230,9 @@ async function handleCommand(
       return;
     case "approval":
       await handleApprovalCommand(api, key, arg, sender, conv);
+      return;
+    case "session":
+      await handleSessionCommand(api, key, sender, conv);
       return;
     case "kick":
       await handleKickCommand(api, key, arg, sender, conv);
@@ -1253,6 +1332,7 @@ async function handleHelpCommand(
     lines.push("/compact — 压缩会话上下文");
     lines.push("/sandbox [模式] — 查看/切换沙箱权限模式（与权限预设同名时同时对齐审批策略）");
     lines.push("/approval [ask|never] — 查看/设置审批策略（never = 不弹审批，越权/写保护直接拒绝）");
+    lines.push("/session — 查看当前会话的 dsh 会话信息（sessionId/目录/状态/模型/沙箱/用量）");
     if (config.workspace?.allowCwdCommand || config.model?.allowModelCommand) {
       lines.push("/reset — 重置本会话（上下文清空）");
     }
@@ -1782,6 +1862,166 @@ async function handleApprovalCommand(
         : "（需要审批时会推送 DSH_Approval 卡片）"),
     api
   );
+}
+
+/** dsh 会话日志目录名：cwd 的 `/` 替换为 `-`，前后各加一个 `-`。 */
+function sessionLogPath(cwd: string, sessionId: string): string | undefined {
+  if (!cwd || !sessionId) return undefined;
+  const slug = `-${cwd.replace(/[/\\]/g, "-")}-`;
+  return pathJoin(homedir(), ".dsh", "sessions", slug, sessionId, "session.jsonl.zstd");
+}
+
+/**
+ * `/session` — 查看当前 IM 会话对应的 dsh 会话诊断信息（**不创建会话**）：
+ * sessionId / epoch / 工作目录 / 激活状态 / 模型与推理等级（含来源）/
+ * 沙箱与审批 / 累计 token 与上下文占用 / 事件数 / 会话日志路径。
+ *
+ * 未激活（例如刚重启 dsh、还没发消息）时，仍会解析持久化的 `/cwd` 绑定算出
+ * **真实** sessionId，并从磁盘会话日志读出模型/沙箱/审批/计划，而不是显示预览
+ * id 与部署默认值。
+ */
+async function handleSessionCommand(
+  api: any,
+  key: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  const previewId = api.wildfireAgents?.peekSessionId?.(key) ?? "";
+  // 未激活时也解析工作目录（含持久化 /cwd 绑定），用于算出真实 sessionId
+  let resolvedCwd: string | undefined;
+  try {
+    resolvedCwd = await api.workspace?.peek?.(key, previewId);
+  } catch {
+    resolvedCwd = undefined;
+  }
+  const info = api.wildfireAgents?.peekSessionInfo?.(key, resolvedCwd) ?? {
+    sessionId: previewId || "-",
+    epoch: 0,
+    cwd: resolvedCwd,
+    live: false,
+    resolved: resolvedCwd !== undefined,
+  };
+  const sessionId = String(info.sessionId ?? "");
+  const live = !!info.live;
+  let agent: any;
+  if (live) {
+    try {
+      agent = api.ctx?.get?.("agents")?.get?.(sessionId);
+    } catch {
+      agent = undefined;
+    }
+  }
+  const session = agent?.session;
+  // 未激活 → 读磁盘会话日志（不创建 agent），展示真实的持久状态
+  const persisted = live ? undefined : await readPersistedSessionState(api, sessionId);
+
+  const lines: string[] = [];
+  lines.push(`会话: ${key}（${key.startsWith("wildfire:group:") ? "群" : "私聊"}）`);
+  lines.push(
+    `SessionId: ${sessionId}` +
+      (info.resolved ? "" : "（预览 id：工作目录未解析，下一条消息才会派生正式 id）")
+  );
+  lines.push(`epoch: ${info.epoch}（>0 表示该目录的会话曾重建）`);
+
+  if (info.cwd) {
+    let cwdSource = "";
+    try {
+      cwdSource = api.workspace?.peekOverride?.(key) ? "（会话覆盖）" : "（配置默认）";
+    } catch {
+      cwdSource = "";
+    }
+    lines.push(`工作目录: ${info.cwd}${cwdSource}`);
+  } else {
+    lines.push("工作目录: 未解析（会话激活后确定）");
+  }
+
+  const statusText =
+    agent?.status === "running"
+      ? "运行中"
+      : agent?.status === "idle"
+        ? "空闲"
+        : live
+          ? String(agent?.status ?? "已激活")
+          : persisted?.exists
+            ? "未激活（磁盘上已有会话，下一条消息 resume）"
+            : "未激活（无历史会话，下一条消息新建）";
+  lines.push(`状态: ${statusText}`);
+
+  const liveSelection = live ? await peekModelSelection(api, key) : undefined;
+  const selection =
+    liveSelection ??
+    api.models?.peekOverride?.(key) ??
+    persisted?.model ??
+    (await peekModelSelection(api, key));
+  if (selection) {
+    let source = "配置默认";
+    if (api.models?.peekOverride?.(key)) source = "本次运行显式切换";
+    else if (live ? readDurableSelection(session) : persisted?.model) source = "会话记录";
+    lines.push(
+      `模型: ${selection.provider}/${selection.model}` +
+        (selection.reasoningEffort ? `（推理等级=${selection.reasoningEffort}）` : "") +
+        ` [${source}]`
+    );
+  }
+
+  // 沙箱 / 审批 / 计划：live 走服务，未激活走磁盘日志
+  let sandbox = persisted?.sandbox ?? "未知";
+  let sandboxSource = "";
+  try {
+    const policy = api.ctx?.get?.("sandboxPolicy");
+    if (policy) {
+      if (live && session) {
+        const override = policy.overrideOf(session);
+        sandbox = override ?? readPermissionState(api, session).sandbox ?? policy.defaultMode;
+        sandboxSource = override ? "（会话覆盖）" : "（部署默认）";
+      } else {
+        sandbox = persisted?.sandbox ?? policy.defaultMode;
+        sandboxSource = persisted?.sandbox ? "（磁盘会话记录）" : "（部署默认）";
+      }
+    }
+  } catch {
+    // sandbox-policy 不可用：保留已有值
+  }
+  let approvalShown = live ? readPermissionState(api, session).approval : persisted?.approval;
+  if (!approvalShown) {
+    try {
+      approvalShown = api.ctx?.get?.("approval")?.config?.policy;
+    } catch {
+      approvalShown = undefined;
+    }
+  }
+  lines.push(`沙箱: ${sandbox}${sandboxSource}    审批: ${approvalLabel(approvalShown)}`);
+
+  let planOn = persisted?.planOn === true;
+  if (live) {
+    try {
+      planOn = !!api.ctx?.get?.("planMode")?.get?.(agent)?.active;
+    } catch {
+      planOn = false;
+    }
+  }
+  lines.push(`计划模式: ${planOn ? "已开启" : "已关闭"}`);
+
+  const metrics = live ? api.wildfireAgents?.peekMetrics?.(key) : undefined;
+  if (metrics?.usage && metrics.usage.totalTokens > 0) {
+    lines.push(
+      `累计 tokens: ${metrics.usage.totalTokens}（命中缓存 ${metrics.cacheHitRatePct ?? 0}%）`
+    );
+  }
+  if (metrics?.context && metrics.context.usedTokens > 0) {
+    lines.push(
+      `上下文: ${metrics.context.usedTokens} / ${metrics.context.windowTokens}（${metrics.context.usedPct}%）`
+    );
+  }
+  const eventCount = session ? sessionEventCount(session) : persisted?.eventCount;
+  if (typeof eventCount === "number") lines.push(`事件数: ${eventCount}`);
+
+  const logPath = info.resolved ? sessionLogPath(String(info.cwd ?? ""), sessionId) : undefined;
+  if (logPath) {
+    lines.push(`日志: ${logPath}${existsSync(logPath) ? "" : "（尚未落盘）"}`);
+  }
+
+  await sendDirectReply(sender, conv, lines.join("\n"), api);
 }
 
 /**
@@ -2486,9 +2726,28 @@ async function authorizePanelCmd(
 
 /** 组合查询：聚合 AI 面板需要的数据（type=3 面板数据）。 */
 async function buildPanelData(api: any, key: string): Promise<Record<string, unknown>> {
-  const sessionId = api.wildfireAgents?.peekSessionId?.(key) ?? "";
-  const cwd = await api.workspace?.peek?.(key, sessionId).catch(() => undefined);
-  const modelSel = await api.models?.peek?.(key).catch(() => undefined);
+  const previewId = api.wildfireAgents?.peekSessionId?.(key) ?? "";
+  // 未激活时也解析工作目录（含持久化 /cwd 绑定），据此算出真实 sessionId
+  const cwd = await api.workspace?.peek?.(key, previewId).catch(() => undefined);
+  const info = api.wildfireAgents?.peekSessionInfo?.(key, cwd) ?? {
+    sessionId: previewId,
+    epoch: 0,
+    cwd,
+    live: false,
+    resolved: cwd !== undefined,
+  };
+  const sessionId = String(info.sessionId ?? previewId);
+  const live = !!info.live;
+  const agent = live ? api.ctx?.get?.("agents")?.get?.(sessionId) : undefined;
+  const session = agent?.session;
+  // 未激活 → 读磁盘会话日志，展示持久化的模型/沙箱/计划，而不是部署默认值
+  const persisted = live ? undefined : await readPersistedSessionState(api, sessionId);
+
+  const modelSel =
+    (live ? await peekModelSelection(api, key) : undefined) ??
+    api.models?.peekOverride?.(key) ??
+    persisted?.model ??
+    (await peekModelSelection(api, key));
   const catalog = (await api.models?.listCatalog?.().catch(() => [])) ?? [];
   const modelOptions = (catalog as Array<{ provider: string; id: string; name: string }>).map((e) => ({
     value: `${e.provider}/${e.id}`,
@@ -2499,36 +2758,36 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
     const support = await resolveEffortInfo(api, modelSel).catch(() => undefined);
     if (support) effortOptions = support.efforts.map((e: { id: string }) => e.id);
   }
-  // 沙箱当前值（会话未激活时用部署默认）
-  let sandboxCurrent = "workspace-write";
+  // 沙箱当前值：live 读会话；未激活读磁盘日志；都没有则部署默认
+  let sandboxCurrent = persisted?.sandbox ?? "workspace-write";
   let sandboxDebug = "policy=unavailable";
   try {
     const policy = api.ctx?.get?.("sandboxPolicy");
     if (policy) {
-      const agent = api.ctx?.get?.("agents")?.get?.(sessionId);
-      const session = agent?.session;
-      const override = session ? policy.overrideOf(session) : undefined;
-      sandboxCurrent = session ? (override ?? policy.defaultMode) : policy.defaultMode;
+      if (live && session) {
+        const override = policy.overrideOf(session);
+        sandboxCurrent = override ?? readPermissionState(api, session).sandbox ?? policy.defaultMode;
+      } else {
+        sandboxCurrent = persisted?.sandbox ?? policy.defaultMode;
+      }
       sandboxDebug =
-        `agentFound=${!!agent} sessionFound=${!!session} override=${override ?? "-"} ` +
-        // dsh >= 0.1.2-rc.1 removed `session.events` (use snapshotEvents()).
-        `default=${policy.defaultMode} events=${session?.events?.length ?? session?.snapshotEvents?.()?.length ?? "-"} ` +
-        `live=${(api.wildfireAgents?.listLiveAgents?.() ?? []).length}`;
+        `live=${live} source=${live ? "session" : persisted?.sandbox ? "disk-log" : "default"} ` +
+        `default=${policy.defaultMode} ` +
+        `events=${session?.events?.length ?? session?.snapshotEvents?.()?.length ?? persisted?.eventCount ?? "-"} ` +
+        `liveAgents=${(api.wildfireAgents?.listLiveAgents?.() ?? []).length}`;
     }
   } catch (err: any) {
     sandboxDebug = `policy error: ${err?.message ?? String(err)}`;
   }
-  // 计划模式当前值（会话未激活时为关）
-  let planOn = false;
-  try {
-    const planMode = api.ctx?.get?.("planMode");
-    const agent = api.ctx?.get?.("agents")?.get?.(sessionId);
-    if (planMode && agent) {
-      const current = planMode.get(agent);
-      planOn = !!current?.active;
+  // 计划模式：live 读服务；未激活读磁盘日志的 plan/mode
+  let planOn = persisted?.planOn === true;
+  if (live) {
+    try {
+      const planMode = api.ctx?.get?.("planMode");
+      if (planMode && agent) planOn = !!planMode.get(agent)?.active;
+    } catch {
+      planOn = false;
     }
-  } catch {
-    // 保持关
   }
   // 诊断：面板聚合结果（含沙箱解析过程）
   panelDebug(
@@ -3088,7 +3347,7 @@ async function handleModelCommand(
   const selector = api.models;
   if (!arg) {
     try {
-      const current = await selector.peek(key);
+      const current = (await peekModelSelection(api, key)) ?? (await selector.peek(key));
       const lines = [
         `当前模型: ${current.provider}/${current.model}${current.reasoningEffort ? ` (推理等级=${current.reasoningEffort})` : ""}`,
       ];
@@ -3211,7 +3470,7 @@ async function modelSupportsImage(api: any, key: string): Promise<boolean | null
   }
   if (!llm) return null;
   try {
-    const sel = await api.models?.peek?.(key);
+    const sel = await peekModelSelection(api, key);
     if (!sel) return null;
     const info = await llm.resolveModelInfo(sel.provider, sel.model);
     const modalities = info?.inputModalities;
@@ -3241,7 +3500,7 @@ async function handleEffortCommand(
   const selector = api.models;
   if (!arg) {
     try {
-      const current = await selector.peek(key);
+      const current = (await peekModelSelection(api, key)) ?? (await selector.peek(key));
       const lines = [`当前推理等级: ${current.reasoningEffort ?? "默认"}`];
       const support = await resolveEffortInfo(api, current);
       if (support) {
@@ -3258,7 +3517,7 @@ async function handleEffortCommand(
     return;
   }
 
-  const current = await selector.peek(key);
+  const current = (await peekModelSelection(api, key)) ?? (await selector.peek(key));
   // Validate against the exposed effort list when available; models without
   // one are set unchecked (nothing to validate against).
   const support = await resolveEffortInfo(api, current);
