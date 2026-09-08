@@ -9,10 +9,16 @@
  * - cards are updated in place via updateMessage (answered / approved /
  *   rejected / expired)
  *
- * Deployment note: `ctx.userQuestions` allows ONE provider per context. In the
- * `dsh web` profile the Host apiproxy already registers one, so our
- * registration throws `DUPLICATE_PROVIDER` there — we catch it, log, and rely
- * on the GUI. In an IM-first custom profile we are the only provider.
+ * Deployment note: the `ctx.userQuestions` seam differs by dsh version.
+ * - dsh <= 0.1.1-rc.2: one `registerProvider()` per context. In the `dsh web`
+ *   profile the Host apiproxy already registers one, so our registration
+ *   throws `DUPLICATE_PROVIDER` there — we catch it, log, and rely on the GUI.
+ *   In an IM-first custom profile we are the only provider.
+ * - dsh >= 0.1.2-rc.1: `registerProvider()` is gone; answerers compose on the
+ *   Agent-scoped `user-questions/request` Cordis waterfall. We register a
+ *   listener and call `next()` for conversations we do not own, so the Web GUI
+ *   (or any later answerer) still gets the request.
+ * The two seams are feature-detected at runtime, so one build serves both.
  */
 
 import { randomUUID } from "node:crypto";
@@ -260,18 +266,48 @@ export class InteractionManager {
     this.registered = true;
 
     if (this.config.askUserEnabled) {
+      // Shared answerer: map the asking agent back to its IM conversation.
+      // Throws when the agent is not one of ours (the registerProvider path
+      // turns that into a tool error; the waterfall path falls through to the
+      // next answerer instead).
+      const answer = async (request: any): Promise<any> => {
+        const key = request?.agent
+          ? this.resolveKeyForSession(String(request.agent.session?.id))
+          : undefined;
+        if (!key) throw new Error("no wildfire conversation for this agent");
+        return this.ask(key, request);
+      };
       try {
         const userQuestions = ctx.get("userQuestions");
-        userQuestions?.registerProvider?.({
-          ask: async (request: any) => {
+        if (typeof userQuestions?.registerProvider === "function") {
+          // dsh <= 0.1.1-rc.2: single UI provider registration.
+          userQuestions.registerProvider({ ask: answer });
+          this.logger?.info?.(
+            "[wildfire] userQuestions provider registered (registerProvider; ask_user via IM)"
+          );
+        } else {
+          // dsh >= 0.1.2-rc.1: `registerProvider()` was replaced by the
+          // Agent-scoped `user-questions/request` waterfall. Unscoped listeners
+          // receive scoped dispatch (dsh-scope filter), so registering on the
+          // root context is enough. `next()` keeps other answerers in play.
+          ctx.on("user-questions/request", async (request: any, next: () => Promise<any>) => {
             const key = request?.agent
               ? this.resolveKeyForSession(String(request.agent.session?.id))
               : undefined;
-            if (!key) throw new Error("no wildfire conversation for this agent");
-            return this.ask(key, request);
-          },
-        });
-        this.logger?.info?.("[wildfire] userQuestions provider registered (ask_user via IM)");
+            if (!key) return next();
+            try {
+              return await answer(request);
+            } catch (err: any) {
+              this.logger?.warn?.(
+                `[wildfire] userQuestions answerer failed (falling through): ${String(err?.message ?? err)}`
+              );
+              return next();
+            }
+          });
+          this.logger?.info?.(
+            "[wildfire] userQuestions answerer registered (waterfall user-questions/request; ask_user via IM)"
+          );
+        }
       } catch (err: any) {
         if (String(err?.code ?? err?.message ?? err).includes("DUPLICATE_PROVIDER")) {
           this.logger?.warn?.(

@@ -6,6 +6,81 @@
 
 设计文档：[DSH_INTEGRATION.md](../DSH_INTEGRATION.md)
 
+## 版本兼容性（dsh）
+
+| dsh 版本 | 状态 | 说明 |
+| --- | --- | --- |
+| **0.1.2-rc.1**（npm `latest` / `next`） | ✅ 已实测 | `userQuestions` 走 Agent 作用域瀑布流 `user-questions/request` |
+| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 走旧的 `userQuestions.registerProvider()` |
+| 0.1.3-alpha.2（npm `alpha`） | ⚠️ 部分兼容 | 会话事件 `assistant/chunk` 被移除（改为 `assistant/message.stream` 与 `agent/assistant-stream`），流式增量失效、退化为整段回复；其余功能正常 |
+
+插件在运行时按能力探测选择接口，**一份构建同时兼容新旧 dsh**：
+
+- `ctx.userQuestions.registerProvider()` 存在（≤ 0.1.1-rc.2）→ 注册 UI provider；
+- 不存在（≥ 0.1.2-rc.1）→ 在根 context 监听 `user-questions/request` 瀑布流；不属于本机器人的请求调用 `next()` 让给其它 answerer（例如 Web GUI）。
+
+`package.json` 的 peerDependencies 用 `>=0.1.0-rc.7 <0.1.1-0 || >=0.1.1-rc.1 <0.1.2-0 || >=0.1.2-rc.1 <0.1.3-0` 表达上述范围（node-semver 对预发布版本的匹配规则很严格，`>=0.1.0-rc.7`、`*` 之类都匹配不到 `0.1.2-rc.1`）。
+
+### 升级 dsh 到最新版
+
+```bash
+# 1. 升级 CLI（本机全局安装在 nvm 目录且属主是 root，需要 sudo）
+sudo npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+dsh --version
+
+# 2. 重新部署插件（SKIP_RESTART=1 只安装不重启）
+cd dsh-plugin.js && SKIP_RESTART=1 ./build-deploy.sh web
+
+# 3. 重启（会中断正在进行的会话；web profile 按端口定位 PID，
+#    实测该进程命令行对 pgrep/pkill 不可见，只能按 PID 杀）
+kill $(lsof -nP -iTCP:3080 -sTCP:LISTEN -t)
+cd /Users/rain/Workspace/robot-gateway && \
+  nohup node "$(command -v dsh)" --profile web >> ~/.dsh/dsh-wildfire.log 2>&1 &
+```
+
+> 升级后 `~/.dsh/profiles/node_modules` 里的符号链接会在首次启动时自动指向新 CLI 安装目录（dsh 自己托管该目录）；若启动报缺包，`rm -rf ~/.dsh/profiles/node_modules` 后重启即可。
+
+## 测试
+
+### 1. 自动自检（推荐：离线、不碰生产）
+
+```bash
+cd dsh-plugin.js
+./scripts/compat-check.sh                  # 用 PATH 上的 dsh
+./scripts/compat-check.sh --no-probe       # 跳过瀑布流探针
+./scripts/compat-check.sh /path/to/bin/dsh # 指定其它版本 dsh 验证
+```
+
+在临时 `DSH_HOME` 里用**假网关**（`ws://127.0.0.1:1`）启动插件并断言：
+
+- `plugin loaded`，无 `Cannot find package` / `plugin tree failed to load`；
+- `userQuestions` **只走一条**注册分支：≤ 0.1.1-rc.2 → `registerProvider`；≥ 0.1.2-rc.1 → `waterfall user-questions/request`；
+- 探针调用 `ctx.userQuestions.ask()` → 插件先收到、对非本机器人会话调用 `next()`，探针 answerer 拿到请求并返回（`PROBE_REACHED` + `ASK_RESOLVED`），证明瀑布流链路与「让行」语义正确。
+
+不接触 `~/.dsh`、不连真实网关、不影响运行中的实例；退出码 0=通过 / 1=失败（打印日志尾部）。
+
+### 2. 手工端到端（野火 IM）
+
+| 测试点 | 操作 | 预期 |
+| --- | --- | --- |
+| **ask_user 走 IM 卡片**（本次修复） | IM 里发：「用 ask_user_question 问我：咖啡还是茶？选项：咖啡/茶，别自己回答」 | 收到 DSH_Question 卡片；点选项或直接回文字；Agent 带答案继续 |
+| 流式回复 | 问一个需要较长输出的问题 | 气泡逐字更新（0.1.2 仍有 `assistant/chunk`） |
+| 权限审批 | 让 Agent 做一个需要审批的操作 | 收到 DSH_Approval 卡片，回「批准/拒绝」后继续 |
+| 会话保持 | 重启 dsh 后继续同一会话 | 上下文仍在（走 `resume`） |
+| 停止指令 | 发送「不要回复」类消息 | 气泡被取消（type 20），无正文 |
+
+### 3. 日志确认
+
+启动日志（dsh 的 stdout/stderr；用 `build-deploy.sh` 启动时在 `~/.dsh/dsh-wildfire.log`）应出现：
+
+```
+[wildfire] plugin loaded
+[wildfire] userQuestions answerer registered (waterfall user-questions/request; ask_user via IM)
+[wildfire] approval answerer registered (approvals via IM)
+```
+
+看到 `userQuestions provider registered (registerProvider; ...)` 说明跑的是 ≤ 0.1.1-rc.2 的旧 dsh，属正常分支（不是 bug）。
+
 ## 架构
 
 ```
@@ -51,7 +126,8 @@ dsh plugin --profile web add ./wildfirechat-dsh-wildfire-0.1.0.tgz
 #         robotSecret: your_robot_secret
 
 # 4. 启动（若 dsh web 已在运行，必须先停掉再启动，插件才会加载）
-pkill -f "dsh web"
+#    web profile 监听 3080，按端口反查 PID 最可靠
+kill $(lsof -nP -iTCP:3080 -sTCP:LISTEN -t)
 dsh web
 ```
 

@@ -6,6 +6,23 @@
 
 > DSH 是 DeepSeek 的 agent harness（`dsh` CLI，profile 化 Cordis 插件栈，含 `web`/`tui`/`headless` 等 profile）。其插件模型与 OpenClaw 的 channel 插件模型类似，本设计完全复用本项目 `openclaw-plugin.js` 的既有模式与代码。
 
+## DSH 版本兼容性
+
+| dsh 版本 | 状态 | 关键差异 |
+|------|------|---------|
+| **0.1.2-rc.1**（`latest` / `next`） | ✅ 已实测 | `ctx.userQuestions.registerProvider()` 被移除，改为 Agent 作用域瀑布流事件 `user-questions/request`；`session.events` 被移除（改用 `snapshotEvents()`） |
+| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 旧接口 `registerProvider()` |
+| 0.1.3-alpha.2（`alpha`） | ⚠️ 部分兼容 | 会话事件 `assistant/chunk` 被移除（改为 `assistant/message.stream` + `agent/assistant-stream`），流式增量失效、退化为整段回复 |
+
+插件在 `apply()`/`register()` 里按能力探测选择接口，一份构建同时兼容新旧版本：
+
+- `registerProvider` 存在 → 注册 UI provider（≤ 0.1.1-rc.2）；
+- 不存在 → 监听 `user-questions/request` 瀑布流（≥ 0.1.2-rc.1）；非本机器人会话调用 `next()` 让给其它 answerer（Web GUI 等）。
+
+其余用到的接口（`agents.create/resume/get`、`agent.followup/whenIdle/status/cancel`、`session/event` firehose、`turn/start|end`、`tool/call|result`、`assistant/message`、`goal/change`、`subagent/start|end`、`sessionProjections.snapshot`、`llm.listProviders/listModels/resolveModelInfo`、`sandboxPolicy.defaultMode/overrideOf`、`goals.get/pause/resume`、`jobs.list`、`planMode.get`、`compaction.compactNow`、`agentPresets.mount`、`systemPrompt.context`、`attachments.saveImages`）在 0.1.0-rc.7 → 0.1.2-rc.1 之间均未变化。
+
+升级步骤（含 sudo 与重启命令）见 `dsh-plugin.js/README.md` 的「版本兼容性（dsh）」一节；离线自检脚本 `dsh-plugin.js/scripts/compat-check.sh` 在临时 `DSH_HOME` + 假网关下验证上述两条注册分支与瀑布流「让行」语义，不影响运行中的实例。
+
 ## 设计目标
 
 | 目标 | 说明 |

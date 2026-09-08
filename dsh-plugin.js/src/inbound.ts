@@ -523,7 +523,7 @@ export async function handleIncomingMessage(
 
   // Management commands: `/cwd` works in private and group chat; the rest are
   // private-chat only. All are admin-gated when admins are configured.
-  const cmdMatch = trimmed.match(/^\/(bind(?:-workspace)?|cwd|ls|model|effort|mode|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\b/);
+  const cmdMatch = trimmed.match(/^\/(bind(?:-workspace)?|cwd|ls|model|effort|mode|reset|allow|disallow|allowlist|create(?:-group)?|destroy(?:-group)?|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|kick|invite|mute|unmute|members)\b/);
 
   // Unknown `/xxx` commands get a hint instead of being sent to the agent.
   // try/finally：sendDirectReply 在客户端断开时抛异常，必须保证 release()
@@ -1126,7 +1126,7 @@ async function handleCommand(
   conv: { type: number; target: string; line: number },
   isGroup: boolean
 ): Promise<void> {
-  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|kick|invite|mute|unmute|members)\s*/, "").trim();
+  const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|kick|invite|mute|unmute|members)\s*/, "").trim();
   switch (cmd) {
     case "help":
       await handleHelpCommand(api, sender, conv, isGroup);
@@ -1151,6 +1151,9 @@ async function handleCommand(
       return;
     case "sandbox":
       await handleSandboxCommand(api, key, arg, sender, conv);
+      return;
+    case "approval":
+      await handleApprovalCommand(api, key, arg, sender, conv);
       return;
     case "kick":
       await handleKickCommand(api, key, arg, sender, conv);
@@ -1248,7 +1251,8 @@ async function handleHelpCommand(
     }
     lines.push("/plan [on|off] — 查看/开关计划模式");
     lines.push("/compact — 压缩会话上下文");
-    lines.push("/sandbox [模式] — 查看/切换沙箱权限模式");
+    lines.push("/sandbox [模式] — 查看/切换沙箱权限模式（与权限预设同名时同时对齐审批策略）");
+    lines.push("/approval [ask|never] — 查看/设置审批策略（never = 不弹审批，越权/写保护直接拒绝）");
     if (config.workspace?.allowCwdCommand || config.model?.allowModelCommand) {
       lines.push("/reset — 重置本会话（上下文清空）");
     }
@@ -1513,10 +1517,58 @@ const SANDBOX_MODE_LABELS: Record<string, string> = {
 };
 
 /**
+ * 会话权限状态（sandbox / approval 两个独立开关 + 预设名）。
+ * dsh 0.1.2+ 由 `permission-presets` 注册的 `permissions` 投影提供；
+ * 投影不可用时返回空对象（调用方降级为「未知」）。
+ */
+function readPermissionState(
+  api: any,
+  session: any
+): { preset?: string; sandbox?: string; approval?: string } {
+  if (!session) return {};
+  try {
+    const state = api.ctx?.get?.("sessionProjections")?.stateOf?.(session, "permissions");
+    if (state) {
+      return {
+        preset: state.preset ?? undefined,
+        sandbox: state.sandbox ?? undefined,
+        approval: state.approval ?? undefined,
+      };
+    }
+  } catch {
+    // 老版本 dsh 没有 permissions 投影：降级
+  }
+  return {};
+}
+
+/** Human labels for the approval policy (dsh-user-approval). */
+const APPROVAL_LABELS: Record<string, string> = {
+  ask: "ask（需要审批时弹卡片）",
+  never: "never（不弹审批，越权/写保护直接拒绝）",
+};
+
+function approvalLabel(value?: string): string {
+  return value ? (APPROVAL_LABELS[value] ?? value) : "未知";
+}
+
+/** 会话事件数（0.1.2 移除了 session.events，改用 snapshotEvents()）。 */
+function sessionEventCount(session: any): number | string {
+  const n = session?.events?.length ?? session?.snapshotEvents?.()?.length;
+  return typeof n === "number" ? n : "-";
+}
+
+/**
  * `/sandbox [mode]` — read or switch the conversation's sandbox permission
  * mode (`ctx.sandboxPolicy`, dsh-sandbox-policy). The override is one
  * `sandbox/mode` event on the session log: it takes effect on the next
  * confined call (bash/fs) and survives resume.
+ *
+ * dsh 把「沙箱模式」与「审批策略」设计成两个独立开关，权限预设只是把两者
+ * 捆在一起的快捷方式（read-only / workspace-write → approval=ask，
+ * danger-full-access → approval=never）。只写 sandbox 会留下
+ * 「沙箱已收紧但审批仍为 never」的隐蔽状态：需要审批的操作会直接失败而不弹卡片。
+ * 因此 mode 与预设同名时走 `permissionPresets.set()`（两个开关一起写）；
+ * 非同名（部署自定义模式）才退回只写 sandbox，并显式提示 approval 未变。
  */
 async function handleSandboxCommand(
   api: any,
@@ -1541,25 +1593,54 @@ async function handleSandboxCommand(
   const agents = api.ctx?.get?.("agents");
   const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
   const session = agent?.session;
+  const perm = readPermissionState(api, session);
+
+  let presets: any;
+  try {
+    presets = api.ctx?.get?.("permissionPresets");
+  } catch {
+    presets = undefined;
+  }
+  let presetNames: string[] = [];
+  try {
+    presetNames = Array.from(presets?.names ?? []) as string[];
+  } catch {
+    presetNames = [];
+  }
 
   if (!arg) {
+    const lines: string[] = [];
     if (!session) {
-      await sendTip(
-        sender,
-        conv,
-        `当前沙箱模式: ${modeLabel(policy.defaultMode)}（部署默认；会话激活后可按会话覆盖）\n可选: ${modeList}`,
-        api
-      );
-      return;
+      let deploymentApproval: string | undefined;
+      try {
+        deploymentApproval = api.ctx?.get?.("approval")?.config?.policy;
+      } catch {
+        deploymentApproval = undefined;
+      }
+      lines.push(`当前沙箱模式: ${modeLabel(policy.defaultMode)}（部署默认；会话激活后可按会话覆盖）`);
+      lines.push(`当前审批策略: 会话未激活（部署默认 ${approvalLabel(deploymentApproval)}）`);
+    } else {
+      const override = policy.overrideOf(session);
+      const effective = override ?? policy.defaultMode;
+      lines.push(`当前沙箱模式: ${modeLabel(effective)}（${override ? "会话覆盖" : "部署默认"}）`);
+      lines.push(`当前审批策略: ${approvalLabel(perm.approval)}`);
+      if (presets && session) {
+        try {
+          lines.push(`当前权限预设: ${presets.current(session)}`);
+        } catch {
+          // 忽略：预设服务读取失败不影响其余信息
+        }
+      }
     }
-    const override = policy.overrideOf(session);
-    const effective = override ?? policy.defaultMode;
-    await sendTip(
-      sender,
-      conv,
-      `当前沙箱模式: ${modeLabel(effective)}（${override ? "会话覆盖" : "部署默认"}）\n可选: ${modeList}\n用法: /sandbox <mode>`,
-      api
-    );
+    lines.push(`可选沙箱: ${modeList}`);
+    if (presetNames.length > 0) {
+      lines.push(`同名预设（沙箱+审批一起切换）: ${presetNames.join(" / ")}`);
+    }
+    lines.push("用法: /sandbox <mode>；/approval ask|never");
+    if (perm.approval === "never") {
+      lines.push("⚠️ 当前 approval=never：需要审批的操作会被直接拒绝，不会弹卡片（/approval ask 可打开）");
+    }
+    await sendTip(sender, conv, lines.join("\n"), api);
     return;
   }
 
@@ -1572,6 +1653,33 @@ async function handleSandboxCommand(
     await sendTip(sender, conv, "会话未激活（请先发送一条消息激活会话）", api);
     return;
   }
+
+  // 与权限预设同名 → 走预设写入口，sandbox 与 approval 一起对齐。
+  if (presets && presetNames.includes(arg)) {
+    try {
+      presets.set(session, arg);
+    } catch (err: any) {
+      await sendTip(sender, conv, `切换权限预设失败: ${err?.message ?? String(err)}`, api);
+      return;
+    }
+    const after = readPermissionState(api, session);
+    api.logger?.info?.(`[wildfire] /sandbox: key=${key}, preset=${arg}, by=${sender}`);
+    panelDebug(
+      api?.logger,
+      `/sandbox key=${key} preset=${arg} by=${sender} session=${session?.id ?? "-"} ` +
+        `sandbox=${after.sandbox ?? "-"} approval=${after.approval ?? "-"} events=${sessionEventCount(session)}`
+    );
+    await sendTip(
+      sender,
+      conv,
+      `已切换到权限预设 ${arg}：沙箱=${modeLabel(after.sandbox ?? arg)}，审批=${approvalLabel(after.approval)}\n` +
+        "下一次工具调用生效（随会话持久化）",
+      api
+    );
+    return;
+  }
+
+  // 非预设同名（部署自定义模式）：只写 sandbox，并明确提示审批策略未变。
   try {
     setSandboxMode(session, arg);
   } catch (err: any) {
@@ -1583,12 +1691,95 @@ async function handleSandboxCommand(
   panelDebug(
     api?.logger,
     `/sandbox key=${key} mode=${arg} by=${sender} session=${session?.id ?? "-"} ` +
-      `overrideAfter=${policy.overrideOf(session) ?? "-"} default=${policy.defaultMode} events=${session?.events?.length ?? "-"}`
+      `overrideAfter=${policy.overrideOf(session) ?? "-"} default=${policy.defaultMode} ` +
+      `approval=${readPermissionState(api, session).approval ?? "-"} events=${sessionEventCount(session)}`
+  );
+  const approvalNote =
+    perm.approval === "never"
+      ? "\n⚠️ 审批策略仍为 never：需要审批的操作会被直接拒绝，不会弹卡片（/approval ask 可打开）"
+      : "";
+  await sendTip(
+    sender,
+    conv,
+    `沙箱模式已切换为 ${modeLabel(arg)}，下一次工具调用生效（随会话持久化）${approvalNote}`,
+    api
+  );
+}
+
+/**
+ * `/approval [ask|never]` — 查看/设置会话的审批策略（`ctx.approval`，
+ * dsh-user-approval）。与 `/sandbox` 的沙箱开关相互独立：`never` 时 dsh 不会
+ * emit `approval/request`，插件的 IM 审批卡片也就不会被调用，需要审批的操作
+ * 直接失败（fail closed）。
+ */
+async function handleApprovalCommand(
+  api: any,
+  key: string,
+  arg: string,
+  sender: string,
+  conv: { type: number; target: string; line: number }
+): Promise<void> {
+  let approval: any;
+  try {
+    approval = api.ctx?.get?.("approval");
+  } catch {
+    approval = undefined;
+  }
+  if (!approval?.setPolicy) {
+    await sendTip(sender, conv, "approval 服务不可用（当前 profile 未加载 user-approval）", api);
+    return;
+  }
+  const agents = api.ctx?.get?.("agents");
+  const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
+  const session = agent?.session;
+  const current = readPermissionState(api, session).approval;
+
+  if (!arg) {
+    const deployment = approval?.config?.policy;
+    const currentText = session
+      ? approvalLabel(current)
+      : `会话未激活（部署默认 ${approvalLabel(deployment)}）`;
+    await sendTip(
+      sender,
+      conv,
+      `当前审批策略: ${currentText}\n可选: ask / never\n用法: /approval <ask|never>`,
+      api
+    );
+    return;
+  }
+
+  const value = arg.toLowerCase();
+  if (value !== "ask" && value !== "never") {
+    await sendTip(sender, conv, `无效审批策略: ${arg}\n可选: ask / never`, api);
+    return;
+  }
+  if (!agent) {
+    await sendTip(sender, conv, "会话未激活（请先发送一条消息激活会话）", api);
+    return;
+  }
+  if (current === value) {
+    await sendTip(sender, conv, `审批策略已经是 ${approvalLabel(value)}`, api);
+    return;
+  }
+  try {
+    approval.setPolicy(agent, value);
+  } catch (err: any) {
+    await sendTip(sender, conv, `审批策略切换失败: ${err?.message ?? String(err)}`, api);
+    return;
+  }
+  api.logger?.info?.(`[wildfire] /approval: key=${key}, policy=${value}, by=${sender}`);
+  panelDebug(
+    api?.logger,
+    `/approval key=${key} policy=${value} by=${sender} session=${session?.id ?? "-"} ` +
+      `sandbox=${readPermissionState(api, session).sandbox ?? "-"} events=${sessionEventCount(session)}`
   );
   await sendTip(
     sender,
     conv,
-    `沙箱模式已切换为 ${modeLabel(arg)}，下一次工具调用生效（随会话持久化）`,
+    `审批策略已切换为 ${approvalLabel(value)}` +
+      (value === "never"
+        ? "（需要审批的操作会直接拒绝，不再弹卡片）"
+        : "（需要审批时会推送 DSH_Approval 卡片）"),
     api
   );
 }
@@ -2320,7 +2511,8 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
       sandboxCurrent = session ? (override ?? policy.defaultMode) : policy.defaultMode;
       sandboxDebug =
         `agentFound=${!!agent} sessionFound=${!!session} override=${override ?? "-"} ` +
-        `default=${policy.defaultMode} events=${session?.events?.length ?? "-"} ` +
+        // dsh >= 0.1.2-rc.1 removed `session.events` (use snapshotEvents()).
+        `default=${policy.defaultMode} events=${session?.events?.length ?? session?.snapshotEvents?.()?.length ?? "-"} ` +
         `live=${(api.wildfireAgents?.listLiveAgents?.() ?? []).length}`;
     }
   } catch (err: any) {
