@@ -44,6 +44,12 @@ import {
   type AgentQuestionPayload,
 } from "./protocol.js";
 
+/**
+ * 任务卡（type 208）里**已完成**任务项最多保留的条数；运行中/等待中的项不受限。
+ * 防止长会话里 subagent 完成记录无限累积（详见 `pruneTaskItems`）。
+ */
+const MAX_FINISHED_TASK_ITEMS = 12;
+
 /** 目标工具状态（goal tool，随 DSH_Goal 卡片推送）。 */
 export interface GoalState {
   phase: string;
@@ -846,6 +852,7 @@ export class InteractionManager {
         });
       }
       this.taskItems.set(key, byKey);
+      this.pruneTaskItems(key);
       this.flushTaskCard(key);
     } catch (err: any) {
       this.logger?.warn?.(`[wildfire] task card job sync failed: ${String(err)}`);
@@ -898,7 +905,42 @@ export class InteractionManager {
       this.taskItems.set(key, byKey);
     }
     byKey.set(taskId, item);
+    this.pruneTaskItems(key);
     this.flushTaskCard(key);
+  }
+
+  /** 终态（不会再变）的任务项：running/waiting 之外都算。 */
+  private isFinishedTask(status: AgentTaskItem["status"]): boolean {
+    return status !== "running" && status !== "waiting";
+  }
+
+  /**
+   * 修剪任务项：**运行中/等待中的项全保留**，已完成项只留最近
+   * {@link MAX_FINISHED_TASK_ITEMS} 条。
+   *
+   * 背景：每次派生 subagent 都会新增一条（key = runId），完成事件只更新状态、
+   * 从不删除；长会话里会累积成百上千条，任务卡（type 208 原地更新）就越滚越大
+   * ——曾出现单条任务卡里上百条历史任务。job 项虽然每轮 turn/end 由
+   * `jobs.list()` 重建，同样受这道闸约束。
+   */
+  private pruneTaskItems(key: string): void {
+    const byKey = this.taskItems.get(key);
+    if (!byKey) return;
+    const finished: Array<[string, AgentTaskItem]> = [];
+    for (const entry of byKey) {
+      if (this.isFinishedTask(entry[1].status)) finished.push(entry);
+    }
+    if (finished.length <= MAX_FINISHED_TASK_ITEMS) return;
+    finished.sort((a, b) => (b[1].updatedAt ?? 0) - (a[1].updatedAt ?? 0));
+    let dropped = 0;
+    for (const [id] of finished.slice(MAX_FINISHED_TASK_ITEMS)) {
+      if (byKey.delete(id)) dropped += 1;
+    }
+    if (dropped > 0) {
+      this.logger?.debug?.(
+        `[wildfire] task items pruned: key=${key}, dropped=${dropped}, kept=${byKey.size}`
+      );
+    }
   }
 
   /** 向会话发/更新任务卡片（一张卡：首次 sendCard，之后 updateMessage）。 */

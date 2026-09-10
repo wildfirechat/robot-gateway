@@ -585,6 +585,11 @@ interface AgentRef {
 - **kind 从协议概念降为开放字符串**：`subagent`/`job` 只是 DSH 的具体取值；客户端按
   未知 kind 通用渲染（图标 map + `⚪` 兜底，现状已天然兼容）
 - 卡片更新方式不变：同 `flowId` 的消息由插件 `updateMessage` 原地更新
+- **保留策略（插件侧）**：任务项按 `id` 原地更新；**运行中/等待中的项永不丢弃**，
+  已完成项只保留最近 **12** 条（`MAX_FINISHED_TASK_ITEMS` / `pruneTaskItems`）。
+  背景：subagent 每次派生都会新增一条（key = runId），完成事件只更新状态、从不删除，
+  长会话里会让同一张卡累积上百条历史任务（载荷几十 KB）；job 项虽然每轮 `turn/end`
+  由 `jobs.list()` 重建，也受同一道闸约束
 
 ### 9.6 客户端渲染规范 v2
 
