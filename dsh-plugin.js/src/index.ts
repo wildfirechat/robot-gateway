@@ -286,7 +286,18 @@ export function apply(ctx: any, config: any): void {
       (key: string, session?: any) => api.models.resolve(key, session),
       // 在每个 agent scope 绑定 subagent 事件 → 任务卡片（scoped 事件全局监听不到）
       (agentCtx: any, agent?: any) => api.interactions.bindAgentScope(agentCtx, agent),
-      (key: string) => api.models.peekOverride(key)
+      (key: string) => api.models.peekOverride(key),
+      // preset 挂载失败 → 该会话的 agent 没有任何工具：必须让用户看到（一次性告警），
+      // 而不是只在日志里 warn 一声继续跑。
+      (key: string, presetId: string, message: string) => {
+        api.interactions.notifyWarning(
+          key,
+          `preset-mount:${presetId}`,
+          `⚠️ 本会话的 agent preset「${presetId}」挂载失败，Agent 将没有任何工具（只能输出文本、无法执行操作）。\n` +
+            `原因: ${message}\n` +
+            "请检查该 profile 的 preset 组成（agent-presets 及其依赖的 Host 模块）后重启 dsh。"
+        );
+      }
     ),
   };
 

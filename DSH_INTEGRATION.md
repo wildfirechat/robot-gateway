@@ -10,16 +10,20 @@
 
 | dsh 版本 | 状态 | 关键差异 |
 |------|------|---------|
+| **0.1.5-rc.3** | ✅ 已实测 | 流式改为 `agent/assistant-stream`（`assistant/chunk` 已从 known-event-types 移除）；`agentPresets.list()` 变异步、返回带 `id` 的行；IM 专用 profile 需自行补齐 preset 及其 Host 依赖 |
 | **0.1.2-rc.1**（`latest` / `next`） | ✅ 已实测 | `ctx.userQuestions.registerProvider()` 被移除，改为 Agent 作用域瀑布流事件 `user-questions/request`；`session.events` 被移除（改用 `snapshotEvents()`） |
-| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 旧接口 `registerProvider()` |
-| 0.1.3-alpha.2（`alpha`） | ⚠️ 部分兼容 | 会话事件 `assistant/chunk` 被移除（改为 `assistant/message.stream` + `agent/assistant-stream`），流式增量失效、退化为整段回复 |
+| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 旧接口 `registerProvider()`；流式走会话事件 `assistant/chunk` |
+| 0.1.3+（含 alpha） | ✅ 已适配 | `assistant/chunk` → `agent/assistant-stream`；插件两条路径都接并按 `(attemptId, index)` 去重 |
 
 插件在 `apply()`/`register()` 里按能力探测选择接口，一份构建同时兼容新旧版本：
 
 - `registerProvider` 存在 → 注册 UI provider（≤ 0.1.1-rc.2）；
-- 不存在 → 监听 `user-questions/request` 瀑布流（≥ 0.1.2-rc.1）；非本机器人会话调用 `next()` 让给其它 answerer（Web GUI 等）。
+- 不存在 → 监听 `user-questions/request` 瀑布流（≥ 0.1.2-rc.1）；非本机器人会话调用 `next()` 让给其它 answerer（Web GUI 等）；
+- 流式增量：会话事件 `assistant/chunk`（≤0.1.2）与 process-local `agent/assistant-stream`（≥0.1.3）双路径，后者合成同构事件复用同一套增量处理；根 ctx 监听器即可收到 scoped 分发。
 
-其余用到的接口（`agents.create/resume/get`、`agent.followup/whenIdle/status/cancel`、`session/event` firehose、`turn/start|end`、`tool/call|result`、`assistant/message`、`goal/change`、`subagent/start|end`、`sessionProjections.snapshot`、`llm.listProviders/listModels/resolveModelInfo`、`sandboxPolicy.defaultMode/overrideOf`、`goals.get/pause/resume`、`jobs.list`、`planMode.get`、`compaction.compactNow`、`agentPresets.mount`、`systemPrompt.context`、`attachments.saveImages`）在 0.1.0-rc.7 → 0.1.2-rc.1 之间均未变化。
+> **preset 组成的坑（0.1.5 实测）**：IM 专用 profile 若与 `dsh-web-app` 一样禁用 base 的工具行、改由 preset 挂载，必须补上 `@deepseek-ai/dsh-agent-presets` 及其依赖的 Host 模块（如 `@deepseek-ai/dsh-tool-subagent/model-selection-settings`）；缺任何一项都会导致 preset 挂载失败、agent 以空全局层发布（**没有任何工具**）。插件现在启动时校验 preset 名（error 级列出可选值），挂载失败时向该会话发一次性 IM 告警，不再静默降级。
+
+其余用到的接口（`agents.create/resume/get`、`agent.followup/whenIdle/status/cancel`、`session/event` firehose、`turn/start|end`、`tool/call|result`、`assistant/message`、`goal/change`、`subagent/start|end`、`sessionProjections.snapshot`、`llm.listProviders/listModels/resolveModelInfo`、`sandboxPolicy.defaultMode/overrideOf`、`goals.get/pause/resume`、`jobs.list`、`planMode.get`、`compaction.compactNow`、`agentPresets.mount`、`systemPrompt.context`、`attachments.saveImages`）在 0.1.0-rc.7 → 0.1.5-rc.3 之间保持可用。
 
 升级步骤（含 sudo 与重启命令）见 `dsh-plugin.js/README.md` 的「版本兼容性（dsh）」一节；离线自检脚本 `dsh-plugin.js/scripts/compat-check.sh` 在临时 `DSH_HOME` + 假网关下验证上述两条注册分支与瀑布流「让行」语义，不影响运行中的实例。
 

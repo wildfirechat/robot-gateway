@@ -264,6 +264,23 @@ export class InteractionManager {
   }
 
   /**
+   * 向会话发一条**一次性**告警文本（同一 key + code 只发一次）。
+   * 用于「agent preset 挂载失败 → 本会话没有工具」这类必须让用户看到的降级：
+   * 插件仍会继续提供服务，但不能让它悄悄发生。
+   * 会话未激活（没记住回复目标）时丢弃，只留日志。
+   */
+  notifyWarning(key: string, code: string, text: string): void {
+    const target = this.getConversation(key);
+    if (!target) return;
+    const id = `${code}:${key}`;
+    if (this.warnedKeys.has(id)) return;
+    this.warnedKeys.add(id);
+    void this.cards.sendText(target, text).catch((err: unknown) => {
+      this.logger?.warn?.(`[wildfire] warning message send failed: ${String(err)}`);
+    });
+  }
+
+  /**
    * Register the userQuestions provider and the approval answerer.
    * Safe to call once; swallows DUPLICATE_PROVIDER from the web profile.
    */
@@ -692,6 +709,8 @@ export class InteractionManager {
   private boundTaskScopes = new WeakSet<object>();
   /** key → 任务卡发送中收到的"脏"标记：sendCard 落定后补一次刷新（修并发丢失窗口）。 */
   private taskCardDirty = new Set<string>();
+  /** 已发过的一次性告警（`${code}:${key}`）：同一问题只提醒一次，避免刷屏。 */
+  private warnedKeys = new Set<string>();
   /** 全局 ctx（registerTaskFeed 注入，用于 turn/end 后把后台任务同步进卡片）。 */
   private ctx: any;
 
@@ -1021,6 +1040,7 @@ export class InteractionManager {
     this.taskCardPending.clear();
     this.taskCardDirty.clear();
     this.taskItems.clear();
+    this.warnedKeys.clear();
     for (const pending of this.pendingQuestions.values()) {
       clearTimeout(pending.timer);
       pending.resolve({ answers: [] });

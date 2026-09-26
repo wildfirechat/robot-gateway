@@ -10,16 +10,20 @@
 
 | dsh 版本 | 状态 | 说明 |
 | --- | --- | --- |
-| **0.1.2-rc.1**（npm `latest` / `next`） | ✅ 已实测 | `userQuestions` 走 Agent 作用域瀑布流 `user-questions/request` |
-| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 走旧的 `userQuestions.registerProvider()` |
-| 0.1.3-alpha.2（npm `alpha`） | ⚠️ 部分兼容 | 会话事件 `assistant/chunk` 被移除（改为 `assistant/message.stream` 与 `agent/assistant-stream`），流式增量失效、退化为整段回复；其余功能正常 |
+| **0.1.5-rc.3** | ✅ 已实测 | 流式走 `agent/assistant-stream`；`userQuestions` 走瀑布流；preset 需自行组成（见下） |
+| 0.1.2-rc.1（npm `latest` / `next`） | ✅ 已实测 | `userQuestions` 走 Agent 作用域瀑布流 `user-questions/request` |
+| 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 走旧的 `userQuestions.registerProvider()`；流式走会话事件 `assistant/chunk` |
+| 0.1.3+（含 alpha） | ✅ 已适配 | 会话事件 `assistant/chunk` 被移除，改为 process-local 的 `agent/assistant-stream`；插件两条路径都接，按 `(attemptId, index)` 去重 |
 
 插件在运行时按能力探测选择接口，**一份构建同时兼容新旧 dsh**：
 
 - `ctx.userQuestions.registerProvider()` 存在（≤ 0.1.1-rc.2）→ 注册 UI provider；
-- 不存在（≥ 0.1.2-rc.1）→ 在根 context 监听 `user-questions/request` 瀑布流；不属于本机器人的请求调用 `next()` 让给其它 answerer（例如 Web GUI）。
+- 不存在（≥ 0.1.2-rc.1）→ 在根 context 监听 `user-questions/request` 瀑布流；不属于本机器人的请求调用 `next()` 让给其它 answerer（例如 Web GUI）；
+- 流式增量：老版本读会话事件 `assistant/chunk`，新版本（≥ 0.1.3）监听 `agent/assistant-stream` 并把 `text-delta` 帧合成为同构事件复用同一套推送逻辑（根 ctx 监听器即可收到 scoped 分发）。
 
-`package.json` 的 peerDependencies 用 `>=0.1.0-rc.7 <0.1.1-0 || >=0.1.1-rc.1 <0.1.2-0 || >=0.1.2-rc.1 <0.1.3-0` 表达上述范围（node-semver 对预发布版本的匹配规则很严格，`>=0.1.0-rc.7`、`*` 之类都匹配不到 `0.1.2-rc.1`）。
+`package.json` 的 peerDependencies 按「小版本行」逐条列出（node-semver 对预发布版本的匹配规则很严格：版本带 prerelease 时，只有同 `major.minor.patch` 且带 prerelease 的比较符才算匹配，`>=0.1.0-rc.7`、`*` 之类都匹配不到 `0.1.5-rc.3`）。
+
+> **IM 专用 profile 的 preset 组成**：若 profile 只挂 `dsh-base` 并禁用了 base 的工具行（与 `dsh-web-app` 一样改由 preset 挂载），必须自行补上 `@deepseek-ai/dsh-agent-presets` 及其依赖的 Host 模块（例如 `@deepseek-ai/dsh-tool-subagent/model-selection-settings`），否则 preset 挂载失败、agent 会**没有任何工具**。插件启动时会校验 preset 是否存在（error 级报出可选值），挂载失败时还会向该会话发一次 IM 告警。
 
 ### 升级 dsh 到最新版
 
@@ -64,7 +68,7 @@ cd dsh-plugin.js
 | 测试点 | 操作 | 预期 |
 | --- | --- | --- |
 | **ask_user 走 IM 卡片**（本次修复） | IM 里发：「用 ask_user_question 问我：咖啡还是茶？选项：咖啡/茶，别自己回答」 | 收到 DSH_Question 卡片；点选项或直接回文字；Agent 带答案继续 |
-| 流式回复 | 问一个需要较长输出的问题 | 气泡逐字更新（0.1.2 仍有 `assistant/chunk`） |
+| 流式回复 | 问一个需要较长输出的问题 | 气泡逐字更新（≤0.1.2 走 `assistant/chunk`，≥0.1.3 走 `agent/assistant-stream`） |
 | 权限审批 | 让 Agent 做一个需要审批的操作 | 收到 DSH_Approval 卡片，回「批准/拒绝」后继续 |
 | 会话保持 | 重启 dsh 后继续同一会话 | 上下文仍在（走 `resume`） |
 | 停止指令 | 发送「不要回复」类消息 | 气泡被取消（type 20），无正文 |
@@ -484,7 +488,7 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 ## 特性
 
 - **双向桥接**：野火IM ↔ DSH Agent
-- **流式回复**：`assistant/chunk` → 野火流式消息（generating → completed）
+- **流式回复**：`assistant/chunk`（≤0.1.2）或 `agent/assistant-stream`（≥0.1.3）→ 野火流式消息（generating → completed）
 - **会话隔离**：私聊/群聊各自独立 DSH 会话
 - **群聊过滤**：@提及、问号、关键词触发
 - **白名单**：用户/群组两级控制

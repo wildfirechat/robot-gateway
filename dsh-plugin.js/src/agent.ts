@@ -118,6 +118,12 @@ interface ManagedSession {
   selection: { current: ModelSelection | undefined; assembled: any };
   lastActivity: number;
   subscribers: Set<SessionEventHandler>;
+  /**
+   * 本回合已分发的 `agent/assistant-stream` 帧（`attemptId:index`）。
+   * 该事件带 `revision`，尝试被替换/重放时可能重发同一帧；按 (attemptId,index)
+   * 去重，`turn/start` 时清空。老版本 dsh（≤0.1.2）没有该事件，此集合恒为空。
+   */
+  streamFrames: Set<string>;
 }
 
 /**
@@ -174,6 +180,8 @@ export class AgentSessionManager {
   /** 绑定 agent scope 的回调（subagent 事件等 scoped 监听，index.ts 注入）。 */
   private agentScopeBinder?: AgentScopeBinder;
   private modelOverrideProvider?: ModelOverrideProvider;
+  /** preset 挂载失败回调（index.ts 注入：向该会话发一次性 IM 告警）。 */
+  private onPresetMountFailed?: (key: string, presetId: string, message: string) => void;
   private sessions = new Map<string, ManagedSession>();
   /** 会话重建计数：key → cwd → epoch（仅 log 损坏/冲突时递增）。 */
   private epochByKeyCwd = new Map<string, Map<string, number>>();
@@ -238,6 +246,8 @@ export class AgentSessionManager {
         this.logger?.warn?.(`[wildfire-agent] failed to load session state: ${err.message}`);
       }
     }
+    // 启动即校验 preset 是否存在于该 profile（missing → agent 无工具）
+    await this.validatePresets();
   }
 
   /** Persist session state to disk (debounced). */
@@ -326,7 +336,8 @@ export class AgentSessionManager {
     cwdProvider: CwdProvider,
     modelProvider: ModelProvider,
     agentScopeBinder?: AgentScopeBinder,
-    modelOverrideProvider?: ModelOverrideProvider
+    modelOverrideProvider?: ModelOverrideProvider,
+    onPresetMountFailed?: (key: string, presetId: string, message: string) => void
   ) {
     this.ctx = ctx;
     this.logger = logger;
@@ -335,18 +346,60 @@ export class AgentSessionManager {
     this.modelProvider = modelProvider;
     this.agentScopeBinder = agentScopeBinder;
     this.modelOverrideProvider = modelOverrideProvider;
+    this.onPresetMountFailed = onPresetMountFailed;
 
     // Bridge the durable session firehose to per-conversation subscribers.
     ctx.on("session/event", (session: any, event: SessionEvent) => {
       const managed = this.sessions.get(String(session.id));
       if (!managed) return;
       managed.lastActivity = Date.now();
+      // 新回合开始：重置流式帧去重表（见 streamFrames）
+      if (event.type === "turn/start") managed.streamFrames.clear();
       for (const handler of managed.subscribers) {
         try {
           handler(event);
         } catch (err) {
           this.logger?.warn?.(`[wildfire-agent] subscriber error: ${String(err)}`);
         }
+      }
+    });
+
+    // dsh >= 0.1.3 的实时模型增量走 process-local 的 `agent/assistant-stream`
+    // （会话事件 `assistant/chunk` 已被移除），因此流式必须同时接这条路径。
+    // 该事件是 scoped 分发，但未加 scope 的根 ctx 监听器同样收得到
+    // （dsh-scope 的 filter 对无 tag 的 ctx 返回 true）；payload 里 dsh 的
+    // agentEvents 已经把 `agent` 融合进来，按 agent.session.id 路由到会话订阅者。
+    // 合成一条与旧 `assistant/chunk` 同构的事件，复用调用方的增量处理逻辑。
+    ctx.on("agent/assistant-stream", (payload: any) => {
+      try {
+        const frame = payload?.frame;
+        if (frame?.type !== "chunk") return;
+        const chunk = frame.chunk;
+        if (chunk?.type !== "text-delta" || typeof chunk.text !== "string") return;
+        const sessionId = String(payload?.agent?.session?.id ?? "");
+        const managed = this.sessions.get(sessionId);
+        if (!managed) return;
+        managed.lastActivity = Date.now();
+        const frameKey = `${String(frame.attemptId ?? "")}:${String(frame.index ?? "")}`;
+        if (managed.streamFrames.has(frameKey)) return; // revision 重放：同一帧只算一次
+        managed.streamFrames.add(frameKey);
+        const event: SessionEvent = {
+          // 会话事件通道用 seq 做过滤（< 回合起点即丢弃）；合成事件取最大值，
+          // 保证不会被当成历史事件，且回合状态仍由真正的 turn/start 驱动。
+          type: "assistant/chunk",
+          seq: Number.MAX_SAFE_INTEGER,
+          time: typeof frame.time === "number" ? frame.time : Date.now(),
+          data: { chunk },
+        };
+        for (const handler of managed.subscribers) {
+          try {
+            handler(event);
+          } catch (err) {
+            this.logger?.warn?.(`[wildfire-agent] stream subscriber error: ${String(err)}`);
+          }
+        }
+      } catch (err: any) {
+        this.logger?.warn?.(`[wildfire-agent] assistant-stream handling failed: ${String(err)}`);
       }
     });
 
@@ -537,6 +590,7 @@ export class AgentSessionManager {
       selection: selectionRef,
       lastActivity: Date.now(),
       subscribers: new Set(),
+      streamFrames: new Set(),
     };
     this.sessions.set(sessionId, managed);
     this.sessionIdToKey.set(sessionId, key);
@@ -746,8 +800,8 @@ export class AgentSessionManager {
    * - IM 专用 profile（bundles 仅 dsh-base）：base 工具行未被禁用，工具来自
    *   全局层，无 agentPresets 服务——此时无需 preset（记录 info 即可）。
    *
-   * 在 agent 的 setup(agentCtx) 中调用（agent 发布前完成）。失败时静默降级，
-   * 不阻塞 agent 创建。
+   * 在 agent 的 setup(agentCtx) 中调用（agent 发布前完成）。失败**不阻塞** agent
+   * 创建，但会以 error 级日志 + 一次性 IM 告警暴露（agent 将没有工具）。
    */
   private async mountAgentPreset(agentCtx: any, key: string): Promise<void> {
     const presetId = this.getPreset(key);
@@ -759,12 +813,62 @@ export class AgentSessionManager {
         );
         return;
       }
-      await presets.mount(agentCtx, presetId);
-      this.logger?.info?.(`[wildfire-agent] agent preset mounted: ${presetId} (key=${key})`);
-    } catch (err: any) {
-      this.logger?.warn?.(
-        `[wildfire-agent] agent preset mount failed (preset=${presetId}, ${String(err?.message ?? err)}), agent may have no tools`
+      const mounted = await presets.mount(agentCtx, presetId);
+      this.logger?.info?.(
+        `[wildfire-agent] agent preset mounted: ${String(mounted?.id ?? presetId)} (key=${key})`
       );
+    } catch (err: any) {
+      const message = String(err?.message ?? err);
+      // 挂载失败 = 这个 agent 没有任何工具（只会输出工具调用文本），必须显式暴露：
+      // error 级日志 + 一次性的 IM 告警，而不是静默降级。
+      let available = "";
+      try {
+        const presets = this.ctx?.get?.("agentPresets");
+        const rows = (await presets?.list?.()) ?? [];
+        const ids = rows.map((p: any) => String(p?.id ?? "")).filter(Boolean);
+        if (ids.length > 0) available = ` (available presets: ${ids.join(", ")})`;
+      } catch {
+        // 可用列表拿不到：只报失败原因
+      }
+      this.logger?.error?.(
+        `[wildfire-agent] agent preset mount failed: preset=${presetId}${available}, agent has NO tools — ${message}`
+      );
+      try {
+        this.onPresetMountFailed?.(key, presetId, message);
+      } catch (hookErr: any) {
+        this.logger?.warn?.(`[wildfire-agent] preset failure hook failed: ${String(hookErr)}`);
+      }
+    }
+  }
+
+  /**
+   * 启动时校验配置里的 preset 是否存在（dsh 0.1.5 的 `list()` 是异步的，
+   * 返回带 `id` 的 preset 行）。不存在时 error 级报出可选值——这是
+   * 「agent 悄悄没有工具」最常见的成因，必须在启动时就吼出来。
+   */
+  private async validatePresets(): Promise<void> {
+    try {
+      const presets = this.ctx?.get?.("agentPresets");
+      if (!presets?.list) return; // 无 preset 服务的 profile：工具来自 base 层
+      const rows = (await presets.list()) ?? [];
+      const ids = rows.map((p: any) => String(p?.id ?? "")).filter(Boolean);
+      if (ids.length === 0) return;
+      const wanted = new Set<string>(
+        [this.config.preset, ...this.presetByKey.values()].filter((v): v is string => !!v)
+      );
+      const missing = [...wanted].filter((id) => !ids.includes(id));
+      if (missing.length > 0) {
+        this.logger?.error?.(
+          `[wildfire-agent] agent preset(s) not found: ${missing.join(", ")} — available: ${ids.join(", ")}; ` +
+            "agents using them will have NO TOOLS (fix session.preset / the conversation preset and restart)"
+        );
+      } else {
+        this.logger?.info?.(
+          `[wildfire-agent] agent presets available: ${ids.join(", ")} (default=${this.config.preset})`
+        );
+      }
+    } catch (err: any) {
+      this.logger?.warn?.(`[wildfire-agent] preset validation failed: ${String(err?.message ?? err)}`);
     }
   }
 
