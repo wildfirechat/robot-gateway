@@ -2929,6 +2929,15 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
     effort: { current: modelSel?.reasoningEffort ?? "", options: effortOptions },
     sandbox: { current: sandboxCurrent, options: ["read-only", "workspace-write", "danger-full-access"] },
     plan: { on: planOn },
+    // 会话处理模式（interrupt/queue）：插件持久化在 wildfire-convmodes.json，
+    // 面板据此回显；此前未输出该字段，导致面板永远显示默认值（切换看似不生效）。
+    mode: {
+      current: getConvMode(key),
+      options: [
+        { value: "interrupt", label: "打断（后到打断先到）" },
+        { value: "queue", label: "排队（串行等待）" },
+      ],
+    },
     preset: { current: presetCurrent, options: presetOptions },
     approval: {
       current: approvalCurrent,

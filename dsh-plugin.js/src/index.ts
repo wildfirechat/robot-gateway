@@ -285,7 +285,7 @@ export function apply(ctx: any, config: any): void {
       // runtime switch that still needs to be written into the session log.
       (key: string, session?: any) => api.models.resolve(key, session),
       // 在每个 agent scope 绑定 subagent 事件 → 任务卡片（scoped 事件全局监听不到）
-      (agentCtx: any) => api.interactions.bindAgentScope(agentCtx),
+      (agentCtx: any, agent?: any) => api.interactions.bindAgentScope(agentCtx, agent),
       (key: string) => api.models.peekOverride(key)
     ),
   };

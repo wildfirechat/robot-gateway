@@ -726,15 +726,26 @@ export class InteractionManager {
    * （child.ctx / child.agentCtx / child 自身），探测不到时静默降级为
    * 仅直系子代理（与旧行为一致）。
    */
-  bindAgentScope(agentCtx: any): void {
-    this.bindTaskScope(agentCtx);
+  bindAgentScope(agentCtx: any, agent?: any): void {
+    this.bindTaskScope(agentCtx, agent);
   }
 
   /** 绑定一个 scope（含递归：已有子代理 + 新建子代理）。 */
   private bindTaskScope(scope: any, parentAgent?: any): void {
     if (!scope || typeof scope.on !== "function" || this.boundTaskScopes.has(scope)) return;
     this.boundTaskScopes.add(scope);
-    const parent = parentAgent ?? scope?.agent;
+    // parent agent：优先用调用方传入的（dsh 0.1.5 的 setup 第二参数就是 agent）。
+    // cordis 4 下访问未声明 inject 的 scope 属性会抛
+    // "cannot get property ... without inject"，因此 scope.agent 回退必须包保护
+    // ——该异常曾导致整个 agent 创建回滚（面板提示"会话未激活"、IM 无响应）。
+    let parent = parentAgent;
+    if (!parent) {
+      try {
+        parent = scope?.agent;
+      } catch {
+        parent = undefined;
+      }
+    }
 
     scope.on("subagent/start", (info: any) => {
       try {

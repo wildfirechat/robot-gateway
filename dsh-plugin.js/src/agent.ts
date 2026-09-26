@@ -50,7 +50,7 @@ export interface DispatchExtras {
  * 在 agent 创建/resume 的 setup(agentCtx) 里调用，用于监听该 agent 的 scoped
  * subagent 事件（全局 ctx.on 收不到 scoped 事件）。
  */
-export type AgentScopeBinder = (agentCtx: any) => void;
+export type AgentScopeBinder = (agentCtx: any, agent?: any) => void;
 
 /** Live turn state notifications (mapped to the scope=31 conversation state / DSH_Goal card). */
 export interface TurnHandlers {
@@ -404,9 +404,19 @@ export class AgentSessionManager {
         provider: selection.provider,
         model: selection.model,
       },
-      setup: async (agentCtx: any) => {
+      setup: async (agentCtx: any, agentArg?: any) => {
         installModelSelection(agentCtx, selectionRef);
-        this.agentScopeBinder?.(agentCtx);
+        // 辅助逻辑绝不能抛错：setup 抛错会让 agent 创建整体回滚
+        // （表现为 IM 无法建会话、面板 /sandbox 等"会话未激活"）。
+        // agentArg 是 dsh 0.1.5 setup 的第二参数（agent 实例），
+        // 传入可避免在 cordis 4 下访问 scope.agent 触发 inject 检查报错。
+        try {
+          this.agentScopeBinder?.(agentCtx, agentArg);
+        } catch (err: any) {
+          this.logger?.warn?.(
+            `[wildfire-agent] agent scope bind failed: ${String(err?.message ?? err)}`
+          );
+        }
         // web profile 下 base 工具被 dsh-web-app 禁用、改由 preset 按会话
         // 挂载——不挂 preset 的 agent 没有任何工具（模型只能输出工具调用
         // 文本而无法执行）。mount 内部已捕获所有失败，不阻塞 agent 创建。
@@ -420,9 +430,15 @@ export class AgentSessionManager {
         provider: selection.provider,
         model: selection.model,
       },
-      setup: async (agentCtx: any) => {
+      setup: async (agentCtx: any, agentArg?: any) => {
         installModelSelection(agentCtx, selectionRef);
-        this.agentScopeBinder?.(agentCtx);
+        try {
+          this.agentScopeBinder?.(agentCtx, agentArg);
+        } catch (err: any) {
+          this.logger?.warn?.(
+            `[wildfire-agent] agent scope bind failed: ${String(err?.message ?? err)}`
+          );
+        }
         await this.mountAgentPreset(agentCtx, key);
       },
     };
