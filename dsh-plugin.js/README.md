@@ -19,7 +19,7 @@
 
 - `ctx.userQuestions.registerProvider()` 存在（≤ 0.1.1-rc.2）→ 注册 UI provider；
 - 不存在（≥ 0.1.2-rc.1）→ 在根 context 监听 `user-questions/request` 瀑布流；不属于本机器人的请求调用 `next()` 让给其它 answerer（例如 Web GUI）；
-- 流式增量：老版本读会话事件 `assistant/chunk`，新版本（≥ 0.1.3）监听 `agent/assistant-stream` 并把 `text-delta` 帧合成为同构事件复用同一套推送逻辑（根 ctx 监听器即可收到 scoped 分发）。
+- 流式增量：老版本读会话事件 `assistant/chunk`，新版本（≥ 0.1.3）监听 `agent/assistant-stream` 并把 `text-delta` 帧合成为同构事件复用同一套推送逻辑（根 ctx 监听器即可收到 scoped 分发）；按 `(attemptId, index)` 去重防 revision 重放，帧缺这两个字段时不做去重、直接转发。
 
 `package.json` 的 peerDependencies 按「小版本行」逐条列出（node-semver 对预发布版本的匹配规则很严格：版本带 prerelease 时，只有同 `major.minor.patch` 且带 prerelease 的比较符才算匹配，`>=0.1.0-rc.7`、`*` 之类都匹配不到 `0.1.5-rc.3`）。
 

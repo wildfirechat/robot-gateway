@@ -121,7 +121,8 @@ interface ManagedSession {
   /**
    * 本回合已分发的 `agent/assistant-stream` 帧（`attemptId:index`）。
    * 该事件带 `revision`，尝试被替换/重放时可能重发同一帧；按 (attemptId,index)
-   * 去重，`turn/start` 时清空。老版本 dsh（≤0.1.2）没有该事件，此集合恒为空。
+   * 去重，`turn/start` 时清空。帧缺 `attemptId`/`index` 时不做去重（直接转发），
+   * 避免键退化成常量而丢帧。老版本 dsh（≤0.1.2）没有该事件，此集合恒为空。
    */
   streamFrames: Set<string>;
 }
@@ -380,9 +381,13 @@ export class AgentSessionManager {
         const managed = this.sessions.get(sessionId);
         if (!managed) return;
         managed.lastActivity = Date.now();
-        const frameKey = `${String(frame.attemptId ?? "")}:${String(frame.index ?? "")}`;
-        if (managed.streamFrames.has(frameKey)) return; // revision 重放：同一帧只算一次
-        managed.streamFrames.add(frameKey);
+        // 去重：仅当 dsh 同时给出 (attemptId, index) 时才启用（防 revision 重放同一帧）。
+        // 两者缺一时**不做去重、直接转发**——否则键会退化成常量，把后续所有帧误判为重复丢光。
+        if (frame.attemptId !== undefined && frame.index !== undefined) {
+          const frameKey = `${String(frame.attemptId)}:${String(frame.index)}`;
+          if (managed.streamFrames.has(frameKey)) return; // revision 重放：同一帧只算一次
+          managed.streamFrames.add(frameKey);
+        }
         const event: SessionEvent = {
           // 会话事件通道用 seq 做过滤（< 回合起点即丢弃）；合成事件取最大值，
           // 保证不会被当成历史事件，且回合状态仍由真正的 turn/start 驱动。

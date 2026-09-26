@@ -19,7 +19,7 @@
 
 - `registerProvider` 存在 → 注册 UI provider（≤ 0.1.1-rc.2）；
 - 不存在 → 监听 `user-questions/request` 瀑布流（≥ 0.1.2-rc.1）；非本机器人会话调用 `next()` 让给其它 answerer（Web GUI 等）；
-- 流式增量：会话事件 `assistant/chunk`（≤0.1.2）与 process-local `agent/assistant-stream`（≥0.1.3）双路径，后者合成同构事件复用同一套增量处理；根 ctx 监听器即可收到 scoped 分发。
+- 流式增量：会话事件 `assistant/chunk`（≤0.1.2）与 process-local `agent/assistant-stream`（≥0.1.3）双路径，后者合成同构事件复用同一套增量处理；根 ctx 监听器即可收到 scoped 分发；按 `(attemptId, index)` 去重（帧缺字段时不去重）。
 
 > **preset 组成的坑（0.1.5 实测）**：IM 专用 profile 若与 `dsh-web-app` 一样禁用 base 的工具行、改由 preset 挂载，必须补上 `@deepseek-ai/dsh-agent-presets` 及其依赖的 Host 模块（如 `@deepseek-ai/dsh-tool-subagent/model-selection-settings`）；缺任何一项都会导致 preset 挂载失败、agent 以空全局层发布（**没有任何工具**）。插件现在启动时校验 preset 名（error 级列出可选值），挂载失败时向该会话发一次性 IM 告警，不再静默降级。
 
