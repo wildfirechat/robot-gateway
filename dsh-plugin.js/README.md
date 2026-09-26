@@ -197,10 +197,68 @@ cp ~/.dsh/profiles/web/cordis.patch.yml ~/.dsh/profiles/wildfire/cordis.patch.ym
 dsh --profile wildfire
 ```
 
-**重要**：`dsh-tool-ask-user` 不在任何 bundle 内，必须在 `~/.dsh/profiles/wildfire/cordis.patch.yml` 中显式启用，否则 Agent 没有 `ask_user` 工具（提问会退化为模型直接发文本）：
+**重要**：IM 专用 profile 只加载 `dsh-base`，需要显式配置三件事，否则功能缺失：
+
+1. `dsh-tool-ask-user` 不在任何 bundle 内，不启用则 Agent 没有 `ask_user` 工具（提问退化为模型直接发文本）；
+2. **`agent-presets` 服务**：dsh 0.1.5 起「工具/prompt/委托后端」由 **agent preset**（能力档位：`standard`/`minimal`/`ptc`/`cordis`）按会话挂载，AI 面板的档位切换依赖它；
+3. 与 2 配套，必须**禁用 dsh-base 的 agent 平面行**（`tool-bash`/`tool-fs`/`tool-skill`/`tool-goal`/`plan-mode`/`compaction-basic`/`tool-subagent*`/`tool-workflow`/`agent-instructions`/`tool-todo`/`tool-web` 等），否则会与 preset 内的同名工具**重复注册**。`dsh-web-app` bundle 自带这套禁用清单，IM 专用 profile 需手动抄一份。
+
+`~/.dsh/profiles/wildfire/cordis.patch.yml` 完整示例（禁用清单 + 三个 insert）：
 
 ```yaml
+# ── 禁用 agent 平面行（与 dsh-web-app 的清单一致）──
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: compaction-basic
+  disabled: true
+- id: command-compact
+  disabled: true
+- id: tool-result-pruner
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: agent-instructions
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-web
+  disabled: true
+
 - insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'
     - id: wildfire
@@ -209,9 +267,13 @@ dsh --profile wildfire
         gatewayUrl: ws://...
         robotId: ...
         robotSecret: ...
+        workspace:
+          root: /Users/rain/Workspace
 ```
 
-验证：日志出现 `userQuestions provider registered (ask_user via IM)` 与 `approval answerer registered`；Agent 的提问与审批消息出现在 IM 会话中。回切并存：停 wildfire profile，改跑 `dsh web`。
+> 如果只想要「能跑」而不需要档位切换：也可以不启用 preset，此时工具直接来自 dsh-base 的全局行（保持上面 insert 里去掉 `agent-presets`、也**不要**加禁用清单）——两种模式二选一，**不可混用**（混用会导致同名工具重复注册）。此模式下 AI 面板的「Agent 模式」选择器会显示为禁用。
+
+验证：日志出现 `agent preset mounted: standard (key=wildfire:group:...)`（preset 模式）、`userQuestions answerer registered (waterfall user-questions/request; ask_user via IM)` 与 `approval answerer registered`；Agent 的提问与审批消息出现在 IM 会话中。回切并存：停 wildfire profile，改跑 `dsh web`。
 
 详见 [DSH_INTEGRATION.md 部署模式](../DSH_INTEGRATION.md)。
 

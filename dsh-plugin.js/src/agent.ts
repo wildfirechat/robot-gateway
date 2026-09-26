@@ -60,6 +60,11 @@ export interface TurnHandlers {
   onProgress?: (data: { phase: "thinking" | "tool" | "done"; toolName?: string; detail?: string }) => void;
   /** Goal changed via the goal tool (mapped to DSH_Goal card). */
   onGoal?: (data: { gid: string; objective: string; phase: string; roundsStarted: number }) => void;
+  /**
+   * 模型通过 dsh 原生 `present` 工具声明的交付文件（路径可能相对会话 cwd）。
+   * 插件据此把文件通过 IM 发给用户（原生交付物机制，替代自定义 [image:]/[file:] 标记）。
+   */
+  onPresent?: (paths: string[]) => void;
 }
 
 /** A dsh session event as delivered by the `session/event` firehose. */
@@ -179,6 +184,8 @@ export class AgentSessionManager {
   /** 最近一次 getAgent 解析的 cwd（peekSessionId 用，不持久化）。 */
   private cwdByKey = new Map<string, string>();
   private sessionIdToKey = new Map<string, string>();
+  /** 会话级 preset 覆盖（key → preset id）；未设置时用 config.preset（默认 standard）。 */
+  private presetByKey = new Map<string, string>();
   private sweepTimer: NodeJS.Timeout | undefined;
   private disposed = false;
   // 会话状态持久化：epoch（按目录维度）+ 迁移映射，落盘后进程重启不丢；
@@ -216,6 +223,12 @@ export class AgentSessionManager {
             this.legacySessionByKey.set(key, sid);
           }
         }
+        // 会话级 preset 覆盖（面板 /preset 切换的结果），重启不丢
+        if (data.presets) {
+          for (const [key, presetId] of Object.entries<string>(data.presets)) {
+            if (typeof presetId === "string" && presetId) this.presetByKey.set(key, presetId);
+          }
+        }
         this.logger?.info?.(
           `[wildfire-agent] loaded persisted session state from ${this.epochFile} (${this.epochByKeyCwd.size} keys, ${this.legacySessionByKey.size} legacy)`
         );
@@ -246,7 +259,45 @@ export class AgentSessionManager {
     }
     await writeFile(
       this.epochFile,
-      JSON.stringify({ epochs, legacy: Object.fromEntries(this.legacySessionByKey) }, null, 2)
+      JSON.stringify(
+        {
+          epochs,
+          legacy: Object.fromEntries(this.legacySessionByKey),
+          presets: Object.fromEntries(this.presetByKey),
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  /** 该会话生效的 agent preset id（会话级覆盖 > 配置默认）。 */
+  getPreset(key: string): string {
+    return this.presetByKey.get(key) ?? this.config.preset;
+  }
+
+  /**
+   * 切换会话的 agent preset（面板 /preset）。
+   *
+   * preset 在 agent 创建时绑定到其 scope（工具/prompt/委托后端），切换必须
+   * dispose 该 key 的活跃会话、下次消息按新 preset 重建（会话 log 保留，
+   * 同会话 id 可 resume，上下文不丢）。选择持久化到 wildfire-sessions.json。
+   */
+  async switchPreset(key: string, presetId: string): Promise<void> {
+    this.presetByKey.set(key, presetId);
+    this.persistEpochs();
+    const disposed: string[] = [];
+    for (const [sid, managed] of [...this.sessions]) {
+      if (managed.key !== key) continue;
+      this.sessions.delete(sid);
+      this.sessionIdToKey.delete(sid);
+      await managed.handle.dispose().catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire-agent] preset switch dispose ${sid}: ${String(err)}`)
+      );
+      disposed.push(sid);
+    }
+    this.logger?.info?.(
+      `[wildfire-agent] preset switched: key=${key}, preset=${presetId}, disposed=[${disposed.join(", ")}]`
     );
   }
 
@@ -359,7 +410,7 @@ export class AgentSessionManager {
         // web profile 下 base 工具被 dsh-web-app 禁用、改由 preset 按会话
         // 挂载——不挂 preset 的 agent 没有任何工具（模型只能输出工具调用
         // 文本而无法执行）。mount 内部已捕获所有失败，不阻塞 agent 创建。
-        await this.mountAgentPreset(agentCtx);
+        await this.mountAgentPreset(agentCtx, key);
       },
     };
     const createOptions = {
@@ -372,7 +423,7 @@ export class AgentSessionManager {
       setup: async (agentCtx: any) => {
         installModelSelection(agentCtx, selectionRef);
         this.agentScopeBinder?.(agentCtx);
-        await this.mountAgentPreset(agentCtx);
+        await this.mountAgentPreset(agentCtx, key);
       },
     };
 
@@ -664,34 +715,39 @@ export class AgentSessionManager {
     this.legacyEpochByKey.delete(key);
     this.legacySessionByKey.delete(key);
     this.cwdByKey.delete(key);
+    this.presetByKey.delete(key);
     this.persistEpochs();
     this.logger?.info?.(`[wildfire-agent] workspace session disposed: key=${key}`);
   }
 
   /**
-   * 给 agent 挂载 dsh agent-preset（工具/prompt/委托后端来源，web profile 下
-   * base 全局工具被 dsh-web-app 禁用、改由 preset 按会话挂载——不挂 preset 的
-   * agent 没有任何工具，模型只能输出工具调用文本而无法真正执行）。
+   * 给 agent 挂载 dsh agent-preset（工具/prompt/委托后端来源）。
    *
-   * 在 agent 的 setup(agentCtx) 中调用（agent 发布前完成）。失败时静默降级：
-   * agent 无工具继续运行（与旧行为一致），不阻塞 agent 创建。
+   * 两种 profile 的工具来源不同：
+   * - web profile（bundles 含 dsh-web-app）：base 的工具行被禁用、改由 preset
+   *   按会话挂载——不挂 preset 的 agent 没有任何工具，模型只能输出工具调用
+   *   文本而无法真正执行；agentPresets 服务由 dsh-web-app 提供。
+   * - IM 专用 profile（bundles 仅 dsh-base）：base 工具行未被禁用，工具来自
+   *   全局层，无 agentPresets 服务——此时无需 preset（记录 info 即可）。
+   *
+   * 在 agent 的 setup(agentCtx) 中调用（agent 发布前完成）。失败时静默降级，
+   * 不阻塞 agent 创建。
    */
-  private async mountAgentPreset(agentCtx: any): Promise<void> {
+  private async mountAgentPreset(agentCtx: any, key: string): Promise<void> {
+    const presetId = this.getPreset(key);
     try {
       const presets = this.ctx?.get?.("agentPresets") ?? agentCtx?.get?.("agentPresets");
       if (!presets) {
-        this.logger?.warn?.(
-          "[wildfire-agent] agentPresets service unavailable — agent will have no tools"
+        this.logger?.info?.(
+          "[wildfire-agent] agentPresets service unavailable — toolset comes from the base layer (no preset needed in this profile)"
         );
         return;
       }
-      await presets.mount(agentCtx, this.config.preset);
-      this.logger?.info?.(
-        `[wildfire-agent] agent preset mounted: ${this.config.preset}`
-      );
+      await presets.mount(agentCtx, presetId);
+      this.logger?.info?.(`[wildfire-agent] agent preset mounted: ${presetId} (key=${key})`);
     } catch (err: any) {
       this.logger?.warn?.(
-        `[wildfire-agent] agent preset mount failed (${String(err?.message ?? err)}), agent may have no tools`
+        `[wildfire-agent] agent preset mount failed (preset=${presetId}, ${String(err?.message ?? err)}), agent may have no tools`
       );
     }
   }
@@ -744,11 +800,29 @@ export class AgentSessionManager {
           break;
         }
         case "tool/call": {
+          const toolName = String(event.data?.name ?? "");
           handlers?.onProgress?.({
             phase: "tool",
-            toolName: String(event.data?.name ?? ""),
+            toolName,
             detail: event.data?.arguments ? String(event.data.arguments).slice(0, 80) : undefined,
           });
+          // present 工具（dsh 原生交付物声明）：捕获声明的文件路径，
+          // 回合结束后由调用方通过 IM 发送（见 inbound.ts 的 onPresent）。
+          if (toolName === "present" && handlers?.onPresent) {
+            try {
+              const raw = event.data?.arguments;
+              const args = typeof raw === "string" ? JSON.parse(raw) : raw;
+              const files = Array.isArray(args?.files) ? args.files : [];
+              const paths = files
+                .map((f: any) => String(f?.path ?? "").trim())
+                .filter((p: string) => p.length > 0);
+              if (paths.length > 0) handlers.onPresent(paths);
+            } catch (err: any) {
+              this.logger?.debug?.(
+                `[wildfire-agent] present arguments parse failed: ${String(err?.message ?? err)}`
+              );
+            }
+          }
           break;
         }
         case "tool/result": {

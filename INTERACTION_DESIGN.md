@@ -742,5 +742,83 @@ key 前缀过滤，不再全量读取后筛选）；精确 key（指定机器人
 
 ---
 
-**文档版本**：2.3（§10 目录列表按需获取：209 Agent_Command_Result 应答通道，dirs 移出 scope=31 type=3）
-**状态**：插件与五端客户端已实现（v2.2 通用化）+ 209 目录应答通道（v2.3）
+## 11. AI 面板：Agent 能力档位（preset）与工具审批策略（v2.4）
+
+dsh 0.1.5 起，一个 agent 的**工具/prompt/委托后端**由 **agent preset**（能力档位）组合而成：
+内核随包提供 `standard`（标准模式，功能完整）、`minimal`（极简，仅持久 shell）、`ptc`（PTC 模式，
+用 TypeScript 程序组合多步操作）、`cordis`（创造模式，用于创作 preset）。面板因此新增两个
+**会话级**控制项，仍然是「type=3 只读渲染 + 207 `set` 执行」的静默通道，不新增消息类型。
+
+### 11.1 面板数据新增字段（scope=31 `..._3`）
+
+```json
+"preset": {
+  "current": "standard",
+  "options": [{"value": "standard", "label": "标准模式"}, {"value": "minimal", "label": "极简模式"}]
+},
+"approval": {
+  "current": "ask",
+  "options": [{"value": "ask", "label": "询问（需批准的操作弹卡片）"}, {"value": "never", "label": "自动拒绝（无人值守）"}]
+}
+```
+
+- 两者 `options` 均为 `{value,label}` 对象数组（与 `model.options` 同构）。
+- **`preset.options` 可能为空数组**：部署未启用 `dsh-agent-presets` 时（例如只加载 dsh-base 的
+  旧式 profile，工具直接来自全局层）。此时客户端**禁用**「Agent 模式」选择器并显示 `current`，
+  不要隐藏整行、不要报错。
+- 字段整体缺失（旧插件）→ 控件禁用即可，兼容。
+
+### 11.2 207 `set` 命令
+
+| cmd | 生效方式 | 说明 |
+|-----|---------|------|
+| `/preset <id>` | 下一条消息 | `id` 取自 `preset.options`；**preset 在 agent 创建时绑定到 scope**，切换会 dispose 该会话的活跃 agent 并按新 preset 重建（会话 log 保留、同 sessionId resume，**上下文不丢**）。选择持久化到 `~/.dsh/wildfire-sessions.json` 的 `presets` 字段，重启不丢 |
+| `/approval <ask\|never>` | 下一条消息 | 写入会话日志的 `approval/policy` 事件（随会话持久化）：`ask`=需批准的操作弹卡片；`never`=直接拒绝（无人值守）。执行时若会话未激活会先创建 |
+
+两者执行后均写 `type=1 lastChange`（面板/状态栏可见）并刷新 `type=3`。
+
+### 11.3 部署前提（profile 配置）
+
+preset 机制要求 profile 采用「**preset 模式**」：
+
+1. `insert` 一行 `agent-presets`（`@deepseek-ai/dsh-agent-presets`，`config.default: standard`）；
+2. **禁用 dsh-base 的 agent 平面行**（`tool-bash`/`tool-fs`/`tool-skill`/`tool-goal`/`plan-mode`/
+   `compaction-basic`/`tool-subagent*`/`tool-workflow`/`agent-instructions`/`tool-todo`/`tool-web` 等），
+   否则与 preset 内的同名工具**重复注册**，且面板无法切换档位。
+
+`dsh-web-app` bundle 自带这套禁用清单；IM 专用 profile（仅 dsh-base）需在用户 patch 层显式配置
+（本仓库 `dsh-plugin.js/README.md` 部署章节已给出完整 patch 示例）。插件侧 `session.preset`
+（默认 `standard`）决定新会话挂载的档位，会话级 `/preset` 覆盖它。
+
+### 11.4 客户端行为
+
+1. 面板读 `type=3` 的 `preset`/`approval`，渲染两个选择器（当前值高亮）。
+2. 用户切换 → 发 207 `set`（`/preset <value>` / `/approval <value>`），沿用现有「乐观更新 + `lastChange` 刷新」模式。
+3. `preset.options` 为空 → 选择器禁用（tooltip/副标题可提示「当前部署未启用档位切换」）。
+
+### 11.5 落地清单（v2.4）
+
+| 层 | 文件 | 改动 |
+|----|------|------|
+| 插件 | `agent.ts` | present 捕获（`onPresent`）、`getPreset`/`switchPreset`（含持久化）、`mountAgentPreset` 按会话档位挂载 |
+| 插件 | `inbound.ts` | `buildPanelData` 增加 `preset`/`approval`、`set` 分支 `/preset` `/approval`、present 文件回传 |
+| vue-pc-chat | `src/ui/main/conversation/AgentPanel.vue` | 「Agent 模式」「工具审批」两行 + 命令下发 |
+| hm-chat | `uikit/.../pages/conversation/AgentPanelView.ets`（+`util/agentState.ets`） | 同上 |
+| android-chat | `uikit/.../conversation/agent/AgentAiSettingsDialog.java`（+`utils/AgentState.java`） | 同上 |
+| ios-chat | `wfuikit/WFChatUIKit/MessageList/ViewController/WFCUAgentPanelViewController.m`（+`Utilities/WFCUAgentState.{h,m}`） | 同上 |
+| flutter-chat | `chat/lib/conversation/agent_panel.dart`（+`chat/lib/utils/agent_state.dart`） | 同上 |
+
+### 11.6 附：present 工具（原生交付物）的 IM 回传
+
+dsh 内核新增 `present` 工具（`dsh-tool-present`，在 `standard` preset 内）：模型显式声明
+"这是给用户的交付文件"。插件在回合内捕获该工具的调用参数（`files[].path`，可能相对会话 cwd），
+回合结束后按**与 `[image:]/[file:]` 标记相同的围栏**（会话工作目录 + `workspace.allowedRoots`，
+realpath 校验）把文件作为媒体消息发到 IM。两条通道并存：
+
+- `present`：模型无需知道 IM 约定即可交付文件（推荐，Web GUI 与 IM 同时受益）；
+- `[image:绝对路径]` / `[file:绝对路径]`：显式告知路径的旧约定，保留兼容。
+
+---
+
+**文档版本**：2.4（§11 AI 面板能力档位 preset / 工具审批策略 / present 交付物回传；§10 目录列表按需获取：209 Agent_Command_Result 应答通道，dirs 移出 scope=31 type=3）
+**状态**：插件与五端客户端已实现（v2.2 通用化）+ 209 目录应答通道（v2.3）+ preset/审批策略与 present 回传（v2.4）

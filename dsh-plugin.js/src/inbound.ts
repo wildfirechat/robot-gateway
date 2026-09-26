@@ -43,6 +43,7 @@ import {
 import {
   cleanupTemp,
   extractOutboundMedia,
+  isImageExt,
   prepareInboundMedia,
   resolveAllowedLocalPath,
   uploadToWildfire,
@@ -968,6 +969,8 @@ export async function handleIncomingMessage(
       // best effort — 会话信息推送失败不影响回合
     }
 
+    // dsh 原生 present 工具声明的交付文件（回合中收集）
+    const presentedPaths: string[] = [];
     const outcome = await agents.dispatch(
       key,
       bodyText,
@@ -980,6 +983,10 @@ export async function handleIncomingMessage(
           api.interactions?.sendGoal(key, data);
           // 同步目标状态到 scope=31 状态设置（客户端可读）
           api.interactions?.pushStatus(key, { goal: data });
+        },
+        // present 工具（原生交付物声明）：收集路径，回合结束后发到 IM
+        onPresent: (paths) => {
+          for (const p of paths) presentedPaths.push(p);
         },
       }
     );
@@ -1002,6 +1009,22 @@ export async function handleIncomingMessage(
         const allowedDirs = [cwd, ...workspaceCfg.allowedRoots];
         await sendOutboundMedia(sender, conv, extracted.media, api, allowedDirs);
         finalText = extracted.text.trim();
+      }
+    }
+
+    // dsh 原生 present 声明的交付文件：与标记路径同等围栏校验后发送。
+    // present 的 path 可能是相对路径（相对会话 cwd）——先解析为绝对路径。
+    if (presentedPaths.length > 0 && getMediaConfig(config).outboundEnabled) {
+      try {
+        const workspaceCfg = getWorkspaceConfig(config);
+        const cwd = await api.workspace.peek(key, agents.peekSessionId(key));
+        const items = presentedPaths
+          .map((p) => (path.isAbsolute(p) ? p : path.resolve(cwd, p)))
+          .map((p) => ({ path: p, isImage: isImageExt(p) }));
+        await sendOutboundMedia(sender, conv, items, api, [cwd, ...workspaceCfg.allowedRoots]);
+        logger.info?.(`[wildfire] present files sent: count=${items.length}, key=${key}`);
+      } catch (err: any) {
+        logger.warn?.(`[wildfire] present files send failed: ${String(err?.message ?? err)}`);
       }
     }
     // 回合结果推送：reason（completed/cancelled）走 type=1 状态；
@@ -2598,7 +2621,7 @@ async function handleDshCommand(
 
   if (command.op === "set") {
     const cmdText = (command.cmd ?? "").trim();
-    const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|mode|destroy(?:-group)?)\b/);
+    const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|mode|preset|approval|destroy(?:-group)?)\b/);
     if (!m) {
       api.logger?.warn?.(`[wildfire] DSH_Command set: unsupported cmd=${cmdText}`);
       return;
@@ -2636,6 +2659,79 @@ async function handleDshCommand(
         api.interactions?.pushStatus(key, { lastChange: `/mode 参数需为 interrupt 或 queue（当前 ${getConvMode(key)}）` });
       }
       api.logger?.info?.(`[wildfire] DSH_Command set mode: key=${key}, mode=${modeArg || "(invalid)"}, by=${sender}`);
+      return;
+    }
+    // agent preset（能力档位，如 standard/minimal/ptc/cordis）：preset 在 agent
+    // 创建时绑定到 scope，切换需 dispose 活跃会话、下一条消息按新 preset 重建
+    //（会话 log 保留，同 sessionId resume，上下文不丢）。
+    if (cmd === "preset") {
+      const presetArg = cmdText.replace(/^\/preset\s*/, "").trim();
+      const presetsSvc = api.ctx?.get?.("agentPresets");
+      if (!presetsSvc?.list) {
+        api.interactions?.pushStatus(key, {
+          lastChange: "当前 profile 不支持 preset 切换（无 agentPresets 服务）",
+        });
+        return;
+      }
+      const list = ((await presetsSvc.list().catch(() => [])) ?? []) as any[];
+      const hit = list.find((p) => String(p?.id) === presetArg);
+      if (!hit) {
+        api.interactions?.pushStatus(key, {
+          lastChange: `/preset 无效：${presetArg || "(空)"}（可选 ${list.map((p) => String(p.id)).join(", ") || "无"}）`,
+        });
+        return;
+      }
+      await api.wildfireAgents.switchPreset(key, presetArg);
+      api.interactions?.pushStatus(key, {
+        lastChange: `Agent 模式 → ${String(hit.name ?? presetArg)}（下一条消息生效）`,
+      });
+      api.logger?.info?.(
+        `[wildfire] DSH_Command set preset: key=${key}, preset=${presetArg}, by=${sender}`
+      );
+      const presetData = await buildPanelData(api, key).catch(() => undefined);
+      if (presetData) api.interactions?.pushPanelData(key, presetData);
+      return;
+    }
+    // 工具审批策略（ask/never）：写入会话日志的 approval/policy 事件，随会话持久化；
+    // never = 需批准的操作直接拒绝（无人值守场景）。
+    if (cmd === "approval") {
+      const approvalArg = cmdText.replace(/^\/approval\s*/, "").trim().toLowerCase();
+      if (approvalArg !== "ask" && approvalArg !== "never") {
+        api.interactions?.pushStatus(key, { lastChange: "/approval 参数需为 ask 或 never" });
+        return;
+      }
+      let approvalAgent: any;
+      try {
+        approvalAgent = await api.wildfireAgents.getAgent(key);
+      } catch (err: any) {
+        api.interactions?.pushStatus(key, {
+          lastChange: `切换审批策略失败：${String(err?.message ?? err).slice(0, 80)}`,
+        });
+        return;
+      }
+      const approvalSvc = api.ctx?.get?.("approval");
+      if (!approvalSvc?.setPolicy) {
+        api.interactions?.pushStatus(key, {
+          lastChange: "approval 服务不可用（profile 未加载 dsh-user-approval）",
+        });
+        return;
+      }
+      try {
+        approvalSvc.setPolicy(approvalAgent, approvalArg);
+      } catch (err: any) {
+        api.interactions?.pushStatus(key, {
+          lastChange: `切换审批策略失败：${String(err?.message ?? err).slice(0, 80)}`,
+        });
+        return;
+      }
+      api.interactions?.pushStatus(key, {
+        lastChange: `工具审批 → ${approvalArg === "ask" ? "询问（弹卡片）" : "自动拒绝（无人值守）"}（下一条消息生效）`,
+      });
+      api.logger?.info?.(
+        `[wildfire] DSH_Command set approval: key=${key}, policy=${approvalArg}, by=${sender}`
+      );
+      const approvalData = await buildPanelData(api, key).catch(() => undefined);
+      if (approvalData) api.interactions?.pushPanelData(key, approvalData);
       return;
     }
     // 确保会话激活：新目录（未建立过会话）时先 getAgent 创建/resume，
@@ -2797,11 +2893,50 @@ async function buildPanelData(api: any, key: string): Promise<Record<string, unk
       `effort=${modelSel?.reasoningEffort ?? "-"} plan=${planOn} cwd=${cwd ?? "-"}`
   );
   // 注意：不含 dirs——目录列表不受控，走 209 按需应答（op=dirs），见 INTERACTION_DESIGN.md §10
+  // agent preset（能力档位）：agentPresets 服务由 dsh-web-app 提供（web profile）；
+  // IM 专用 profile 无该服务 → options 为空，客户端只显示当前值。
+  let presetCurrent = api.wildfireAgents?.getPreset?.(key) ?? "";
+  let presetOptions: Array<{ value: string; label: string }> = [];
+  try {
+    const presetsSvc = api.ctx?.get?.("agentPresets");
+    if (presetsSvc?.list) {
+      const list = ((await presetsSvc.list()) ?? []) as any[];
+      presetOptions = list
+        .filter((p) => p && !p.broken && typeof p.id === "string")
+        .map((p) => ({ value: String(p.id), label: String(p.name ?? p.id) }));
+      if (!presetCurrent && list.length > 0) {
+        const def = list.find((p) => p.id === "standard") ?? list[0];
+        presetCurrent = String(def?.id ?? "");
+      }
+    }
+  } catch (err: any) {
+    api.logger?.warn?.(`[wildfire] panel preset list failed: ${String(err?.message ?? err)}`);
+  }
+  // 工具审批策略（approval/policy 事件，随会话日志持久化）：
+  // ask=需批准的操作弹卡片；never=直接拒绝（无人值守）。未激活时读磁盘日志。
+  let approvalCurrent = persisted?.approval ?? "ask";
+  if (live && session) {
+    try {
+      const approvalSvc = api.ctx?.get?.("approval");
+      approvalCurrent =
+        approvalSvc?.overrideOf?.(session) ?? approvalSvc?.effectivePolicy?.(session) ?? approvalCurrent;
+    } catch {
+      // 保持默认
+    }
+  }
   return {
     model: { current: modelSel ? `${modelSel.provider}/${modelSel.model}` : "", options: modelOptions },
     effort: { current: modelSel?.reasoningEffort ?? "", options: effortOptions },
     sandbox: { current: sandboxCurrent, options: ["read-only", "workspace-write", "danger-full-access"] },
     plan: { on: planOn },
+    preset: { current: presetCurrent, options: presetOptions },
+    approval: {
+      current: approvalCurrent,
+      options: [
+        { value: "ask", label: "询问（需批准的操作弹卡片）" },
+        { value: "never", label: "自动拒绝（无人值守）" },
+      ],
+    },
     cwd,
     sessionId,
   };

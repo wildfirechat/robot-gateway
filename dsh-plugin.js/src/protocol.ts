@@ -146,7 +146,13 @@ export interface AgentTaskProgressPayload {
  */
 export interface AgentCommandPayload {
   op: "query" | "set" | "interrupt" | "ping" | "dirs";
-  /** op=set 时的 provider 词表命令。 */
+  /**
+   * op=set 时的 provider 词表命令。当前支持：
+   * `/model <provider/model|预设>`、`/effort <等级>`、`/cwd <路径|clear>`、
+   * `/sandbox <模式>`、`/plan <on|off>`、`/compact`、`/reset`、`/mode <interrupt|queue>`、
+   * `/preset <presetId>`（能力档位，见 INTERACTION_DESIGN.md §11）、
+   * `/approval <ask|never>`（工具审批策略，同 §11）、`/destroy`。
+   */
   cmd?: string;
   /** 客户端请求序号（幂等/去重/应答关联）。 */
   seq?: number;
