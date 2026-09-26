@@ -197,13 +197,14 @@ cp ~/.dsh/profiles/web/cordis.patch.yml ~/.dsh/profiles/wildfire/cordis.patch.ym
 dsh --profile wildfire
 ```
 
-**重要**：IM 专用 profile 只加载 `dsh-base`，需要显式配置三件事，否则功能缺失：
+**重要**：IM 专用 profile 只加载 `dsh-base`，需要显式配置四件事，否则功能缺失：
 
 1. `dsh-tool-ask-user` 不在任何 bundle 内，不启用则 Agent 没有 `ask_user` 工具（提问退化为模型直接发文本）；
 2. **`agent-presets` 服务**：dsh 0.1.5 起「工具/prompt/委托后端」由 **agent preset**（能力档位：`standard`/`minimal`/`ptc`/`cordis`）按会话挂载，AI 面板的档位切换依赖它；
 3. 与 2 配套，必须**禁用 dsh-base 的 agent 平面行**（`tool-bash`/`tool-fs`/`tool-skill`/`tool-goal`/`plan-mode`/`compaction-basic`/`tool-subagent*`/`tool-workflow`/`agent-instructions`/`tool-todo`/`tool-web` 等），否则会与 preset 内的同名工具**重复注册**。`dsh-web-app` bundle 自带这套禁用清单，IM 专用 profile 需手动抄一份。
+4. **Host 侧 typert 模块 `subagent-model-selection-settings`**：standard preset 内的 `tool-subagent` 依赖它，缺失会导致整条 `delegation` 组（含 subagent/workflow）挂载失败 → **整个 preset 挂载失败 → agent 无任何工具**（日志：`requires ... in the Host scope` + `published without joining an agent preset`）。该行同样原本由 `dsh-web-app` 提供，IM 专用 profile 必须显式补上。
 
-`~/.dsh/profiles/wildfire/cordis.patch.yml` 完整示例（禁用清单 + 三个 insert）：
+`~/.dsh/profiles/wildfire/cordis.patch.yml` 完整示例（禁用清单 + 四个 insert）：
 
 ```yaml
 # ── 禁用 agent 平面行（与 dsh-web-app 的清单一致）──
@@ -255,6 +256,13 @@ dsh --profile wildfire
   disabled: true
 
 - insert:
+    # Host 侧 typert 模块：standard preset 内的 tool-subagent 依赖它。
+    # 缺失时报 "tool-subagent: `modelSelectionSettings` requires
+    # @deepseek-ai/dsh-tool-subagent/model-selection-settings in the Host scope"
+    # → delegation 组挂载失败 → 整个 preset 挂载失败 → agent 无任何工具。
+    # 该行原本由 dsh-web-app bundle 提供，IM 专用 profile 必须显式补上。
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:
