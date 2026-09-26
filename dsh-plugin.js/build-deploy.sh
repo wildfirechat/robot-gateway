@@ -50,7 +50,11 @@ cd "$PLUGIN_DIR"
 echo "    构建完成"
 
 echo "==> 2/5 打包 (npm pack)"
-rm -f ./*.tgz
+# 只删「本次要重新生成」的那一个 tgz。不要用 `rm -f ./*.tgz`：
+# 那会连带删掉 README 1b 步骤手工生成的 `-local.tgz` 等其它产物。
+PKG_BASE="$(node -p "require('$PLUGIN_DIR/package.json').name.replace(/^@[^/]+\//,'')")"
+PKG_VERSION="$(node -p "require('$PLUGIN_DIR/package.json').version")"
+rm -f "$PLUGIN_DIR/${PKG_BASE}-${PKG_VERSION}.tgz"
 TGZ="$(npm pack --silent --cache "$NPM_CACHE" | tail -1)"
 echo "    $TGZ"
 
