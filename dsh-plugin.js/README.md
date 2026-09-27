@@ -306,7 +306,7 @@ dsh --profile wildfire
 | `whiteList.allowedGroups` | 否 | 允许的群组 ID 列表 |
 | `whiteList.deniedMessage` | 否 | 未授权时的回复文案 |
 | `whiteList.includeOwner` | 否 | 机器人 owner 自动放行（经 `getProfile()` 获取），默认 `true` |
-| `whiteList.persistFile` | 否 | 动态 `/allow` 名单持久化文件，默认 `~/.dsh/wildfire-allowlist.json` |
+| `whiteList.persistFile` | 否 | 动态 `/allow` 名单持久化文件，默认 `<dshHome>/wildfire-allowlist.json`（`$DSH_HOME` 优先，否则 `~/.dsh`） |
 | `session.idleTimeoutMs` | 否 | 会话空闲回收时间，默认 24h |
 | `session.maxSessions` | 否 | 最大并发 Agent 会话数，默认 200 |
 | `session.preset` | 否 | 每个 IM agent 挂载的 dsh agent-preset id，**默认 `standard`（无需配置即可用）**——功能完整的编码 Agent（bash/fs/skill/goal/plan/subagent 等全套工具）。背景：web profile 下 dsh-base 全局工具被 `dsh-web-app` 禁用、改由 preset 按会话挂载，插件已自动为每个 agent 挂载该默认 preset；仅需更换 preset 时才配置此项 |
@@ -320,7 +320,7 @@ dsh --profile wildfire
 | `workspace.root` | 否 | **项目根目录**：所有项目都在此目录下。`/cwd` 的相对路径按此解析、`/create-group auto` 自动目录也在此之下、`/ls` 默认列此目录。未配置时回退：`autoRoot` → 第一个 `allowedRoot` → `path` |
 | `workspace.allowCwdCommand` | 否 | 允许 `/cwd`、`/ls` 命令（私聊+群聊，按权限），默认 `false` |
 | `workspace.persist` | 否 | 持久化 `/cwd` 绑定到磁盘，默认 `true` |
-| `workspace.persistFile` | 否 | 持久化文件，默认 `~/.dsh/wildfire-workspaces.json` |
+| `workspace.persistFile` | 否 | 持久化文件，默认 `<dshHome>/wildfire-workspaces.json`（`$DSH_HOME` 优先，否则 `~/.dsh`） |
 | `access.adminUsers` | 否 | 管理员用户 ID 列表（门控管理命令） |
 | `access.adminGroups` | 否 | 管理员群组 ID 列表 |
 | `access.groupOwnerCanManage` | 否 | 群主可在本群执行 `/cwd`（需机器人入群），默认 `true` |
@@ -534,6 +534,43 @@ src/
 # DSH 日志（插件日志前缀 [wildfire]）
 dsh web 2>&1 | grep wildfire
 ```
+
+## 多实例 / 多机器人（一台机器跑多个）
+
+**推荐：一个实例一个 `DSH_HOME`。** dsh 的 home 里放着 profiles / sessions / storages /
+settings / credentials，插件自建的状态文件也**按 `$DSH_HOME` 解析**（`utils.ts` 的
+`dshHome()`；未设则回退 `~/.dsh`），因此不同 home 天然完全隔离：
+
+```bash
+# 实例 A
+DSH_HOME=$HOME/.dsh-botA dsh --profile wildfire        # web 再加 --port 3081
+
+# 实例 B
+DSH_HOME=$HOME/.dsh-botB dsh --profile wildfire        # web 再加 --port 3082
+```
+
+各自 profile 的 patch 里写**不同的 robotId / robotSecret**；插件状态文件
+（`wildfire-sessions.json` / `wildfire-workspaces.json` / `wildfire-allowlist.json` /
+`wildfire-groups.json` / `wildfire-convmodes.json` / 诊断日志）落在各自的 `$DSH_HOME` 下。
+
+部署（装插件）也要带同一个 `DSH_HOME`：
+
+```bash
+cd dsh-plugin.js
+DSH_HOME=$HOME/.dsh-botA SKIP_RESTART=1 ./build-deploy.sh wildfire
+DSH_HOME=$HOME/.dsh-botA nohup node "$(command -v dsh)" --profile wildfire >> $HOME/.dsh-botA/dsh-wildfire.log 2>&1 &
+```
+
+**冲突与注意点：**
+
+| 项 | 说明 |
+|---|---|
+| robotId | robot-gateway 对同一机器人只允许**一条**有效连接；两个实例同机器人会互相挤掉（表现为 "Already authenticated" 僵尸），必须用不同机器人 |
+| 会话 key | key 来自 IM 侧（`wildfire:user/<群>:<id>`，不含机器人）。两个机器人在**同一个群**时 sessionId 相同——不同 `DSH_HOME` 下各自的会话日志互不影响 ✅ |
+| 不同 dsh 版本 | **不要共用一个 `DSH_HOME`**：`profiles/node_modules` 的 module fallback 由 dsh 托管，每次启动会重指到当前 CLI 安装 |
+| 共用 `DSH_HOME` 的多 profile | 可以但不推荐：sessions / storages / 插件状态文件共享，同一会话还有 `session.lock` 互斥 |
+| 资源 | 单实例实测约 **300MB RSS**（Node + 全量插件树），N 个实例约 N 倍，另加各 agent 的消耗 |
+| 凭据 | 不同 home 需各自 `.credentials.yaml`（或走环境变量） |
 
 ## License
 

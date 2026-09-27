@@ -33,8 +33,12 @@ if [ -z "${DHS_BIN:-}" ] || [ ! -x "$DHS_BIN" ]; then
 fi
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 [ -x "${NODE_BIN:-}" ] || NODE_BIN="/Users/rain/.nvm/versions/node/v22.22.0/bin/node"
-PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
-LOG_FILE="$HOME/.dsh/dsh-wildfire.log"
+# dsh home：$DSH_HOME 优先（多实例隔离），否则 ~/.dsh。插件自身也按同一规则解析
+# （src/utils.ts 的 dshHome()），因此这里必须用同一个值，否则会把插件装到 A home
+# 而状态文件写进 B home。
+DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
+LOG_FILE="$DSH_HOME_DIR/dsh-wildfire.log"
 SDK_SRC="$PLUGIN_DIR/../client.js"
 # 固定 pnpm 版本：`pnpm@latest` 会解析到 corepack 缓存里可能损坏的新版本
 # （曾出现 12.3.4 缺 bin/pnpm.cjs，导致 install 失败、profile 被 rm 后起不来）。
@@ -59,10 +63,10 @@ TGZ="$(npm pack --silent --cache "$NPM_CACHE" | tail -1)"
 echo "    $TGZ"
 
 echo "==> 3/5 确保 SDK file: 依赖可解析（符号链接）"
-mkdir -p "$HOME/.dsh/profiles"
-if [ ! -L "$HOME/.dsh/profiles/client.js" ]; then
-  ln -sfn "$SDK_SRC" "$HOME/.dsh/profiles/client.js"
-  echo "    已创建 -> $HOME/.dsh/profiles/client.js"
+mkdir -p "$DSH_HOME_DIR/profiles"
+if [ ! -L "$DSH_HOME_DIR/profiles/client.js" ]; then
+  ln -sfn "$SDK_SRC" "$DSH_HOME_DIR/profiles/client.js"
+  echo "    已创建 -> $DSH_HOME_DIR/profiles/client.js"
 else
   echo "    已存在"
 fi
@@ -111,7 +115,7 @@ restart_hint() {
   else
     echo "      pkill -f -- '--profile $PROFILE'"
   fi
-  echo "      cd /Users/rain/Workspace/robot-gateway && nohup $NODE_BIN $DHS_BIN --profile $PROFILE >> $LOG_FILE 2>&1 &"
+  echo "      cd /Users/rain/Workspace/robot-gateway && DSH_HOME=$DSH_HOME_DIR nohup $NODE_BIN $DHS_BIN --profile $PROFILE >> $LOG_FILE 2>&1 &"
 }
 if [ "${SKIP_RESTART:-0}" = "1" ]; then
   echo "    SKIP_RESTART=1，已跳过重启。"

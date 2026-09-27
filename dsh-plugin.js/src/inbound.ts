@@ -40,6 +40,7 @@ import {
   safePreview,
   shouldRespondToGroupMessage,
 } from "./utils.js";
+import { dshHome, dshHomePath } from "./utils.js";
 import {
   cleanupTemp,
   extractOutboundMedia,
@@ -140,7 +141,7 @@ async function readPersistedSessionState(
 
 // ===== 会话处理模式（interrupt=后到打断先到 / queue=原串行排队），按会话 key 持久化 =====
 type ConvMode = "interrupt" | "queue";
-const convModesFile = (): string => pathJoin(homedir(), ".dsh", "wildfire-convmodes.json");
+const convModesFile = (): string => dshHomePath("wildfire-convmodes.json");
 let convModes: Map<string, ConvMode> | null = null;
 
 function loadConvModes(): Map<string, ConvMode> {
@@ -358,7 +359,7 @@ export async function handleIncomingMessage(
   // [诊断] 引用消息：客户端把被引消息信息 base64 放在 payload.binaryContent
   // （本网关收到的 payload 该二进制字段名为 base64edData），
   // 形如 {"quote":{u,i,n,d}}，正文 searchableContent 不含引用原文。
-  // 为便于核对机器人实际收到什么，每条文本消息都追加诊断到 ~/.dsh/wildfire-quote.log：
+  // 为便于核对机器人实际收到什么，每条文本消息都追加诊断到 <dshHome>/wildfire-quote.log：
   // QUOTE_OK（解析到引用）/ 否则打印 payload 各候选字段的解码预览。
   const quote = decodeQuoteFromPayload(payload);
   const preview = (v: unknown, max = 240): string => {
@@ -400,9 +401,9 @@ export async function handleIncomingMessage(
   const line = `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key} ${quoteDiag} ${mentionDiag}\n`;
   api.logger?.info?.(line.trim());
   try {
-    // 控制台日志可能不可读（stdout 进终端），额外追加到 ~/.dsh/wildfire-quote.log 供诊断
-    mkdirSync(homedir() + "/.dsh", { recursive: true });
-    appendFileSync(homedir() + "/.dsh/wildfire-quote.log", `${new Date().toISOString()} ${line}`, "utf8");
+    // 控制台日志可能不可读（stdout 进终端），额外追加到 <dshHome>/wildfire-quote.log 供诊断
+    mkdirSync(dshHome(), { recursive: true });
+    appendFileSync(dshHomePath("wildfire-quote.log"), `${new Date().toISOString()} ${line}`, "utf8");
   } catch (e: any) {
     api.logger?.warn?.(`[wildfire] quote log file append failed: ${String(e?.message ?? e)}`);
   }
@@ -852,11 +853,11 @@ export async function handleIncomingMessage(
     // 消息（IM server 约束）。成功 → 把原文带进上下文（客户端引用自带的 d 只是 48 字
     // 摘要）；失败/无权限/SDK 无该方法 → 静默降级，仍用摘要，不影响正常对话。
     let quotedFullText = "";
-    // 落盘诊断（getMessage 拉取结果也写进 ~/.dsh/wildfire-quote.log，控制台可能不可读）
+    // 落盘诊断（getMessage 拉取结果也写进 <dshHome>/wildfire-quote.log，控制台可能不可读）
     const appendQuoteDiag = (msg: string): void => {
       try {
-        mkdirSync(homedir() + "/.dsh", { recursive: true });
-        appendFileSync(homedir() + "/.dsh/wildfire-quote.log", `${new Date().toISOString()} ${msg}\n`, "utf8");
+        mkdirSync(dshHome(), { recursive: true });
+        appendFileSync(dshHomePath("wildfire-quote.log"), `${new Date().toISOString()} ${msg}\n`, "utf8");
       } catch {
         // 忽略落盘失败
       }
@@ -1891,7 +1892,7 @@ async function handleApprovalCommand(
 function sessionLogPath(cwd: string, sessionId: string): string | undefined {
   if (!cwd || !sessionId) return undefined;
   const slug = `-${cwd.replace(/[/\\]/g, "-")}-`;
-  return pathJoin(homedir(), ".dsh", "sessions", slug, sessionId, "session.jsonl.zstd");
+  return pathJoin(dshHome(), "sessions", slug, sessionId, "session.jsonl.zstd");
 }
 
 /**
@@ -2281,7 +2282,7 @@ async function handleBindWorkspaceCommand(
 
   // 2. 注册为本机器人的 DSH 工作区群（认可群；注册表是唯一生效依据）。
   //    不再向群 extra 写任何 dsh 标记：群 extra 可被任意成员篡改且无消费方，
-  //    准入/身份一律以插件本地持久化注册表（~/.dsh/wildfire-groups.json）为准。
+  //    准入/身份一律以插件本地持久化注册表（<dshHome>/wildfire-groups.json）为准。
   api.registry?.register(groupId, String(sender), dir);
 
   api.logger?.info?.(`[wildfire] /bind-workspace done: group=${groupId}, owner=${sender}, dir=${dir} (${dirLabel})`);
@@ -2996,7 +2997,7 @@ async function buildDirsResult(api: any, key: string, command: AgentCommandPaylo
 /**
  * 遗留 DSH 群处理（注册表门槛的补充）。
  *
- * 重装 dsh / 更换机器后注册表（~/.dsh/wildfire-groups.json）丢失，但 IM
+ * 重装 dsh / 更换机器后注册表（<dshHome>/wildfire-groups.json）丢失，但 IM
  * 服务端仍残留插件此前创建的群（机器人是群主、AI 线路）。这类僵尸群的消息
  * 会被注册表门槛静默忽略，无法使用也无法清理。
  *

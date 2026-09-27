@@ -10,6 +10,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dshHomePath } from "./utils.js";
 import type { WildfireConfig } from "./config.js";
 import { getWhitelistConfig } from "./config.js";
 
@@ -26,7 +27,7 @@ export class WhitelistFilter {
     this.config = config;
     this.logger = logger;
     this.persistFile =
-      persistFile ?? getWhitelistConfig(config).persistFile ?? path.join(homedir(), ".dsh", "wildfire-allowlist.json");
+      persistFile ?? getWhitelistConfig(config).persistFile ?? dshHomePath("wildfire-allowlist.json");
   }
 
   /** Set the robot owner (fetched via getProfile after connecting). */

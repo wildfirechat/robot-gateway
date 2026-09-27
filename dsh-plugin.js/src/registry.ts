@@ -4,12 +4,13 @@
  * group `extra` is writable by any member in the Wildfire IM permission model
  * (and is no longer written by this plugin), so it can never serve as identity.
  *
- * Persisted file: ~/.dsh/wildfire-groups.json
+ * Persisted file: <dshHome>/wildfire-groups.json（$DSH_HOME 优先）
  */
 
 import { homedir } from "node:os";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dshHomePath } from "./utils.js";
 
 export interface DshGroupRecord {
   /** The user who ran /create-group (management authority for this workspace). */
@@ -29,7 +30,7 @@ export class DshGroupRegistry {
 
   constructor(logger?: any, file?: string) {
     this.logger = logger;
-    this.file = file ?? path.join(homedir(), ".dsh", "wildfire-groups.json");
+    this.file = file ?? dshHomePath("wildfire-groups.json");
   }
 
   async init(): Promise<void> {

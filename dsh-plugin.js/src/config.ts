@@ -15,6 +15,7 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
+import { dshHomePath } from "./utils.js";
 
 export interface WildfireWhiteListConfig {
   enabled?: boolean;
@@ -25,7 +26,7 @@ export interface WildfireWhiteListConfig {
    * Automatically admit the robot owner (read via `getProfile()`). Default true.
    */
   includeOwner?: boolean;
-  /** Persistence file for the dynamic `/allow` list. Default ~/.dsh/wildfire-allowlist.json */
+  /** Persistence file for the dynamic `/allow` list. Default <dshHome>/wildfire-allowlist.json（$DSH_HOME 优先） */
   persistFile?: string;
 }
 
@@ -259,7 +260,7 @@ export function getWhitelistConfig(config: WildfireConfig): Required<WildfireWhi
     deniedMessage: config.whiteList?.deniedMessage ?? "不允许使用",
     includeOwner: config.whiteList?.includeOwner ?? true,
     persistFile:
-      config.whiteList?.persistFile ?? path.join(homedir(), ".dsh", "wildfire-allowlist.json"),
+      config.whiteList?.persistFile ?? dshHomePath("wildfire-allowlist.json"),
   };
 }
 
@@ -291,7 +292,7 @@ export function getWorkspaceConfig(config: WildfireConfig): Required<WildfireWor
     allowCwdCommand: config.workspace?.allowCwdCommand ?? false,
     persist: config.workspace?.persist ?? true,
     persistFile:
-      config.workspace?.persistFile ?? path.join(homedir(), ".dsh", "wildfire-workspaces.json"),
+      config.workspace?.persistFile ?? dshHomePath("wildfire-workspaces.json"),
     catalog: config.workspace?.catalog ?? [],
     autoRoot: config.workspace?.autoRoot ?? "",
     // 项目根目录回退链：root → autoRoot → 第一个 allowedRoot → path

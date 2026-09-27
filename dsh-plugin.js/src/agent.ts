@@ -22,6 +22,7 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { WildfireSessionConfig } from "./config.js";
 import { persistSelection, readDurableSelection, type ModelSelection } from "./model.js";
+import { dshHomePath } from "./utils.js";
 
 type RequiredSessionConfig = Required<WildfireSessionConfig>;
 
@@ -207,7 +208,7 @@ export class AgentSessionManager {
   async init(): Promise<void> {
     if (this.epochLoaded) return;
     this.epochLoaded = true;
-    this.epochFile = path.join(homedir(), ".dsh", "wildfire-sessions.json");
+    this.epochFile = dshHomePath("wildfire-sessions.json");
     try {
       const raw = await readFile(this.epochFile, "utf8");
       const data = JSON.parse(raw);

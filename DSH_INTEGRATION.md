@@ -25,6 +25,8 @@
 
 其余用到的接口（`agents.create/resume/get`、`agent.followup/whenIdle/status/cancel`、`session/event` firehose、`turn/start|end`、`tool/call|result`、`assistant/message`、`goal/change`、`subagent/start|end`、`sessionProjections.snapshot`、`llm.listProviders/listModels/resolveModelInfo`、`sandboxPolicy.defaultMode/overrideOf`、`goals.get/pause/resume`、`jobs.list`、`planMode.get`、`compaction.compactNow`、`agentPresets.mount`、`systemPrompt.context`、`attachments.saveImages`）在 0.1.0-rc.7 → 0.1.5-rc.3 之间保持可用。
 
+多实例部署（一台机器多个机器人/多个 profile）见 `dsh-plugin.js/README.md` 的「多实例 / 多机器人」一节：推荐一实例一 `$DSH_HOME`（插件自建状态文件也按 `$DSH_HOME` 解析），且各实例必须使用不同的 robotId（robot-gateway 对同一机器人只允许一条连接）。
+
 升级步骤（含 sudo 与重启命令）见 `dsh-plugin.js/README.md` 的「版本兼容性（dsh）」一节；离线自检脚本 `dsh-plugin.js/scripts/compat-check.sh` 在临时 `DSH_HOME` + 假网关下验证上述两条注册分支与瀑布流「让行」语义，不影响运行中的实例。
 
 ## 设计目标

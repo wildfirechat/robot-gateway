@@ -3,7 +3,30 @@
  * Logic mirrors the openclaw plugin (`openclaw-plugin.js/src/utils.ts`).
  */
 
+import os from "node:os";
+import path from "node:path";
 import type { WildfireConfig } from "./config.js";
+
+/**
+ * dsh home 目录：`$DSH_HOME` 优先（多实例隔离的关键），否则 `~/.dsh`。
+ *
+ * dsh 自己就是这么解析的（`@deepseek-ai/dsh-home-paths` 的 `DSH_HOME_ENV`）：
+ * 显式配置 > `$DSH_HOME` > `~/.dsh`。插件自建的状态文件（会话 epoch、/cwd 绑定、
+ * 白名单、群注册表、会话模式、诊断日志）都放在这里，因此
+ * `DSH_HOME=/path/to/inst dsh --profile wildfire` 能让一个机器上的多个实例完全隔离。
+ *
+ * 注意：`~` 的用户目录展开（如 `/cwd ~/xxx`）语义上是「登录用户的家目录」，
+ * 仍应使用 `os.homedir()`，不要用这个函数。
+ */
+export function dshHome(): string {
+  const fromEnv = (process.env.DSH_HOME ?? "").trim();
+  return fromEnv.length > 0 ? path.resolve(fromEnv) : path.join(os.homedir(), ".dsh");
+}
+
+/** 插件状态文件/日志路径（统一放在 dsh home 下）。 */
+export function dshHomePath(...segments: string[]): string {
+  return path.join(dshHome(), ...segments);
+}
 
 /** Message payload type constants (Wildfire IM). */
 export const MESSAGE_TYPE_TEXT = 1;
