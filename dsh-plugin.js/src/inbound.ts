@@ -60,6 +60,7 @@ import {
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
+import { describeTurnFailure, extractTurnFailure, turnReasonKind, type TurnFailure } from "./failures.js";
 import {
   readDurableSelection,
   readDurableSelectionFromEvents,
@@ -138,6 +139,7 @@ async function readPersistedSessionState(
   persistedStateCache.set(sessionId, { at: Date.now(), state });
   return state;
 }
+
 
 // ===== 会话处理模式（interrupt=后到打断先到 / queue=原串行排队），按会话 key 持久化 =====
 type ConvMode = "interrupt" | "queue";
@@ -998,6 +1000,32 @@ export async function handleIncomingMessage(
       `[wildfire] turn finished: key=${key}, text="${finalText.slice(0, 100) || "(empty)"}", reason=${JSON.stringify(outcome.reason)?.slice(0, 300)}, sending reply`
     );
 
+    // 回合以错误收尾（欠费 402 / 鉴权 401 / 限流 429 / 网络…）：必须明确告知用户。
+    // 旧行为是把这种回合当"无输出"静默取消气泡 → 用户发消息"没有反应"，无从判断原因。
+    const failure = extractTurnFailure(outcome.reason);
+    if (failure) {
+      const notice = describeTurnFailure(failure);
+      logger.error?.(
+        `[wildfire] turn failed: key=${key}, code=${failure.code}${failure.status ? ` status=${failure.status}` : ""}, ${failure.raw}`
+      );
+      api.interactions?.pushStatus(key, { state: "done", reason: "error", error: notice });
+      api.interactions?.pushMetrics(key, {
+        ...(outcome.metrics ?? {}),
+        sessionId: agents.peekSessionId(key),
+      });
+      try {
+        await sendStreamingReply(sender, conv, notice, streamId, "completed", logger);
+      } catch {
+        // 二次发送失败（网络抖动等）忽略：用户至少能在状态通道看到 error
+      }
+      return;
+    }
+    const reasonKind = turnReasonKind(outcome.reason);
+    // max-tokens：正文会被截断，补一句说明（有正文时才提示）
+    if (reasonKind === "max-tokens" && finalText.trim() && !finalText.includes("输出被长度上限截断")) {
+      finalText = `${finalText.trim()}\n\n（输出达到长度上限被截断）`;
+    }
+
     // Outbound media: extract [image:path] / [media:path] markers and send them.
     let extracted: ReturnType<typeof extractOutboundMedia> | undefined;
     if (getMediaConfig(config).outboundEnabled) {
@@ -1039,7 +1067,9 @@ export async function handleIncomingMessage(
     const noReply = !noOutput && finalText.trim().toUpperCase() === "NO_REPLY";
     // 回合被取消（/stop 或上游中断）：即使取消前已流出部分文本，也不作为“完成”提交，
     // 一律发送取消消息(type 20)收起占位气泡。
-    const cancelled = String(outcome?.reason ?? "").toLowerCase() === "cancelled";
+    // dsh 的 reason 是对象（{kind:"aborted"|"interrupted"|...}），不是字符串，
+    // 因此按 kind 判定（旧代码用 String(reason) 永远匹配不到 "cancelled"）。
+    const cancelled = ["cancelled", "aborted", "interrupted"].includes(reasonKind);
     api.interactions?.pushStatus(key, {
       state: "done",
       reason: noOutput || noReply || cancelled ? "cancelled" : "completed",
@@ -1061,20 +1091,36 @@ export async function handleIncomingMessage(
       await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
     } else if (extracted?.media?.length) {
       await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
+    } else if (reasonKind && reasonKind !== "completed") {
+      // 其它非正常结束（blocked / max-tokens 且无输出等）：给一句提示，而不是静默取消
+      await sendStreamingReply(
+        sender,
+        conv,
+        `⚠️ 本轮未产生回复（${reasonKind}），请重试或查看 dsh 日志。`,
+        streamId,
+        "completed",
+        logger
+      );
     } else {
       await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
     }
   } catch (err: any) {
     logger?.error?.(`[wildfire] dispatch failed: ${err.message}\n${err.stack?.slice(0, 1200) ?? ""}`);
+    // 派发阶段抛出的异常同样做错误分类（欠费/鉴权/限流…），给用户可读提示
+    const failure: TurnFailure = {
+      code: String(err?.code ?? "UNKNOWN"),
+      ...(typeof err?.status === "number" ? { status: err.status } : {}),
+      raw: String(err?.message ?? err),
+    };
+    const notice = describeTurnFailure(failure);
     // turn 异常中断：状态可能残留 running/waiting_user，重置为 done 并带上错误原因
     api.interactions?.pushStatus(key, {
       state: "done",
       reason: "error",
-      error: String(err?.message ?? err).slice(0, 300),
+      error: notice,
     });
     try {
-      const errorText = `Processing failed: ${err.message.slice(0, 80)}`;
-      await sendStreamingReply(sender, conv, errorText, streamId, "completed", logger);
+      await sendStreamingReply(sender, conv, notice, streamId, "completed", logger);
     } catch {
       // ignore secondary send errors
     }

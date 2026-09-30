@@ -44,6 +44,12 @@ public class RobotFatherService {
 
     @PostConstruct
     private void init() {
+        // BotFather 功能关闭时，跳过初始化，无需其他配置
+        if (!botFatherConfig.isEnabled()) {
+            LOG.info("BotFather is disabled, skip initialization");
+            return;
+        }
+
         // 验证公网地址配置
         if (botFatherConfig.getPublicAddr() == null || botFatherConfig.getPublicAddr().isEmpty()) {
             LOG.error("BotFather public address is not configured! Please set botfather.publicAddr in application.properties");

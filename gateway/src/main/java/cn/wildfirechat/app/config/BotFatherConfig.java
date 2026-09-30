@@ -20,11 +20,11 @@ public class BotFatherConfig {
     // Server API配置
     private Admin admin = new Admin();
 
-    // 回调地址配置
-    private String callbackUrl;
+    // 回调地址配置（默认空字符串，enabled=false 时无需配置）
+    private String callbackUrl = "";
 
-    // 公网地址（可选）
-    private String publicAddr;
+    // 公网地址（可选，默认空字符串，enabled=false 时无需配置）
+    private String publicAddr = "";
 
     // 每个用户最大机器人数量（默认1）
     private int maxRobotsPerUser = 1;
@@ -102,9 +102,9 @@ public class BotFatherConfig {
      * 机器人配置内部类
      */
     public static class Robot {
-        private String id;
-        private String name;
-        private String secret;
+        private String id = "";
+        private String name = "";
+        private String secret = "";
 
         public String getId() {
             return id;
@@ -135,8 +135,8 @@ public class BotFatherConfig {
      * Server API配置内部类
      */
     public static class Admin {
-        private String url;
-        private String secret;
+        private String url = "";
+        private String secret = "";
 
         public String getUrl() {
             return url;
