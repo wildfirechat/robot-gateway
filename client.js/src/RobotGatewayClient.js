@@ -76,7 +76,9 @@ export class RobotGatewayClient {
                     this.handleMessage(data.toString());
                 });
 
-                this.ws.on('close', () => {
+                this.ws.on('close', (code, reason) => {
+                    // 诊断用：网关关闭连接时的状态码/原因（如 1000 "replaced by new robot connection"）
+                    console.log(`WebSocket close code=${code} reason=${reason?.toString?.() ?? reason}`);
                     this.handleDisconnect();
                 });
 
