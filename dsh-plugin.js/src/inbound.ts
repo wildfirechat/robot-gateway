@@ -2701,6 +2701,11 @@ async function handleDshCommand(
       const modeArg = cmdText.replace(/^\/mode\s*/, "").trim().toLowerCase();
       if (modeArg === "interrupt" || modeArg === "queue") {
         setConvMode(key, modeArg);
+        // 刷新面板数据（type=3）：mode 体现在 type=3 的 mode.current 回显上，且必须在
+        // lastChange 之前刷新——客户端收到 lastChange 后会重读 type=3，读到旧 mode 就会
+        // 把刚切换的选项回滚（表现为「设置串行/打断不生效」）。与 preset/approval 分支一致。
+        const modeData = await buildPanelData(api, key).catch(() => undefined);
+        if (modeData) api.interactions?.pushPanelData(key, modeData);
         api.interactions?.pushStatus(key, { lastChange: `会话模式 → ${modeArg === "interrupt" ? "打断（后到打断先到）" : "排队（串行等待）"}` });
       } else {
         api.interactions?.pushStatus(key, { lastChange: `/mode 参数需为 interrupt 或 queue（当前 ${getConvMode(key)}）` });
