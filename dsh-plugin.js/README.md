@@ -203,6 +203,14 @@ dsh --profile wildfire
 
 **版本要求**：本插件 0.2.0 起同时适配 dsh 0.1.x 与 0.2.x（`peerDependencies` 声明）；dsh 0.2 起 preset 服务改由 `@deepseek-ai/dsh-agent-preset-registry` 提供（旧包 `@deepseek-ai/dsh-agent-presets` 已不存在），且 dsh 会**拒绝加载 peerDependencies 不匹配的插件**（日志：`incompatible with dsh …`）——升级 dsh 后请同步安装匹配的插件版本。
 
+**自动启用（推荐，0.2.0 起）**：`build-deploy.sh` 默认执行 `scripts/enable-presets.mjs`，把「禁用 agent 平面行 + `agent-preset-registry` + 4 个 preset 定义（standard/ptc/minimal/cordis）」写进 profile 的 `cordis.patch.yml`（脚本会从已安装的 `dsh-web-app` bundle 抄禁用清单与 preset 定义）。因此**装好插件并重启后，IM 面板的「Agent 模式」直接可选**，无需手工改 YAML。脚本幂等，写入前备份 `cordis.patch.yml.bak-<时间戳>`；不想用 preset 模式（工具来自 dsh-base 全局行，面板档位选择器会禁用）时：
+
+```bash
+ENABLE_PRESETS=0 ./build-deploy.sh wildfire
+```
+
+下面是该脚本自动完成的等价手工步骤（便于理解/排查）。
+
 **重要**：IM 专用 profile 只加载 `dsh-base`，需要显式配置四件事，否则功能缺失：
 
 1. `dsh-tool-ask-user` 不在任何 bundle 内，不启用则 Agent 没有 `ask_user` 工具（提问退化为模型直接发文本）；
