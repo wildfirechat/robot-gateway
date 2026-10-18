@@ -201,6 +201,8 @@ cp ~/.dsh/profiles/web/cordis.patch.yml ~/.dsh/profiles/wildfire/cordis.patch.ym
 dsh --profile wildfire
 ```
 
+**版本要求**：本插件 0.2.0 起同时适配 dsh 0.1.x 与 0.2.x（`peerDependencies` 声明）；dsh 0.2 起 preset 服务改由 `@deepseek-ai/dsh-agent-preset-registry` 提供（旧包 `@deepseek-ai/dsh-agent-presets` 已不存在），且 dsh 会**拒绝加载 peerDependencies 不匹配的插件**（日志：`incompatible with dsh …`）——升级 dsh 后请同步安装匹配的插件版本。
+
 **重要**：IM 专用 profile 只加载 `dsh-base`，需要显式配置四件事，否则功能缺失：
 
 1. `dsh-tool-ask-user` 不在任何 bundle 内，不启用则 Agent 没有 `ask_user` 工具（提问退化为模型直接发文本）；
@@ -212,6 +214,8 @@ dsh --profile wildfire
 
 ```yaml
 # ── 禁用 agent 平面行（与 dsh-web-app 的清单一致）──
+- id: tool-plugin-manager
+  disabled: true
 - id: tool-bash
   disabled: true
 - id: tool-pwsh
@@ -246,7 +250,7 @@ dsh --profile wildfire
   disabled: true
 - id: tool-subagent-fork
   disabled: true
-- id: workflow-worker-thread
+- id: workflow-ptc
   disabled: true
 - id: tool-workflow
   disabled: true
@@ -267,8 +271,10 @@ dsh --profile wildfire
     # 该行原本由 dsh-web-app bundle 提供，IM 专用 profile 必须显式补上。
     - id: subagent-model-selection-settings
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
+    # preset 注册表：dsh 0.2 起由 dsh-agent-preset-registry 提供 agentPresets 服务
+    # （0.1.x 用 @deepseek-ai/dsh-agent-presets，0.2 起该包已不存在）
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
     - id: tool-ask-user
