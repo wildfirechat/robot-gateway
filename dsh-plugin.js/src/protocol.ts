@@ -173,6 +173,8 @@ export interface AgentCommandPayload {
 export interface AgentSessionSummary {
   /** DSH session id（wildfire-<会话哈希>-<目录哈希>[-<epoch>]）。 */
   id: string;
+  /** 会话标题（首条用户消息的前 40 字，便于面板识别；无则空）。 */
+  title?: string;
   /** 该会话绑定的工作目录（绝对路径）。 */
   cwd?: string;
   /** 创建时间（毫秒）。 */

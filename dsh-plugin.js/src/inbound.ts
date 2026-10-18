@@ -1323,7 +1323,7 @@ async function handleCommand(
     case "reset":
       await api.wildfireAgents.resetSession(key);
       api.interactions?.resetTaskCards(key);
-      await sendTip(sender, conv, "会话已重置（上下文清空，重新开始）", api);
+      await sendTip(sender, conv, "已新建会话（原会话保留，可在 AI 面板「会话」里切回）", api);
       return;
     case "create":
     case "create-group":
@@ -3914,6 +3914,112 @@ async function sessionLogMtime(sessionDir: string): Promise<number> {
   }
 }
 
+// ── 会话标题：首条用户消息前 40 字，列表里展示（避免显示路径/裸 id）──
+// 读取用 persistence.open(id,'read') + read(0,30)，只取开头少量事件；结果按 id 缓存并落盘。
+const sessionTitleCache = new Map<string, string>();
+let sessionTitlesLoaded = false;
+let sessionTitlesTimer: NodeJS.Timeout | undefined;
+
+function sessionTitlesFile(): string {
+  return dshHomePath("wildfire-session-titles.json");
+}
+
+function loadSessionTitles(): void {
+  if (sessionTitlesLoaded) return;
+  sessionTitlesLoaded = true;
+  try {
+    const raw = readFileSync(sessionTitlesFile(), "utf8");
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object") {
+      for (const [k, v] of Object.entries<string>(obj)) {
+        if (typeof v === "string") sessionTitleCache.set(k, v);
+      }
+    }
+  } catch {
+    // 首次运行/文件损坏：忽略
+  }
+}
+
+function scheduleSessionTitlesSave(): void {
+  if (sessionTitlesTimer) return;
+  sessionTitlesTimer = setTimeout(() => {
+    sessionTitlesTimer = undefined;
+    try {
+      writeFileSync(
+        sessionTitlesFile(),
+        JSON.stringify(Object.fromEntries(sessionTitleCache), null, 2),
+        "utf8"
+      );
+    } catch {
+      // 标题缓存写失败不影响功能
+    }
+  }, 500);
+  sessionTitlesTimer.unref?.();
+}
+
+/** 从内容块里提取纯文本（字符串或 [{type:'text',text}]）。 */
+function contentText(content: any): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c && c.type === "text" && typeof c.text === "string")
+      .map((c: any) => c.text)
+      .join(" ");
+  }
+  return "";
+}
+
+/** 从会话日志开头的事件里找第一条用户消息文本。 */
+function firstUserText(events: any[]): string {
+  for (const ev of events ?? []) {
+    const d = ev?.data ?? {};
+    if (ev?.type === "agent/inbox/spliced") {
+      const inserted = Array.isArray(d.inserted) ? d.inserted : [];
+      for (const m of inserted) {
+        if (m?.role === "user") {
+          const t = contentText(m.content);
+          if (t) return t;
+        }
+      }
+    }
+    if (typeof ev?.type === "string" && ev.type.includes("message")) {
+      const m = d.message ?? d;
+      if (m?.role === "user") {
+        const t = contentText(m.content);
+        if (t) return t;
+      }
+    }
+  }
+  return "";
+}
+
+/** 会话标题（首条用户消息，压缩空白并截断）；取不到返回空串。 */
+async function sessionTitleOf(api: any, id: string): Promise<string> {
+  loadSessionTitles();
+  const cached = sessionTitleCache.get(id);
+  if (cached !== undefined) return cached;
+  const persistence = api.ctx?.get?.("sessionPersistence");
+  if (!persistence?.open) return "";
+  let handle: any;
+  try {
+    handle = await persistence.open(id, "read");
+    const result = await handle.read(0, 30);
+    const raw = firstUserText(result?.events ?? []);
+    const title = raw.replace(/\s+/g, " ").trim().slice(0, 40);
+    sessionTitleCache.set(id, title);
+    scheduleSessionTitlesSave();
+    return title;
+  } catch {
+    return "";
+  } finally {
+    try {
+      await handle?.close?.();
+    } catch {
+      // 关闭失败忽略
+    }
+  }
+}
+
 /**
  * 列出该会话最近的 DSH session（最近活跃倒序，最多 SESSION_LIST_LIMIT 条）。
  * 数据源：sessionPersistence.list()（header 带 id/cwd/createdAt）+ 会话日志 mtime
@@ -3978,7 +4084,14 @@ async function listConversationSessions(api: any, key: string): Promise<AgentSes
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
     .slice(0, SESSION_LIST_LIMIT);
 
-  // 3) 兜底补 cwd/createdAt（list 不可用时的旧版本 dsh）
+  // 3) 会话标题（首条用户消息，最多 40 字）：面板用它替代路径/裸 id 展示
+  await Promise.all(
+    list.map(async (item) => {
+      item.title = await sessionTitleOf(api, item.id);
+    })
+  );
+
+  // 4) 兜底补 cwd/createdAt（list 不可用时的旧版本 dsh）
   for (const item of list) {
     if (!item.cwd && persistence?.inspect) {
       try {

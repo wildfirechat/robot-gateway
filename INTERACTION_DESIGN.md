@@ -848,7 +848,7 @@ realpath 校验）把文件作为媒体消息发到 IM。两条通道并存：
   "ver": 1, "op": "sessions", "seq": 12345, "robotId": "robot_xxx_yyy",
   "sessionId": "wildfire-...-<当前>",
   "sessions": [
-    { "id": "wildfire-...", "cwd": "/Users/x/proj", "createdAt": 1787470162762,
+    { "id": "wildfire-...", "title": "首条用户消息前 40 字", "cwd": "/Users/x/proj", "createdAt": 1787470162762,
       "updatedAt": 1787470999000, "eventCount": 42, "sizeBytes": 123456, "current": true }
   ],
   "total": 1
