@@ -6,7 +6,7 @@
  * replaces the openclaw reply dispatch with the dsh AgentSessionManager.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
@@ -57,6 +57,7 @@ import {
   type AgentApprovalResultPayload,
   type AgentCommandPayload,
   type AgentCommandResultPayload,
+  type AgentSessionSummary,
 } from "./protocol.js";
 import { SANDBOX_MODES, setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";
 import { sessionIdForConversation } from "./agent.js";
@@ -683,7 +684,7 @@ export async function handleIncomingMessage(
         return;
       }
 
-      if (cmd === "cwd" || cmd === "ls") {
+      if (cmd === "cwd" || cmd === "ls" || cmd === "switch") {
         // Querying/listing is open to every admitted member; setting /cwd
         // requires the admin role or the group owner.
         const isSet = cmd === "cwd" && trimmed.replace(/^\/cwd\s*/, "").trim().length > 0;
@@ -2666,6 +2667,50 @@ async function handleDshCommand(
     return;
   }
 
+  // op=sessions：最近会话列表（按最近活跃倒序，最多 10 条），应答走 209（透明消息）
+  if (command.op === "sessions") {
+    const result = await buildSessionsResult(api, key, command);
+    api.interactions?.sendCommandResult?.(key, result);
+    api.logger?.info?.(
+      `[wildfire] DSH_Command sessions: key=${key}, seq=${command.seq ?? "-"}, robotId=${command.robotId ?? "-"}, ` +
+        `count=${result.sessions?.length ?? 0}, current=${result.sessionId ?? "-"}`
+    );
+    return;
+  }
+
+  // op=switch：切换到指定历史会话（resume 其上下文）；与 /cwd 一样需要管理权限
+  if (command.op === "switch") {
+    const target = String(command.sessionId ?? "").trim();
+    if (!(await authorizePanelCmd(api, "switch", sender, conv, isGroup))) {
+      api.interactions?.pushStatus(key, { error: "无权限切换会话" });
+      api.interactions?.sendCommandResult?.(key, {
+        ver: 1, op: "switch", seq: command.seq, robotId: command.robotId, ok: false, error: "无权限切换会话",
+      });
+      return;
+    }
+    const result = await switchConversationSession(api, key, target, command);
+    api.interactions?.sendCommandResult?.(key, result);
+    if (result.ok) {
+      // 统计/任务卡按新会话重置（与 /cwd 一致）
+      try {
+        const m = await api.wildfireAgents?.snapshotMetrics?.(key);
+        api.interactions?.pushMetrics(key, { ...(m ?? {}), sessionId: api.wildfireAgents?.peekSessionId?.(key) });
+      } catch {
+        api.interactions?.resetMetrics(key);
+      }
+      api.interactions?.resetTaskCards(key);
+      api.interactions?.pushStatus(key, {
+        lastChange: `会话 → ${String(result.sessionId ?? "").slice(-12)}`,
+      });
+      const data = await buildPanelData(api, key).catch(() => undefined);
+      if (data) api.interactions?.pushPanelData(key, data);
+    }
+    api.logger?.info?.(
+      `[wildfire] DSH_Command switch: key=${key}, target=${target || "(empty)"}, ok=${!!result.ok}, by=${sender}`
+    );
+    return;
+  }
+
   if (command.op === "set") {
     const cmdText = (command.cmd ?? "").trim();
     const m = cmdText.match(/^\/(model|effort|cwd|sandbox|plan|compact|reset|ls|mode|preset|approval|destroy(?:-group)?)\b/);
@@ -2849,7 +2894,7 @@ async function authorizePanelCmd(
   // 且非注册群的 207 已被注册表门槛拦截（防借面板绕过），此处只做授权检查
   // （私聊=管理员，群聊=创建者/管理员）。若在此叠加功能开关，未开启开关的
   // 部署中面板改 cwd/model 会静默失效。
-  if (cmd === "cwd" || cmd === "ls") {
+  if (cmd === "cwd" || cmd === "ls" || cmd === "switch") {
     return isGroup
       ? (await access.canManageWorkspace(senderId, String(conv.target), true)) ||
           isDshGroupCreator(api, String(conv.target), senderId)
@@ -3833,4 +3878,209 @@ async function sendTip(
   targetLine?: number
 ): Promise<void> {
   await sendDirectReply(sender, conv, text, api, targetLine, true);
+}
+
+// ═══════════════════ 会话切换（207 op=sessions / op=switch） ═══════════════════
+// 一个 IM 会话在 DSH 侧可能对应多个历史 session（/reset 换新、/cwd 按目录派生、
+// 面板切换）。sessionId 前缀 `wildfire-<会话哈希20>-` 唯一标识归属，客户端据此
+// 让用户从「最近 10 个」里选一个恢复上下文。
+
+/** 会话列表上限（面板「选择会话」只展示最近 10 个）。 */
+const SESSION_LIST_LIMIT = 10;
+
+/** 该 IM 会话的 sessionId 前缀（与 agent.ts 的派生规则一致，只取会话哈希部分）。 */
+function sessionIdPrefixFor(key: string): string {
+  const hash = createHash("sha256").update(key.toLowerCase()).digest("hex").slice(0, 20);
+  return `wildfire-${hash}-`;
+}
+
+/** 会话日志最近修改时间（毫秒）；取不到返回 0。 */
+async function sessionLogMtime(sessionDir: string): Promise<number> {
+  try {
+    const entries = await readdir(sessionDir);
+    let best = 0;
+    for (const f of entries) {
+      if (!f.startsWith("session.")) continue;
+      try {
+        const st = await stat(path.join(sessionDir, f));
+        if (st.mtimeMs > best) best = st.mtimeMs;
+      } catch {
+        // 单个文件读不到忽略
+      }
+    }
+    return best;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 列出该会话最近的 DSH session（最近活跃倒序，最多 SESSION_LIST_LIMIT 条）。
+ * 数据源：sessionPersistence.list()（header 带 id/cwd/createdAt）+ 会话日志 mtime
+ * 作为「最近活跃」；list 不可用时退回扫描 $DSH_HOME/sessions/<project>/<id>。
+ */
+async function listConversationSessions(api: any, key: string): Promise<AgentSessionSummary[]> {
+  const prefix = sessionIdPrefixFor(key);
+  const current = String(api.wildfireAgents?.peekSessionId?.(key) ?? "");
+  const persistence = api.ctx?.get?.("sessionPersistence");
+  const rows = new Map<string, AgentSessionSummary>();
+
+  // 1) 持久化索引：header 提供 cwd/createdAt/事件数
+  try {
+    const snaps = persistence?.list ? await persistence.list() : [];
+    for (const snap of snaps ?? []) {
+      const h = snap?.header ?? {};
+      const id = String(h.id ?? "");
+      if (!id.startsWith(prefix) || h.origin === "subagent") continue;
+      const created = Number(h.createdAt) || 0;
+      rows.set(id, {
+        id,
+        cwd: h.cwd ? String(h.cwd) : undefined,
+        createdAt: created,
+        updatedAt: created,
+        eventCount: typeof snap.eventCount === "number" ? snap.eventCount : undefined,
+        sizeBytes: typeof snap.sizeBytes === "number" ? snap.sizeBytes : undefined,
+        current: id === current,
+      });
+    }
+  } catch {
+    // list 不可用：走文件扫描兜底
+  }
+
+  // 2) 文件扫描：补「最近活跃」mtime，并兜底 list 缺失的条目
+  const root = dshHomePath("sessions");
+  let projectDirs: string[] = [];
+  try {
+    projectDirs = await readdir(root);
+  } catch {
+    projectDirs = [];
+  }
+  for (const d of projectDirs) {
+    let ids: string[] = [];
+    try {
+      ids = await readdir(path.join(root, d));
+    } catch {
+      continue;
+    }
+    for (const id of ids) {
+      if (!id.startsWith(prefix)) continue;
+      const mtime = await sessionLogMtime(path.join(root, d, id));
+      const existing = rows.get(id);
+      if (existing) {
+        if (mtime > 0) existing.updatedAt = mtime;
+      } else {
+        rows.set(id, { id, updatedAt: mtime, current: id === current });
+      }
+    }
+  }
+
+  const list = [...rows.values()]
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    .slice(0, SESSION_LIST_LIMIT);
+
+  // 3) 兜底补 cwd/createdAt（list 不可用时的旧版本 dsh）
+  for (const item of list) {
+    if (!item.cwd && persistence?.inspect) {
+      try {
+        const insp = await persistence.inspect(item.id);
+        const meta = insp?.meta ?? insp?.header ?? {};
+        if (meta.cwd) item.cwd = String(meta.cwd);
+        if (!item.createdAt && meta.createdAt) item.createdAt = Number(meta.createdAt);
+        if (!item.eventCount && Array.isArray(insp?.events)) item.eventCount = insp.events.length;
+      } catch {
+        // 会话日志损坏：保留条目（仅展示），切换时会再校验
+      }
+    }
+    if (!item.updatedAt) item.updatedAt = item.createdAt ?? 0;
+  }
+  return list;
+}
+
+/** 209 应答：op=sessions 的最近会话列表。 */
+async function buildSessionsResult(
+  api: any,
+  key: string,
+  command: AgentCommandPayload
+): Promise<AgentCommandResultPayload> {
+  let sessions: AgentSessionSummary[] = [];
+  try {
+    sessions = await listConversationSessions(api, key);
+  } catch (err: any) {
+    api.logger?.warn?.(`[wildfire] list sessions failed: ${String(err?.message ?? err)}`);
+  }
+  return {
+    ver: 1,
+    op: "sessions",
+    seq: command.seq,
+    robotId: command.robotId,
+    sessionId: String(api.wildfireAgents?.peekSessionId?.(key) ?? ""),
+    sessions,
+    total: sessions.length,
+  };
+}
+
+/**
+ * 切换当前会话到指定历史 session：绑定该 session 的 cwd + 由 AgentSessionManager
+ * 固定 session id（下一条消息 resume，上下文恢复）。失败时返回可读原因。
+ */
+async function switchConversationSession(
+  api: any,
+  key: string,
+  sessionId: string,
+  command: AgentCommandPayload
+): Promise<AgentCommandResultPayload> {
+  const base: AgentCommandResultPayload = { ver: 1, op: "switch", seq: command.seq, robotId: command.robotId };
+  if (!sessionId) {
+    return { ...base, ok: false, error: "缺少 sessionId" };
+  }
+  if (!sessionId.startsWith(sessionIdPrefixFor(key))) {
+    return { ...base, ok: false, error: "该会话不属于当前对话" };
+  }
+  const current = String(api.wildfireAgents?.peekSessionId?.(key) ?? "");
+  if (sessionId === current) {
+    return { ...base, ok: true, sessionId, error: undefined };
+  }
+
+  // 目标 session 的 cwd：优先取最近列表，其次 inspect 头部
+  let cwd = "";
+  try {
+    const sessions = await listConversationSessions(api, key);
+    cwd = String(sessions.find((s) => s.id === sessionId)?.cwd ?? "");
+  } catch {
+    cwd = "";
+  }
+  if (!cwd) {
+    const persistence = api.ctx?.get?.("sessionPersistence");
+    try {
+      const insp = await persistence?.inspect?.(sessionId);
+      const meta = insp?.meta ?? insp?.header ?? {};
+      if (meta.cwd) cwd = String(meta.cwd);
+    } catch {
+      // 找不到会话
+    }
+  }
+  if (!cwd) {
+    return { ...base, ok: false, error: "会话不存在或未记录工作目录" };
+  }
+
+  // 目录必须仍在允许范围内（allowedRoots），否则拒绝（避免借切换越权读目录）
+  let canon: string | null = null;
+  try {
+    canon = await api.workspace?.validateUserPath?.(cwd);
+  } catch {
+    canon = null;
+  }
+  if (!canon) {
+    return { ...base, ok: false, error: `工作目录不可用：${cwd}` };
+  }
+
+  try {
+    api.workspace.setOverride(key, canon);
+    await api.wildfireAgents.switchSession(key, sessionId);
+  } catch (err: any) {
+    return { ...base, ok: false, error: `切换失败：${String(err?.message ?? err).slice(0, 120)}` };
+  }
+  // 状态通道同步新 cwd（面板/标题栏可见）
+  api.interactions?.pushStatus(key, { cwd: canon });
+  return { ...base, ok: true, sessionId, cwd: canon };
 }

@@ -191,6 +191,8 @@ export class AgentSessionManager {
   private legacyEpochByKey = new Map<string, number>();
   /** 迁移后的旧格式 sessionId：key → 旧 id（该会话继续用旧 id，上下文保留）。 */
   private legacySessionByKey = new Map<string, string>();
+  /** 面板「选择会话」切换到的 session id（key → id）：优先于按 (cwd, epoch) 派生。 */
+  private sessionOverrideByKey = new Map<string, string>();
   /** 最近一次 getAgent 解析的 cwd（peekSessionId 用，不持久化）。 */
   private cwdByKey = new Map<string, string>();
   private sessionIdToKey = new Map<string, string>();
@@ -231,6 +233,12 @@ export class AgentSessionManager {
         if (data.legacy) {
           for (const [key, sid] of Object.entries<string>(data.legacy)) {
             this.legacySessionByKey.set(key, sid);
+          }
+        }
+        // 面板「选择会话」切换结果（key → sessionId），重启后仍指向该会话
+        if (data.switched) {
+          for (const [key, sid] of Object.entries<string>(data.switched)) {
+            if (typeof sid === "string" && sid) this.sessionOverrideByKey.set(key, sid);
           }
         }
         // 会话级 preset 覆盖（面板 /preset 切换的结果），重启不丢
@@ -275,6 +283,7 @@ export class AgentSessionManager {
         {
           epochs,
           legacy: Object.fromEntries(this.legacySessionByKey),
+          switched: Object.fromEntries(this.sessionOverrideByKey),
           presets: Object.fromEntries(this.presetByKey),
         },
         null,
@@ -429,7 +438,10 @@ export class AgentSessionManager {
     this.cwdByKey.set(key, norm);
     const epoch = this.epochOf(key, norm);
     // 迁移优先：已迁移到旧 id 的会话继续用旧 id（保留切换目录前的上下文）
-    let sessionId = this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, norm, epoch);
+    let sessionId =
+      this.sessionOverrideByKey.get(key) ??
+      this.legacySessionByKey.get(key) ??
+      sessionIdForConversationWithCwd(key, norm, epoch);
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.lastActivity = Date.now();
@@ -719,8 +731,9 @@ export class AgentSessionManager {
     const managed = this.sessions.get(sessionId);
     this.sessions.delete(sessionId);
     this.sessionIdToKey.delete(sessionId);
-    // 显式重置：不再沿用旧 id/旧上下文
+    // 显式重置：不再沿用旧 id/旧上下文（含面板切换过的会话）
     this.legacySessionByKey.delete(key);
+    this.sessionOverrideByKey.delete(key);
     this.bumpEpoch(key, norm);
     if (managed) {
       await managed.handle.dispose().catch((err: unknown) =>
@@ -737,29 +750,56 @@ export class AgentSessionManager {
    * epoch —— 下次消息按新 cwd 派生 id（resume 恢复该目录上下文，或新建）。
    */
   async switchWorkspace(key: string): Promise<void> {
-    const disposed: string[] = [];
-    for (const [sid, managed] of [...this.sessions]) {
-      if (managed.key !== key) continue;
-      this.sessions.delete(sid);
-      this.sessionIdToKey.delete(sid);
-      await managed.handle.dispose().catch((err: unknown) =>
-        this.logger?.warn?.(`[wildfire-agent] switch ${sid}: ${String(err)}`)
-      );
-      disposed.push(sid);
-    }
+    // 切目录 = 回到该目录派生的会话：清掉面板切换的会话绑定
+    this.sessionOverrideByKey.delete(key);
+    this.persistEpochs();
+    const disposed = await this.disposeKeySessions(key);
     this.cwdByKey.delete(key); // 强制下次按新 cwd 派生
     this.logger?.info?.(
       `[wildfire-agent] workspace switched: key=${key}, disposed=[${disposed.join(", ")}]`
     );
   }
 
+  /**
+   * 面板「选择会话」：把该会话固定到指定历史 session，下一条消息按该 session 的
+   * cwd resume（上下文恢复）。与 /cwd 的区别：这里直接指定 session id，不按
+   * (cwd, epoch) 派生；与 /reset 的区别：不 bump epoch、不作废旧 session。
+   */
+  async switchSession(key: string, sessionId: string): Promise<void> {
+    this.sessionOverrideByKey.set(key, sessionId);
+    this.persistEpochs();
+    const disposed = await this.disposeKeySessions(key);
+    this.cwdByKey.delete(key); // 让 getAgent 重新按 workspace override 解析 cwd
+    this.logger?.info?.(
+      `[wildfire-agent] session switched: key=${key}, sessionId=${sessionId}, disposed=[${disposed.join(", ")}]`
+    );
+  }
+
+  /** Dispose 该 key 的全部活跃会话（会话日志保留，可再 resume）。 */
+  private async disposeKeySessions(key: string): Promise<string[]> {
+    const disposed: string[] = [];
+    for (const [sid, managed] of [...this.sessions]) {
+      if (managed.key !== key) continue;
+      this.sessions.delete(sid);
+      this.sessionIdToKey.delete(sid);
+      await managed.handle.dispose().catch((err: unknown) =>
+        this.logger?.warn?.(`[wildfire-agent] dispose ${sid}: ${String(err)}`)
+      );
+      disposed.push(sid);
+    }
+    return disposed;
+  }
+
   /** 当前会话 id（不创建 agent）：优先最近解析的 cwd，未激活时用旧格式预览 id。 */
   peekSessionId(key: string): string {
+    // 面板切换过的会话优先（其次迁移映射），否则按当前 cwd + epoch 派生
+    const pinned = this.sessionOverrideByKey.get(key) ?? this.legacySessionByKey.get(key);
+    if (pinned) return pinned;
     const cwd = this.cwdByKey.get(key);
     if (!cwd) return sessionIdForConversation(key, this.legacyEpochByKey.get(key) ?? 0);
     const norm = normalizeCwd(cwd);
     const epoch = this.epochOf(key, norm);
-    return this.legacySessionByKey.get(key) ?? sessionIdForConversationWithCwd(key, norm, epoch);
+    return sessionIdForConversationWithCwd(key, norm, epoch);
   }
 
   /** 解析 (key, cwd)：优先缓存，否则走 cwdProvider（per-session 模式用旧格式预览 id）。 */
@@ -779,6 +819,7 @@ export class AgentSessionManager {
    * fresh (epoch 0, new directory-derived id).
    */
   async disposeWorkspace(key: string): Promise<void> {
+    this.sessionOverrideByKey.delete(key);
     for (const [sid, managed] of [...this.sessions]) {
       if (managed.key !== key) continue;
       this.sessions.delete(sid);

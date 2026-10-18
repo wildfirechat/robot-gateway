@@ -820,5 +820,62 @@ realpath 校验）把文件作为媒体消息发到 IM。两条通道并存：
 
 ---
 
-**文档版本**：2.4（§11 AI 面板能力档位 preset / 工具审批策略 / present 交付物回传；§10 目录列表按需获取：209 Agent_Command_Result 应答通道，dirs 移出 scope=31 type=3）
+## 12. 会话选择（207 `op=sessions` / `op=switch`，v2.5）
+
+一个 IM 会话（群/私聊）在 DSH 侧可能对应**多个历史 session**：`/reset` 换新（epoch+1）、
+`/cwd` 按目录派生不同 id、面板切换指定历史会话。面板提供「会话」入口列出**最近 10 个**，
+选中即恢复该会话上下文（工作目录随会话切换）。
+
+### 12.1 请求（207 Agent_Command）
+
+```json
+{ "op": "sessions", "seq": 12345, "robotId": "robot_xxx_yyy" }
+{ "op": "switch",   "seq": 12346, "robotId": "robot_xxx_yyy", "sessionId": "wildfire-<会话哈希>-<目录哈希>[-<epoch>]" }
+```
+
+- `op=sessions`：只读列表，任何会话成员可请求。
+- `op=switch`：与 `/cwd` 同权限（群=创建者/管理员，私聊=管理员）；后端只接受
+  sessionId 前缀匹配当前对话（`wildfire-<sha256(key)[:20]>-`）的会话，并校验其 cwd
+  仍在 `allowedRoots` 内，否则拒绝。
+- 切换语义：`workspace.setOverride(cwd)` + 固定 sessionId（持久化到
+  `wildfire-sessions.json` 的 `switched`）→ 下一条消息按该 session resume（上下文恢复）。
+  与 `/reset` 不同：不 bump epoch、不丢弃旧会话；与 `/cwd` 不同：直接指定 sessionId 而非按目录派生。
+
+### 12.2 应答（209 Agent_Command_Result）
+
+```json
+{
+  "ver": 1, "op": "sessions", "seq": 12345, "robotId": "robot_xxx_yyy",
+  "sessionId": "wildfire-...-<当前>",
+  "sessions": [
+    { "id": "wildfire-...", "cwd": "/Users/x/proj", "createdAt": 1787470162762,
+      "updatedAt": 1787470999000, "eventCount": 42, "sizeBytes": 123456, "current": true }
+  ],
+  "total": 1
+}
+```
+
+```json
+{ "ver": 1, "op": "switch", "seq": 12346, "robotId": "robot_xxx_yyy",
+  "ok": true, "sessionId": "wildfire-...", "cwd": "/Users/x/proj" }
+```
+
+- 列表最多 10 条，按**最近活跃**（会话日志 mtime）倒序；`updatedAt` 取不到时回退 `createdAt`。
+- 应答走 209 Transparent 通道（同 §10），客户端按 `seq` 关联；`switch` 成功后插件同时
+  写 type=1 `lastChange`、刷新 type=3 面板数据，并按新会话重置 Token 统计与任务卡。
+- 兼容：旧插件不识别 `op=sessions`，客户端 5s 超时后提示重试即可。
+
+### 12.3 落地清单
+
+| 层 | 文件 | 改动 |
+|----|------|------|
+| 插件 | `protocol.ts` / `agent.ts` / `inbound.ts` | `AgentSessionSummary`、`op=sessions/switch`、`switchSession()`（sessionId 固定 + 持久化）、列表扫描 + 209 |
+| hm-chat | `agentCommandResultMessageContent.ets`、`agentCommandMessageContent.ets`、`AgentPanelView.ets` | 209 sessions 字段、207 sessionId、会话行 + 选择弹窗 |
+| android-chat | `AgentCommandResultMessageContent.java`、`AgentAiSettingsDialog.java` | 同上（Java） |
+| ios-chat | `WFCCAgentCommandResultMessageContent`、`WFCUAgentPanelViewController.m` | 同上（ObjC） |
+
+
+---
+
+**文档版本**：2.5（§12 会话选择：207 op=sessions/op=switch + 209 最近会话列表；§11 AI 面板能力档位 preset / 工具审批策略 / present 交付物回传；§10 目录列表按需获取）
 **状态**：插件与五端客户端已实现（v2.2 通用化）+ 209 目录应答通道（v2.3）+ preset/审批策略与 present 回传（v2.4）

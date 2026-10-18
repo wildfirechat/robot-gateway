@@ -145,7 +145,7 @@ export interface AgentTaskProgressPayload {
  * 公共 op（interrupt/ping）为协议扩展点，由各 provider 按需实现。
  */
 export interface AgentCommandPayload {
-  op: "query" | "set" | "interrupt" | "ping" | "dirs";
+  op: "query" | "set" | "interrupt" | "ping" | "dirs" | "sessions" | "switch";
   /**
    * op=set 时的 provider 词表命令。当前支持：
    * `/model <provider/model|预设>`、`/effort <等级>`、`/cwd <路径|clear>`、
@@ -160,6 +160,8 @@ export interface AgentCommandPayload {
   agent?: AgentRef;
   /** 目标机器人（多机器人会话寻址；缺省 = 本消息会话对应的机器人）。 */
   robotId?: string;
+  /** op=switch 时要切换到的目标 session id（来自 op=sessions 列表）。 */
+  sessionId?: string;
 }
 
 /**
@@ -167,6 +169,24 @@ export interface AgentCommandPayload {
  * 当前仅 op=dirs（目录列表按需获取，见 INTERACTION_DESIGN.md §10）。
  * 客户端按 seq 关联 pending 请求；seq 不匹配或已超时的应答直接丢弃。
  */
+/** 会话列表项（op=sessions 应答；一个 IM 会话在 DSH 侧可有多个历史 session）。 */
+export interface AgentSessionSummary {
+  /** DSH session id（wildfire-<会话哈希>-<目录哈希>[-<epoch>]）。 */
+  id: string;
+  /** 该会话绑定的工作目录（绝对路径）。 */
+  cwd?: string;
+  /** 创建时间（毫秒）。 */
+  createdAt?: number;
+  /** 最近活跃时间（毫秒；取会话日志 mtime，取不到时回退 createdAt）。 */
+  updatedAt?: number;
+  /** 事件条数（后端能廉价提供时才有）。 */
+  eventCount?: number;
+  /** 日志字节数（后端能廉价提供时才有）。 */
+  sizeBytes?: number;
+  /** 是否为该会话当前正在使用的 session。 */
+  current?: boolean;
+}
+
 export interface AgentCommandResultPayload {
   ver: 1;
   /** 对应请求的 op（当前只有 dirs）。 */
@@ -185,6 +205,14 @@ export interface AgentCommandResultPayload {
   total?: number;
   /** 是否因超过上限被截断。 */
   truncated?: boolean;
+  /** op=sessions 应答：最近会话列表（最多 10 条，按最近活跃倒序）。 */
+  sessions?: AgentSessionSummary[];
+  /** op=sessions/switch 应答：当前生效的 session id。 */
+  sessionId?: string;
+  /** op=switch 应答：是否切换成功。 */
+  ok?: boolean;
+  /** op=switch 失败时的可读原因。 */
+  error?: string;
 }
 
 /** Build a message payload object (shape consumed by the Wildfire SDK sendMessage). */
@@ -242,6 +270,12 @@ export function summarizeCommandResult(data: AgentCommandResultPayload): string 
   if (data?.op === "dirs") {
     const n = data.dirs?.length ?? 0;
     return data.truncated ? `📂 AI 目录列表（${n}/${data.total ?? n}，已截断）` : `📂 AI 目录列表（${n}）`;
+  }
+  if (data?.op === "sessions") {
+    return `🧠 最近会话（${data.sessions?.length ?? 0}）`;
+  }
+  if (data?.op === "switch") {
+    return data.ok ? "🧠 已切换会话" : `🧠 切换会话失败${data.error ? `：${data.error}` : ""}`;
   }
   return "📂 AI 指令应答";
 }
