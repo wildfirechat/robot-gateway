@@ -91,6 +91,17 @@ if ! corepack pnpm@"$PNPM_VERSION" --dir "$PROFILE_DIR" install "$PLUGIN_DIR/$TG
   exit 1
 fi
 
+echo "==> 4/5b 启用 agent preset（AI 面板「Agent 模式」可选项）"
+# 默认开启：从 dsh-web-app 抄「禁用 agent 平面行」清单 + 插入 agent-preset-registry
+# 与 4 个 preset 定义，否则 IM 专用 profile 的 preset.options 为空、面板只能显示当前值。
+# 已有标记会跳过（幂等）；不想用 preset 模式时 ENABLE_PRESETS=0。
+if [ "${ENABLE_PRESETS:-1}" = "1" ]; then
+  "$NODE_BIN" "$PLUGIN_DIR/scripts/enable-presets.mjs" "$PROFILE_DIR" || \
+    echo "!! 启用 preset 失败（不影响插件本身；可 ENABLE_PRESETS=0 跳过）"
+else
+  echo "    ENABLE_PRESETS=0，跳过（工具来自 dsh-base 全局行，面板档位选择器禁用）"
+fi
+
 echo "==> 5/5 重启插件（杀全部旧进程）"
 echo "    dsh: $DHS_BIN ($("$NODE_BIN" "$DHS_BIN" --version 2>/dev/null || echo '版本未知'))"
 
