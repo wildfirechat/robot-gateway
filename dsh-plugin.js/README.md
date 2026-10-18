@@ -203,7 +203,7 @@ dsh --profile wildfire
 
 **版本要求**：本插件 0.2.0 起同时适配 dsh 0.1.x 与 0.2.x（`peerDependencies` 声明）；dsh 0.2 起 preset 服务改由 `@deepseek-ai/dsh-agent-preset-registry` 提供（旧包 `@deepseek-ai/dsh-agent-presets` 已不存在），且 dsh 会**拒绝加载 peerDependencies 不匹配的插件**（日志：`incompatible with dsh …`）——升级 dsh 后请同步安装匹配的插件版本。
 
-**自动启用（推荐，0.2.0 起）**：`build-deploy.sh` 默认执行 `scripts/enable-presets.mjs`，把「禁用 agent 平面行 + `agent-preset-registry` + 4 个 preset 定义（standard/ptc/minimal/cordis）」写进 profile 的 `cordis.patch.yml`（脚本会从已安装的 `dsh-web-app` bundle 抄禁用清单与 preset 定义）。因此**装好插件并重启后，IM 面板的「Agent 模式」直接可选**，无需手工改 YAML。脚本幂等，写入前备份 `cordis.patch.yml.bak-<时间戳>`；不想用 preset 模式（工具来自 dsh-base 全局行，面板档位选择器会禁用）时：
+**自动启用（推荐，0.2.0 起）**：`build-deploy.sh` 默认执行 `scripts/enable-presets.mjs`，把「禁用 agent 平面行 + `agent-preset-registry` + 4 个官方 preset 定义（standard/ptc/minimal/cordis）+ 创造模式所需的两个 Host 行（`cordis-host-runner`、`cordis-inspect-providers`）」写进 profile 的 `cordis.patch.yml`（禁用清单与 preset 定义从已安装的 `dsh-web-app` bundle 抄取）。同时会把其它 profile 的 `vendor/*/cordis.patch.yml` 里声明的**自定义 preset**（如 `wfim-deploy-advisor` / `wfim-deploy-customer`）一并带过来（skills 在共享的 `$DSH_HOME/skills`，无需重复安装）。因此**装好插件并重启后，IM 面板的「Agent 模式」直接可选（含自定义档位）**，无需手工改 YAML。脚本幂等（每次按最新规则重建该块），写入前备份 `cordis.patch.yml.bak-<时间戳>`；不想用 preset 模式（工具来自 dsh-base 全局行，面板档位选择器会禁用）时：
 
 ```bash
 ENABLE_PRESETS=0 ./build-deploy.sh wildfire

@@ -17,7 +17,7 @@
  *   profileDir     例如 ~/.dsh/profiles/wildfire
  *   dshPackageDir  @deepseek-ai/dsh 包目录（默认从 `which dsh` 推导）
  */
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, copyFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
@@ -36,9 +36,13 @@ const patchPath = join(profileDir, 'cordis.patch.yml');
 if (!existsSync(patchPath)) fail(`找不到 ${patchPath}`);
 
 let patch = readFileSync(patchPath, 'utf8');
+// 幂等：已有旧块则先摘掉再按最新规则重建（便于升级，例如补 cordis 依赖行/自定义 preset）
 if (patch.includes(MARK_BEGIN)) {
-  console.log('[enable-presets] 已启用（patch 中已有标记），跳过');
-  process.exit(0);
+  const start = patch.indexOf(MARK_BEGIN);
+  const end = patch.indexOf(MARK_END);
+  if (end < 0) fail('patch 里有起始标记但没有结束标记，请手工检查');
+  patch = `${patch.slice(0, start)}${patch.slice(end + MARK_END.length).replace(/^\n+/, '')}`;
+  console.log('[enable-presets] 检测到旧块，重建');
 }
 
 // 定位 @deepseek-ai/dsh 包目录（lib/bin.js 的上两级）
@@ -81,6 +85,29 @@ const presetYaml = presetNames
   })
   .join('\n\n');
 
+// 3) 其它 profile 的 vendor bundle 里声明的自定义 preset（如 dsh-deploy-advisor）：
+//    它们的 patch 只含 preset 定义，skills 已装在共享的 $DSH_HOME/skills，直接带过来即可。
+const homeDir = dirname(dirname(profileDir));
+const profilesRoot = join(homeDir, 'profiles');
+let vendorPresets = '';
+try {
+  for (const p of readdirSync(profilesRoot)) {
+    const vendorDir = join(profilesRoot, p, 'vendor');
+    if (!existsSync(vendorDir)) continue;
+    for (const v of readdirSync(vendorDir)) {
+      const f = join(vendorDir, v, 'cordis.patch.yml');
+      if (!existsSync(f)) continue;
+      const text = readFileSync(f, 'utf8');
+      if (!text.includes('@deepseek-ai/dsh-agent-preset')) continue;
+      const start = text.search(/^- insert:/m);
+      if (start < 0) continue;
+      vendorPresets += `\n# ── 自定义 preset（来自 ${p}/vendor/${v}）──\n${text.slice(start).trimEnd()}\n`;
+    }
+  }
+} catch {
+  // vendor 目录不可读：忽略，只带官方 preset
+}
+
 const block = [
   MARK_BEGIN,
   ...disabledIds.flatMap((id) => [`- id: ${id}`, '  disabled: true']),
@@ -94,8 +121,15 @@ const block = [
   "      name: '@deepseek-ai/dsh-agent-preset-registry'",
   '      config:',
   '        default: standard',
+  '    # 创造模式（cordis preset）的 Host 依赖：缺这两行时该 preset 挂载失败、',
+  '    # 会被 registry 标记 broken 并从面板可选项里过滤掉（只显示其余 3 个）。',
+  '    - id: cordis-host-runner',
+  "      name: '@deepseek-ai/dsh-cordis-host-runner'",
+  '    - id: cordis-inspect-providers',
+  "      name: '@deepseek-ai/dsh-tool-cordis/host'",
   '',
   presetYaml,
+  ...(vendorPresets ? [vendorPresets] : []),
   MARK_END,
   '',
 ].join('\n');
@@ -103,5 +137,9 @@ const block = [
 const backup = `${patchPath}.bak-${Date.now()}`;
 copyFileSync(patchPath, backup);
 writeFileSync(patchPath, `${block}\n${patch}`, 'utf8');
-console.log(`[enable-presets] 已启用 preset 模式：禁用 ${disabledIds.length} 行 + 插入 registry + ${presetNames.length} 个 preset 定义`);
+const vendorCount = (vendorPresets.match(/^    - id: preset-/gm) || []).length;
+console.log(
+  `[enable-presets] 已启用 preset 模式：禁用 ${disabledIds.length} 行 + 插入 registry + ` +
+    `${presetNames.length} 个官方 preset${vendorCount ? ` + ${vendorCount} 个自定义 preset` : ''}`
+);
 console.log(`[enable-presets] 原 patch 备份：${backup}`);
