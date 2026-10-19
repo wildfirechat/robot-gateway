@@ -10,6 +10,8 @@
 
 | dsh 版本 | 状态 | 关键差异 |
 |------|------|---------|
+| **0.2.1-rc.2** | ✅ 已实测 | preset 服务改名 `dsh-agent-preset-registry`（API 不变），preset 定义由 `build-deploy.sh` 的 `enable-presets.mjs` 写入 profile；会话日志 v4；`sessionPersistence` 改为 `open/read/stat/list` |
+| 0.2.0-rc.2 | ✅ 已实测 | 同上 |
 | **0.1.5-rc.3** | ✅ 已实测 | 流式改为 `agent/assistant-stream`（`assistant/chunk` 已从 known-event-types 移除）；`agentPresets.list()` 变异步、返回带 `id` 的行；IM 专用 profile 需自行补齐 preset 及其 Host 依赖 |
 | **0.1.2-rc.1**（`latest` / `next`） | ✅ 已实测 | `ctx.userQuestions.registerProvider()` 被移除，改为 Agent 作用域瀑布流事件 `user-questions/request`；`session.events` 被移除（改用 `snapshotEvents()`） |
 | 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 旧接口 `registerProvider()`；流式走会话事件 `assistant/chunk` |

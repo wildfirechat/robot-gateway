@@ -93,9 +93,14 @@ async function peekModelSelection(api: any, key: string): Promise<ModelSelection
 
 /**
  * 未激活会话的持久状态（模型/沙箱/审批/计划/事件数）。
- * 直接读磁盘上的会话日志（`sessionPersistence.inspect/load`），**不创建 agent**，
- * 这样重启 dsh 后第一条消息之前，面板与 `/session` 也能显示真实值。
- * 带 15s 缓存：面板轮询时不必反复解压长日志；会话一旦激活就走 live 路径。
+ * 直接读磁盘上的会话日志（**不创建 agent**），这样重启 dsh 后第一条消息之前，
+ * 面板与 `/session` 也能显示真实值。带 15s 缓存：面板轮询时不必反复解压长日志；
+ * 会话一旦激活就走 live 路径。
+ *
+ * 读取方式按 dsh 版本三路探测：
+ * - ≥0.2：`sessionPersistence.open(id, "read")` + `handle.read(0)`（只读句柄，
+ *   不抢写锁，可与运行中的会话并存；`inspect`/`load` 已被移除）
+ * - 0.1.x：`inspect(id)`；更早版本回退 `load(id)`
  */
 interface PersistedSessionState {
   exists: boolean;
@@ -120,10 +125,21 @@ async function readPersistedSessionState(
   let events: any[] | undefined;
   try {
     const persistence = api.ctx?.get?.("sessionPersistence");
-    const inspection = persistence?.inspect
-      ? await persistence.inspect(sessionId)
-      : await persistence?.load?.(sessionId);
-    events = Array.isArray(inspection?.events) ? inspection.events : undefined;
+    if (persistence?.open) {
+      const handle = await persistence.open(sessionId, "read");
+      try {
+        const read = await handle.read(0);
+        events = Array.isArray(read?.events) ? read.events : undefined;
+      } finally {
+        await handle.close?.();
+      }
+    } else if (persistence?.inspect) {
+      const inspection = await persistence.inspect(sessionId);
+      events = Array.isArray(inspection?.events) ? inspection.events : undefined;
+    } else if (persistence?.load) {
+      const inspection = await persistence.load(sessionId);
+      events = Array.isArray(inspection?.events) ? inspection.events : undefined;
+    }
   } catch {
     events = undefined; // 会话不存在 / 日志损坏：按「无历史会话」处理
   }
@@ -1935,11 +1951,22 @@ async function handleApprovalCommand(
   );
 }
 
-/** dsh 会话日志目录名：cwd 的 `/` 替换为 `-`，前后各加一个 `-`。 */
+/**
+ * dsh 会话日志目录名：cwd 的 `/` 替换为 `-`，前后各加一个 `-`。
+ *
+ * 日志文件名随 dsh 版本变化：0.2.x → `session.v4.jsonl.zstd`，0.1.5 → v3，
+ * 更早 → `session.jsonl.zstd`。按存在性选，未落盘时展示最新格式的路径。
+ */
+const SESSION_LOG_NAMES = ["session.v4.jsonl.zstd", "session.v3.jsonl.zstd", "session.jsonl.zstd"];
 function sessionLogPath(cwd: string, sessionId: string): string | undefined {
   if (!cwd || !sessionId) return undefined;
   const slug = `-${cwd.replace(/[/\\]/g, "-")}-`;
-  return pathJoin(dshHome(), "sessions", slug, sessionId, "session.jsonl.zstd");
+  const dir = pathJoin(dshHome(), "sessions", slug, sessionId);
+  for (const name of SESSION_LOG_NAMES) {
+    const candidate = pathJoin(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return pathJoin(dir, SESSION_LOG_NAMES[0]);
 }
 
 /**

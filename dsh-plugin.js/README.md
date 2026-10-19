@@ -10,6 +10,8 @@
 
 | dsh 版本 | 状态 | 说明 |
 | --- | --- | --- |
+| **0.2.1-rc.2** | ✅ 已实测 | preset 服务改用 `@deepseek-ai/dsh-agent-preset-registry`（服务名/API 不变）；preset 定义由 `build-deploy.sh` 的 `scripts/enable-presets.mjs` 写入 profile（无需 `--patch`）；会话日志为 `session.v4.jsonl.zstd`，`sessionPersistence` 改用 `open(id,"read")`+`handle.read()` |
+| 0.2.0-rc.2 | ✅ 已实测 | 同上 |
 | **0.1.5-rc.3** | ✅ 已实测 | 流式走 `agent/assistant-stream`；`userQuestions` 走瀑布流；preset 需自行组成（见下） |
 | 0.1.2-rc.1（npm `latest` / `next`） | ✅ 已实测 | `userQuestions` 走 Agent 作用域瀑布流 `user-questions/request` |
 | 0.1.1-rc.2 / 0.1.1-rc.1 / 0.1.0-rc.7 | ✅ 已实测 | 走旧的 `userQuestions.registerProvider()`；流式走会话事件 `assistant/chunk` |
@@ -23,17 +25,17 @@
 
 `package.json` 的 peerDependencies 按「小版本行」逐条列出（node-semver 对预发布版本的匹配规则很严格：版本带 prerelease 时，只有同 `major.minor.patch` 且带 prerelease 的比较符才算匹配，`>=0.1.0-rc.7`、`*` 之类都匹配不到 `0.1.5-rc.3`）。
 
-> **IM 专用 profile 的 preset 组成**：若 profile 只挂 `dsh-base` 并禁用了 base 的工具行（与 `dsh-web-app` 一样改由 preset 挂载），必须自行补上 `@deepseek-ai/dsh-agent-presets` 及其依赖的 Host 模块（例如 `@deepseek-ai/dsh-tool-subagent/model-selection-settings`），否则 preset 挂载失败、agent 会**没有任何工具**。插件启动时会校验 preset 是否存在（error 级报出可选值），挂载失败时还会向该会话发一次 IM 告警。
-
+> **IM 专用 profile 的 preset 组成**：若 profile 只挂 `dsh-base` 并禁用了 base 的工具行（改由 preset 挂载），必须自行补上 preset 服务及其依赖的 Host 模块（例如 `@deepseek-ai/dsh-tool-subagent/model-selection-settings`），否则 preset 挂载失败、agent 会**没有任何工具**。插件启动时会校验 preset 是否存在（error 级报出可选值），挂载失败时还会向该会话发一次 IM 告警。
+>
 ### 升级 dsh 到最新版
 
 ```bash
 # 1. 升级 CLI（本机全局安装在 nvm 目录且属主是 root，需要 sudo）
-sudo npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+sudo npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 dsh --version
 
 # 2. 重新部署插件（SKIP_RESTART=1 只安装不重启）
-cd dsh-plugin.js && SKIP_RESTART=1 ./build-deploy.sh web
+cd dsh-plugin.js && SKIP_RESTART=1 ./build-deploy.sh wildfire   # 或 web
 
 # 3. 重启（会中断正在进行的会话；web profile 按端口定位 PID，
 #    实测该进程命令行对 pgrep/pkill 不可见，只能按 PID 杀）
