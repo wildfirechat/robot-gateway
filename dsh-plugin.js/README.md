@@ -592,3 +592,36 @@ DSH_HOME=$HOME/.dsh-botA nohup node "$(command -v dsh)" --profile wildfire >> $H
 ## License
 
 MIT
+
+## 多机器人路由（v4）
+
+当群 `extra` 中有 `wfds.robots` 且包含多个机器人时，插件启用多机器人路由：
+
+- 有 `@`：只有被 `@` 的机器人处理；`@` 别人的消息直接忽略。
+- 无 `@`：只有 owner 机器人裁决。
+  - owner 按 `tags` 命中选择目标；命中则发送可见 `@目标机器人 ...` 指派消息；
+  - 否则 owner 自己回复；
+  - guest 机器人静默。
+- 机器人消息默认忽略；owner 的 assign（`payload.extra.wfds.op=assign` 且 `targetRobotId` 是自己）例外。
+- assign 消息带原始 `messageUid` 与 `note`；目标机器人优先用原始消息内容 + note 作为输入。
+- 不回复时静默，不发空消息。
+
+群 `extra` 结构：
+
+```json
+{
+  "wfds": {
+    "v": 2,
+    "broker": {"type":"robot","id":"robot_owner"},
+    "rev": 7,
+    "robots": {
+      "robot_owner": {"workspaceId":"ws_A","workspaceName":"项目A","sessionId":"...","hostId":"host_a","role":"owner","tags":["coding"]},
+      "robot_b": {"workspaceId":"ws_B","workspaceName":"项目B","sessionId":"...","hostId":"host_b","role":"guest","tags":["ops"]}
+    }
+  }
+}
+```
+
+- `/create`、`/bind-workspace` 会写入本机器人的 section（owner 直接写；guest 通过 210 透明消息上报给 owner）。
+- 210 `AGENT_METADATA` 只用于群元数据 set/ack；不显示、不进入 Agent 上下文。
+- tags 可通过环境变量 `WF_DSH_TAGS=coding,ops` 注入；owner 路由 v1 是规则匹配，后续可替换为模型 router。

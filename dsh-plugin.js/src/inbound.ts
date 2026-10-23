@@ -23,6 +23,7 @@ import {
 import type { WildfireConfig } from "./config.js";
 import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConfig, getWhitelistConfig, getAiLine } from "./config.js";
 import { getClient } from "./clients.js";
+import { handleMetadataMessage, publishGuestMetadata, routeMultiRobotMessage } from "./multiRobot.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
 import { panelDebug } from "./panelDebug.js";
@@ -229,6 +230,7 @@ export const turnOwners = new Map<string, string>();
 
 // Per-conversation rate-limit windows (timestamps of the last minute).
 const rateWindows = new Map<string, number[]>();
+const ensuredMetaGroups = new Set<string>();
 
 /** Throttled full-text streamer for Wildfire streaming messages. */
 class ThrottledStream {
@@ -320,6 +322,36 @@ function dedupInfo(data: any): { key: string; isDuplicate: boolean } {
   return { key, isDuplicate: false };
 }
 
+function recordRouting(decision: any, data: any, config: any, sender: string, conv: any, text: string): void {
+  const reason = String(decision?.reason || "");
+  if (!reason || reason === "robot-message") return;
+  const action = reason === "owner-assigned" ? "assign"
+    : reason === "owner-reply" ? "reply"
+    : reason === "mentioned" ? "mention"
+    : reason === "no-mention-guest" ? "none"
+    : "ignore";
+  try {
+    const file = dshHomePath("wildfire-routing.jsonl");
+    const line = JSON.stringify({
+      ts: Date.now(),
+      groupId: conv?.target || "",
+      sender: String(sender || ""),
+      robotId: config?.robotId || "",
+      action,
+      targetRobotId: decision?.targetRobotId || "",
+      reason,
+      text: String(text || "").slice(0, 160),
+      messageUid: data?.messageUid || data?.messageId || "",
+    });
+    appendFileSync(file, line + "\n", { mode: 0o600 });
+    // 只保留最近 500 条，避免无限增长。
+    try {
+      const lines = readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+      if (lines.length > 500) writeFileSync(file, lines.slice(-500).join("\n") + "\n", { mode: 0o600 });
+    } catch { /* ignore trim */ }
+  } catch { /* 记录失败不影响消息处理 */ }
+}
+
 export async function handleIncomingMessage(
   api: any,
   message: any,
@@ -362,13 +394,14 @@ export async function handleIncomingMessage(
     payloadType <= 0 ||
     payloadType === 14 ||
     (payloadType > 15 && payloadType < 100 && !isGroupNotification) ||
-    (payloadType > 209)
+    (payloadType > 210)
   ) {
     return;
   }
 
   const isGroup = conv.type === CONV_TYPE_GROUP || conv.type === CONV_TYPE_CHANNEL;
-  const { text, mediaUrl } = extractPayloadInfo(payload);
+  let { text } = extractPayloadInfo(payload);
+  const { mediaUrl } = extractPayloadInfo(payload);
   const key = conversationKey(isGroup, isGroup ? conv.target : sender);
 
   api.logger?.info?.(
@@ -433,7 +466,7 @@ export async function handleIncomingMessage(
     // 群通知按 AI line（默认 2）处理：通知消息可能到达在任意 line，
     // 统一归一化到 AI line 再处理（销毁/注销等语义与 line 无关，但保持
     // 会话/通知状态记录在 AI line 上）。
-    await handleGroupNotification(api, payloadType, { ...conv, line: getAiLine(config) }, key);
+    await handleGroupNotification(api, payloadType, { ...conv, line: getAiLine(config) }, key, payload);
     return;
   }
 
@@ -496,9 +529,59 @@ export async function handleIncomingMessage(
     conv = { ...conv, line: aiLine };
   }
 
+  // ========== 210 AGENT_METADATA（群元数据，透明） ==========
+  if (isGroup && payloadType === 210) {
+    try {
+      await handleMetadataMessage({
+        client: getClient(),
+        config,
+        sender: String(sender),
+        conv,
+        payload,
+        logger: api.logger,
+      });
+    } catch (e: any) {
+      api.logger?.warn?.(`[wildfire] metadata handling failed: ${String(e?.message ?? e)}`);
+    }
+    return;
+  }
+
+  // ========== 多机器人路由 ==========
+  // gateway 会把群消息广播给所有机器人。多机器人群里：
+  // - 有 @：只处理 @ 自己的；
+  // - 无 @：owner 决定自己回或发可见 @ 指派；
+  // - 机器人消息：忽略（owner 的 assign 指向自己时例外）。
+  // 单机器人群/非 DSH 群保持原逻辑。
+  let forceProcess = false;
+  let bypassWhitelist = false;
+  if (isGroup && !isDshType && !isGroupNotification && !String(text || "").trim().startsWith("/")) {
+    try {
+      const decision = await routeMultiRobotMessage({
+        client: getClient(),
+        config,
+        sender: String(sender),
+        conv,
+        payload,
+        text: String(text || ""),
+        messageUid: data?.messageUid || data?.messageId,
+        logger: api.logger,
+      });
+      recordRouting(decision, data, config, String(sender), conv, String(text || ""));
+      if (decision.handled) {
+        api.logger?.info?.(`[wildfire] multi-robot drop: ${decision.reason || "handled"}`);
+        return;
+      }
+      if (decision.force) forceProcess = true;
+      if (decision.bypassWhitelist) bypassWhitelist = true;
+      if (typeof decision.text === "string") text = decision.text;
+    } catch (e: any) {
+      api.logger?.warn?.(`[wildfire] multi-robot route failed: ${String(e?.message ?? e)}`);
+    }
+  }
+
   // Whitelist (owner + static + dynamic /allow list).
   const whitelist: WhitelistFilter = api.whitelist ?? new WhitelistFilter(config);
-  if (!whitelist.shouldProcess(String(sender), String(conv.target), isGroup)) {
+  if (!bypassWhitelist && !whitelist.shouldProcess(String(sender), String(conv.target), isGroup)) {
     api.logger?.info?.(`[wildfire] blocked by whitelist: sender=${sender}`);
     await sendDirectReply(sender, conv, whitelist.deniedMessage, api);
     return;
@@ -594,7 +677,7 @@ export async function handleIncomingMessage(
   // 若本会话正在执行上一轮（正常对话消息），立即取消它——被取消回合走
   // “取消收尾”(type 20 收起气泡)，新消息随后立即开始新一轮。
   // 仅用于群聊中的正常对话消息；管理命令与 /stop 不打断（各自有处理）。
-  if (getConvMode(key) === "interrupt" && isGroup && !isSlashCommand && shouldRespondToGroupMessage(text, data, config)) {
+  if (getConvMode(key) === "interrupt" && isGroup && !isSlashCommand && (forceProcess || shouldRespondToGroupMessage(text, data, config))) {
     if (interruptRunningTurn(api, key)) {
       api.logger?.info?.(`[wildfire] new message interrupts running turn: key=${key}`);
     }
@@ -610,7 +693,7 @@ export async function handleIncomingMessage(
 
   // Group trigger policy (normal chat only; interaction replies already
   // consumed, slash commands always pass).
-  if (isGroup && !isSlashCommand && !shouldRespondToGroupMessage(text, data, config)) {
+  if (isGroup && !isSlashCommand && !forceProcess && !shouldRespondToGroupMessage(text, data, config)) {
     release();
     if (sessionQueues.get(key) === slot) {
       sessionQueues.delete(key);
@@ -2315,6 +2398,107 @@ function isRobotOwner(senderId: string, api: any): boolean {
   return !!owner && String(senderId) === String(owner);
 }
 
+function buildMetaSection(api: any, groupId: string, dir: string): any {
+  const config: WildfireConfig = api.config;
+  const robotId = String(config.robotId);
+  const workspaceId = "ws_" + createHash("sha256").update(`${robotId}:${dir}`).digest("hex").slice(0, 12);
+  return {
+    workspaceId,
+    workspaceName: path.basename(dir) || dir,
+    sessionId: sessionIdForConversation(`wildfire:group:${groupId}`, 0),
+    hostId: process.env.WF_DSH_HOST_ID || "",
+    role: "owner",
+    displayName: process.env.WF_DSH_DISPLAY_NAME || "",
+    tags: String(process.env.WF_DSH_TAGS || "").split(",").map(t => t.trim()).filter(Boolean),
+    updatedAt: Date.now(),
+  };
+}
+
+async function syncGroupMeta(api: any, groupId: string, dir: string, line: number): Promise<void> {
+  const client = getClient();
+  if (!client) return;
+  const section = buildMetaSection(api, groupId, dir);
+  try {
+    const result = await client.getGroupInfo(groupId);
+    const info = result?.result ?? result;
+    let extra: any = {};
+    if (info?.extra) {
+      try { extra = JSON.parse(String(info.extra)); } catch { extra = null; }
+    }
+    const wfds = extra && extra.wfds && typeof extra.wfds === "object" ? extra.wfds : null;
+    const broker = wfds && wfds.broker;
+    const ownerId = broker && broker.type === "robot" ? String(broker.id || "") : "";
+    if (ownerId && ownerId !== String(api.config.robotId)) {
+      const published = await publishGuestMetadata({
+        client,
+        config: api.config,
+        groupId,
+        line,
+        section,
+        logger: api.logger,
+      });
+      if (!published) {
+        api.logger?.warn?.(`[wildfire] guest metadata publish skipped/failed: group=${groupId}`);
+      }
+      return;
+    }
+  } catch (e: any) {
+    api.logger?.warn?.(`[wildfire] sync metadata precheck failed: ${String(e?.message ?? e)}`);
+  }
+  await writeGroupMeta(api, groupId, dir);
+  ensuredMetaGroups.add(groupId);
+}
+
+/**
+ * 把本机器人的工作区/会话信息写入群 extra（按 robotId 分区）。
+ * owner 机器人是 broker；guest 机器人不应直接写。
+ * extra 里不写本地绝对路径，只写 workspaceId/name/sessionId/hostId。
+ */
+async function writeGroupMeta(api: any, groupId: string, dir: string): Promise<void> {
+  const client = getClient();
+  if (!client) return;
+  const config: WildfireConfig = api.config;
+  const robotId = String(config.robotId);
+  try {
+    const result = await client.getGroupInfo(groupId);
+    const info = result?.result ?? result;
+    let extra: any = {};
+    if (info?.extra) {
+      try {
+        extra = JSON.parse(String(info.extra));
+      } catch {
+        api.logger?.warn?.(`[wildfire] group extra is not JSON; skip meta write: group=${groupId}`);
+        return;
+      }
+    }
+    if (!extra || typeof extra !== "object") extra = {};
+    const wfds = extra.wfds && typeof extra.wfds === "object" ? extra.wfds : {};
+    wfds.v = 2;
+    wfds.broker = { type: "robot", id: robotId };
+    wfds.rev = (Number(wfds.rev) || 0) + 1;
+    wfds.updatedAt = Date.now();
+    wfds.robots = wfds.robots && typeof wfds.robots === "object" ? wfds.robots : {};
+    const workspaceId = "ws_" + createHash("sha256").update(`${robotId}:${dir}`).digest("hex").slice(0, 12);
+    wfds.robots[robotId] = {
+      workspaceId,
+      workspaceName: path.basename(dir) || dir,
+      sessionId: sessionIdForConversation(`wildfire:group:${groupId}`, 0),
+      hostId: process.env.WF_DSH_HOST_ID || "",
+      role: "owner",
+      displayName: process.env.WF_DSH_DISPLAY_NAME || "",
+      tags: String(process.env.WF_DSH_TAGS || "").split(",").map(t => t.trim()).filter(Boolean),
+      updatedAt: Date.now(),
+    };
+    extra.wfds = wfds;
+    const res = await client.modifyGroupInfo(groupId, 2, JSON.stringify(extra), [getAiLine(config)], null);
+    if (res && typeof res.isSuccess === "function" && !res.isSuccess()) {
+      api.logger?.warn?.(`[wildfire] group meta write failed: ${(res as any).getMsg?.() ?? "unknown"}`);
+    }
+  } catch (e: any) {
+    api.logger?.warn?.(`[wildfire] group meta write error: ${String(e?.message ?? e)}`);
+  }
+}
+
 /**
  * `/bind-workspace [auto|<路径>]` — 群内命令（仅机器人 owner）：
  * 把当前群注册为本机器人的 DSH 工作区群并绑定工作区目录。
@@ -2358,6 +2542,7 @@ async function handleBindWorkspaceCommand(
   //    不再向群 extra 写任何 dsh 标记：群 extra 可被任意成员篡改且无消费方，
   //    准入/身份一律以插件本地持久化注册表（<dshHome>/wildfire-groups.json）为准。
   api.registry?.register(groupId, String(sender), dir);
+  await syncGroupMeta(api, groupId, dir, conv.line);
 
   api.logger?.info?.(`[wildfire] /bind-workspace done: group=${groupId}, owner=${sender}, dir=${dir} (${dirLabel})`);
   await sendTip(
@@ -2457,9 +2642,12 @@ async function handleCreateGroupCommand(
     dirLabel = "自动分配";
   }
   await api.workspace.resolve(`wildfire:group:${groupId}`, sessionIdForConversation(`wildfire:group:${groupId}`, 0));
+  // 持久化 group -> dir，供后续“同一工作区新建会话”复用；extra 仍不写绝对路径。
+  api.workspace.setOverride(`wildfire:group:${groupId}`, dir);
 
   // 4. register and reply
   api.registry?.register(groupId, String(sender), dir);
+  await syncGroupMeta(api, groupId, dir, conv.line);
   api.logger?.info?.(
     `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})`
   );
@@ -3273,9 +3461,10 @@ async function handleGroupNotification(
   api: any,
   payloadType: number,
   conv: { type: number; target: string; line: number },
-  key: string
+  key: string,
+  payload?: any
 ): Promise<void> {
-  if (payloadType !== 108) {
+  if (payloadType !== 108 && payloadType !== 107 && payloadType !== 106) {
     api.logger?.debug?.(`[wildfire] group notification type=${payloadType} ignored, group=${conv.target}`);
     return;
   }
@@ -3285,6 +3474,50 @@ async function handleGroupNotification(
     api.logger?.debug?.(`[wildfire] dismiss notification for non-DSH group: ${groupId}`);
     return;
   }
+  // owner 必须在场：owner 人类退出/被踢，机器人也必须退出（群主机器人解散群）。
+  if (payloadType === 107 || payloadType === 106) {
+    let obj: any = null;
+    try {
+      const raw = payload?.binaryContent || payload?.base64edData;
+      if (raw) {
+        const text = Buffer.from(String(raw), "base64").toString("utf8");
+        obj = JSON.parse(text);
+      }
+    } catch {
+      obj = null;
+    }
+    if (obj) {
+      const owner = String(api.robotOwner || "");
+      const self = String(api.config?.robotId || "");
+      const affected = payloadType === 107
+        ? [String(obj.o || "")]
+        : (Array.isArray(obj.ms) ? obj.ms.map(String) : []);
+      const ownerGone = !!owner && affected.includes(owner);
+      const selfGone = !!self && affected.includes(self);
+      if (ownerGone || selfGone) {
+        const client = getClient();
+        const groupId = String(conv.target);
+        const line = getAiLine(api.config);
+        try {
+          const info = await client?.getGroupInfo?.(groupId);
+          const groupOwner = info?.result?.owner;
+          if (groupOwner === self) {
+            await client?.dismissGroup?.(groupId, [line], null);
+            api.logger?.info?.(`[wildfire] owner/self gone; dismissed group ${groupId}`);
+          } else {
+            await (client as any)?.quitGroup?.(groupId, [line], null);
+            api.logger?.info?.(`[wildfire] owner/self gone; quit group ${groupId}`);
+          }
+        } catch (e: any) {
+          api.logger?.warn?.(`[wildfire] owner presence cleanup failed: ${String(e?.message ?? e)}`);
+        }
+        api.registry?.unregister?.(groupId);
+        try { await api.wildfireAgents?.disposeWorkspace?.(key); } catch { /* ignore */ }
+        return;
+      }
+    }
+  }
+
   // 防伪/防误删：108 解散通知可由自定义客户端伪造（任意 payload type 都可
   // 投递给机器人），若直接按通知递归删除工作目录，任何能向该群发消息的人
   // 都能触发。销毁前先 getGroupInfo 确认群确实已解散（解散后查询应失败）：

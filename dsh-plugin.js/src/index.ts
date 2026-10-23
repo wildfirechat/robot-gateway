@@ -328,6 +328,13 @@ export function apply(ctx: any, config: any): void {
       await api.workspace.init();
       await api.whitelist.init();
       await api.registry.init();
+      // 迁移：已有 DSH 群的目录写回 workspace overrides，保证升级后
+      // “同一工作区继续新建会话”和 UI 按目录聚合都能拿到路径。
+      for (const entry of api.registry.list()) {
+        if (entry.record && entry.record.workspaceDir) {
+          api.workspace.setOverride(`wildfire:group:${entry.groupId}`, entry.record.workspaceDir);
+        }
+      }
       await api.wildfireAgents.init();
 
       // Connect with retry: the gateway may be briefly down (restart, network).

@@ -6,9 +6,25 @@
  * openclaw's runtime).
  */
 
+import fs from "node:fs";
 import { RobotServiceClient } from "@wildfirechat/robot-gateway-client-sdk";
 import type { WildfireConfig } from "./config.js";
 import { handleIncomingMessage } from "./inbound.js";
+import { dshHomePath } from "./utils.js";
+
+function writeGatewayStatus(api: any, connected: boolean, extra: Record<string, any> = {}): void {
+  try {
+    const file = dshHomePath("wildfire-gateway-status.json");
+    const data = {
+      connected,
+      updatedAt: Date.now(),
+      ...extra,
+    };
+    fs.writeFileSync(file, JSON.stringify(data), { mode: 0o600 });
+  } catch (e: any) {
+    api?.logger?.warn?.("[wildfire] write gateway status failed: " + String(e?.message ?? e));
+  }
+}
 
 let client: RobotServiceClient | null = null;
 let connected = false;
@@ -38,6 +54,10 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
       onMessage: (message: any) => handleIncomingMessage(api, message, config),
       onConnectionChanged: (isConnected: boolean) => {
         connected = isConnected;
+        writeGatewayStatus(api, isConnected, {
+          robotId: config.robotId,
+          gatewayUrl: config.gatewayUrl,
+        });
         api.logger?.info?.(`[wildfire] connection changed: ${isConnected}`);
       },
       onError: (error: Error) => {
@@ -64,6 +84,10 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
   );
   if (isConn) {
     connected = true;
+    writeGatewayStatus(api, true, {
+      robotId: config.robotId,
+      gatewayUrl: config.gatewayUrl,
+    });
     api.logger?.info?.(`[wildfire] connected as ${config.robotId}`);
   } else {
     // 区分鉴权失败与网络失败（两者 connect() 都返回 false）：
@@ -76,6 +100,11 @@ export async function startClient(api: any, config: WildfireConfig): Promise<voi
       // ignore
     }
     client = null;
+    writeGatewayStatus(api, false, {
+      robotId: config.robotId,
+      gatewayUrl: config.gatewayUrl,
+      error: wsConnected ? "authentication failed" : "connect failed",
+    });
     if (wsConnected) {
       api.logger?.error?.(
         `[wildfire] authentication failed for robot ${config.robotId} (check robotId / robotSecret / gatewayUrl)`
@@ -101,4 +130,5 @@ export async function stopClient(api?: any): Promise<void> {
     client = null;
     connected = false;
   }
+  writeGatewayStatus(api, false, { error: "disconnected" });
 }
