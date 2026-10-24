@@ -2565,7 +2565,8 @@ async function handleCreateGroupCommand(
   api: any,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  customName = ""
 ): Promise<void> {
   const client = getClient();
   if (!client) {
@@ -2613,9 +2614,10 @@ async function handleCreateGroupCommand(
 
   // 2. create the group (owner is the robot; members = creator + robot)
   //    不再写群 extra dsh 标记（可被任意成员篡改、无消费方；DSH 群身份以本地注册表为准）。
-  const groupName = arg && !Number.isNaN(Number(arg)) && catalog[Number(arg) - 1]
-    ? `DSH-${catalog[Number(arg) - 1].label ?? catalog[Number(arg) - 1].id}`
-    : `DSH-工作区`;
+  const groupName = customName.trim()
+    || (arg && !Number.isNaN(Number(arg)) && catalog[Number(arg) - 1]
+      ? `DSH-${catalog[Number(arg) - 1].label ?? catalog[Number(arg) - 1].id}`
+      : `DSH-工作区`);
   const groupInfo = {
     name: groupName,
     portrait: "",
@@ -2923,6 +2925,21 @@ async function handleDshCommand(
     api.logger?.info?.(
       `[wildfire] DSH_Command switch: key=${key}, target=${target || "(empty)"}, ok=${!!result.ok}, by=${sender}`
     );
+    return;
+  }
+
+  if (command.op === "create") {
+    if (isGroup) {
+      api.logger?.warn?.("[wildfire] DSH_Command create ignored in group; use single chat");
+      return;
+    }
+    if (!(await authorizePanelCmd(api, "create", sender, conv, false))) {
+      api.interactions?.pushStatus(key, { error: "无权限创建会话" });
+      return;
+    }
+    const path = String((command as any).path || "auto").trim() || "auto";
+    const name = String((command as any).name || "").trim();
+    await handleCreateGroupCommand(api, path, sender, conv, name);
     return;
   }
 
