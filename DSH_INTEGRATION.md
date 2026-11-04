@@ -44,7 +44,7 @@
 
 ### 回合失败的用户提示
 
-dsh 的 `turn/end` 以 `{kind:"error", error:{message, code, status}}` 收尾时（provider-neutral 的 `LlmFailure`），插件按 status/code/文案分类并**回复用户可读提示**：402/`QUOTA` → 余额不足（提示充值）、401/403/`AUTH` → 鉴权失败、429/`RATE_LIMIT` → 限流、`TRANSPORT`/超时 → 网络，其余带 code/status 摘要；同时把 `error` 写进 scope=31 状态通道。旧行为是把这类回合当「无输出」静默取消气泡，用户会以为机器人没反应。分类函数在 `dsh-plugin.js/src/failures.ts`（纯函数，可离线单测）。
+dsh 的 `turn/end` 以 `{kind:"error", error:{message, code, status}}` 收尾时（provider-neutral 的 `LlmFailure`），插件按 status/code/文案分类并**回复用户可读提示**：402/`QUOTA` → 余额不足（提示充值）、403 先按文案区分「模型不在白名单 / 账号被停用 / 服务端未配置」，再回落 401/403/`AUTH` 鉴权失败、429/`RATE_LIMIT` → 限流、`TRANSPORT`/超时 → 网络，其余带 code/status 摘要；同时把 `error` 写进 scope=31 状态通道。旧行为是把这类回合当「无输出」静默取消气泡，用户会以为机器人没反应。分类函数在 `dsh-plugin.js/src/failures.ts`（纯函数，可离线单测）。
 
 ## 方案对比与选型
 
