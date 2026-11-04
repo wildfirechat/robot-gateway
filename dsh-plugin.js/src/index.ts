@@ -5,7 +5,7 @@
  * patch layer (see README.md / DSH_INTEGRATION.md).
  */
 
-import { startClient, stopClient, getConnectedClient, isClientConnected } from "./clients.js";
+import { startClient, stopClient, getConnectedClient, isClientReady } from "./clients.js";
 import { turnOwners } from "./inbound.js";
 import { getConfig, getSessionConfig, validateConfig } from "./config.js";
 import type { WildfireConfig } from "./config.js";
@@ -17,6 +17,7 @@ import { InteractionManager, type CardSender, type ConversationTarget } from "./
 import { DshGroupRegistry } from "./registry.js";
 import { buildPayload } from "./protocol.js";
 import { WhitelistFilter } from "./whitelist.js";
+import { AuditLog } from "./audit.js";
 import { TextMessageContent } from "@wildfirechat/server-sdk";
 import { panelDebug } from "./panelDebug.js";
 
@@ -101,7 +102,13 @@ export function apply(ctx: any, config: any): void {
   }
 
   const logger = ctx.logger("wildfire");
-  const cfg = getConfig(ctx, config);
+  const cfg: WildfireConfig = { ...getConfig(ctx, config) };
+  // Secrets should not be materialized into the profile patch: the desktop
+  // host passes them through the environment and names the variable here.
+  if (!cfg.robotSecret && cfg.robotSecretEnv) {
+    const fromEnv = process.env[cfg.robotSecretEnv];
+    if (fromEnv) cfg.robotSecret = fromEnv;
+  }
 
   // Connection watchdog (assigned inside the init IIFE; cleared on dispose).
   let watchdog: ReturnType<typeof setInterval> | null = null;
@@ -131,6 +138,7 @@ export function apply(ctx: any, config: any): void {
     interactions: InteractionManager;
     whitelist: WhitelistFilter;
     registry: DshGroupRegistry;
+    audit: AuditLog;
     robotOwner: string | undefined;
   } = {
     logger,
@@ -141,6 +149,7 @@ export function apply(ctx: any, config: any): void {
     models: new ModelSelector(cfg, ctx, logger),
     whitelist: new WhitelistFilter(cfg, logger),
     registry: new DshGroupRegistry(logger),
+    audit: new AuditLog(logger),
     robotOwner: undefined,
     interactions: new InteractionManager(
       cfg,
@@ -285,7 +294,9 @@ export function apply(ctx: any, config: any): void {
         },
       } satisfies CardSender,
       (sessionId: string) => api.wildfireAgents.keyForSessionId(sessionId),
-      (key: string) => turnOwners.get(key)
+      (key: string) => turnOwners.get(key),
+      () => api.robotOwner || process.env.WF_OWNER_USER_ID,
+      { record: (kind, fields) => api.audit.record(kind, fields) }
     ),
     wildfireAgents: new AgentSessionManager(
       ctx,
@@ -407,9 +418,11 @@ export function apply(ctx: any, config: any): void {
       const WATCHDOG_MS = 15_000;
       watchdog = setInterval(() => {
         void (async () => {
-          if (isClientConnected()) return;
+          if (isClientReady()) return;
           if (connectPromise) return; // a connect/reconnect is already in flight
-          logger.warn?.("[wildfire] watchdog: connection lost, reconnecting...");
+          // 不仅看 TCP 连接，还要看鉴权状态：鉴权丢失时连接可能仍然开着，
+          // 此时所有请求都会本地失败（Not authenticated），必须重建客户端。
+          logger.warn?.("[wildfire] watchdog: connection lost or unauthenticated, reconnecting...");
           await stopClient(api).catch(() => {});
           await connectWithRetry().catch(() => {});
         })();
@@ -420,6 +433,7 @@ export function apply(ctx: any, config: any): void {
         const profile = await getConnectedClient()?.getProfile();
         const owner = profile?.code === 0 ? (profile?.result?.owner ?? undefined) : undefined;
         api.whitelist.setOwner(owner);
+        api.access.setOwner(owner);
         api.robotOwner = owner;
       } catch (err: any) {
         logger.warn?.(`[wildfire] failed to fetch robot profile: ${err.message}`);
@@ -438,6 +452,7 @@ export function apply(ctx: any, config: any): void {
     await api.workspace.flush().catch(() => {});
     await api.whitelist.flush().catch(() => {});
     await api.registry.flush().catch(() => {});
+    await api.audit.flush().catch(() => {});
     await api.wildfireAgents.disposeAll();
     logger.info("[wildfire] service stopped");
   });

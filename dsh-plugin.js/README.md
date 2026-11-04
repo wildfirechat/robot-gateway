@@ -311,7 +311,8 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 |--------|------|------|
 | `gatewayUrl` | 是 | 野火机器人网关 WebSocket 地址 |
 | `robotId` | 是 | 机器人 ID |
-| `robotSecret` | 是 | 机器人密钥 |
+| `robotSecret` | 是* | 机器人密钥；推荐改用 `robotSecretEnv` |
+| `robotSecretEnv` | 否 | 从该环境变量读取 `robotSecret`（桌面端用 `WF_ROBOT_SECRET`），避免密钥落盘 |
 | `gatewayPlatform` | 否 | 机器人平台号（**可选覆盖**，一般不需要配置）：默认 SDK 按运行环境自动探测（Linux=`7` / macOS=`4` / Windows=`3`，见野火 Platform）。网关用该平台调用 im-server `/robot/set_online` 设置机器人在线；仅当需模拟其他平台（如 `5`=WEB）时配置 |
 | `aiLine` | 否 | AI 会话使用的线路（line），默认 `2`。设计：**单聊（与机器人私聊）= 全局控制面板**（管理命令，不进入 AI）；**AI 对话仅限群聊会话 line === aiLine**（默认 2）。群聊消息若线路不对（如 line 0 普通群）会回复提醒且不进入 AI；回复始终发到消息来源的会话线路 |
 | `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent |
@@ -337,9 +338,10 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `workspace.allowCwdCommand` | 否 | 允许 `/cwd`、`/ls` 命令（私聊+群聊，按权限），默认 `false` |
 | `workspace.persist` | 否 | 持久化 `/cwd` 绑定到磁盘，默认 `true` |
 | `workspace.persistFile` | 否 | 持久化文件，默认 `<dshHome>/wildfire-workspaces.json`（`$DSH_HOME` 优先，否则 `~/.dsh`） |
-| `access.adminUsers` | 否 | 管理员用户 ID 列表（门控管理命令） |
+| `access.adminUsers` | 否 | 管理员用户 ID 列表（门控管理命令、审批） |
 | `access.adminGroups` | 否 | 管理员群组 ID 列表 |
 | `access.groupOwnerCanManage` | 否 | 群主可在本群执行 `/cwd`（需机器人入群），默认 `true` |
+| `access.privateOwnerOnly` | 否 | 私聊仅 owner/管理员可用，默认 `false`（桌面端注入 `true`） |
 | `model.default` | 否 | 默认模型预设 ID；省略则用 DSH 当前选择 |
 | `model.allowed` | 否 | 可选：模型预设快捷方式 `{ id: { provider, model, reasoningEffort? } }`（主路径为 `/model` 的运行时目录，预设仅作快捷方式） |
 | `model.map` | 否 | 按会话键（或裸用户/群 ID）固定模型预设 |
@@ -352,7 +354,9 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `interaction.approvalTimeoutMs` | 否 | 审批等待超时，默认 120000 |
 | `interaction.approvedLabel` | 否 | 放行关键词，默认 `同意` |
 | `interaction.deniedLabel` | 否 | 拒绝关键词，默认 `拒绝` |
+| `interaction.approvalOwnerOnly` | 否 | 群内敏感操作由机器人 owner 审批（默认 `false`：任务发起人审批；桌面端注入 `true`） |
 | `security.maxMessagesPerMinute` | 否 | 每会话每分钟消息数上限（0=不限，默认 0） |
+| `security.allowGuestTurns` | 否 | 允许群成员发起 Agent 回合，默认 `true`；`false` 时仅 owner/管理员可发起 |
 
 完整示例：
 
@@ -431,18 +435,20 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 | `/cwd clear` | 同上 | 清除绑定，恢复默认 |
 | `/ls [子目录]` | 任一准入成员 | 列出项目根目录（或子目录）内容；相对路径按根目录解析 |
 
-群聊修改需**群主**（`access.groupOwnerCanManage`，默认开，通过 `getGroupInfo` 校验，机器人须在群里）或**管理员群组**成员。
+群聊修改需**群创建者**（插件注册表记录）、**群主**（`access.groupOwnerCanManage`，默认开，通过 `getGroupInfo` 校验，机器人须在群里）或**管理员**。
 
 ## 访问权限
 
-- **准入**（谁能触发机器人）：`whiteList`——启用时**机器人 owner 自动放行**（`includeOwner`，默认开）、静态 `allowedUsers`/`allowedGroups`、动态 `/allow` 名单任一命中即放行；未启用时全员可用
-- **管理**（谁能执行命令）：`access.adminUsers` / `adminGroups`；未配置管理员时，任一准入用户可执行
+- **准入**（谁能触发机器人）：`whiteList`——启用时**机器人 owner 自动放行**（`includeOwner`，默认开）、静态 `allowedUsers`/`allowedGroups`、动态 `/allow` 名单任一命中即放行；未启用时全员可用。`access.privateOwnerOnly=true` 时私聊只允许 owner/管理员（不影响已注册 DSH 群成员）。
+- **管理**（谁能执行命令）：`access.adminUsers` / `adminGroups` + 群创建者；未配置管理员且没有 owner 时，任一准入用户可执行（兼容旧部署）。
+- **审批**（谁能点同意）：默认任务发起人；`interaction.approvalOwnerOnly=true` 时群内敏感操作由机器人 owner 审批，发起人不能自己放行。`/stop` 仅任务发起人、群创建者、owner/管理员可执行。
+- **审计**：准入拒绝、管理命令、权限变更、审批请求/结果/超时写入 `<dshHome>/wildfire-audit.jsonl`（0600，2MB 轮转），桌面端在「设置 → 权限」展示。
 - **遗留群处理**：插件只处理**注册表记录**的 DSH 群（防伪造）。重装 dsh / 更换机器后注册表丢失，IM 服务端会残留插件此前创建的群（机器人是群主、AI 线路）——这类"僵尸群"的消息原本会被静默忽略。插件现在对注册表未命中的群做特殊处置（判定条件：消息到达在 **AI 线路（`aiLine`，默认 2）** 且 `getGroupInfo` 确认**机器人是群主**）：
   - **普通消息** → 仅返回一条提示（说明这是遗留 DSH 群、机器人不处理、销毁/重建方式），**绝不自动销毁**；同一群 5 分钟内只提示一次；
   - **群内发送 `/destroy`**（明确销毁任务）→ 解散群 + 清理自动分配的工作区目录（目录名须为自动目录格式且位于 `workspace.root` 内）+ 提示；
   - **普通用户群**（机器人非群主）→ 判定失败，完全静默。
 
-白名单动态命令（私聊=管理员，群聊=群主/管理员）：
+白名单动态命令（私聊=管理员，群聊=群创建者/群主/管理员）：
 
 | 命令 | 行为 |
 |------|------|

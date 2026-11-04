@@ -163,6 +163,14 @@ export type SessionKeyResolver = (sessionId: string) => string | undefined;
 /** Resolve the sender who owns the in-flight turn of a conversation. */
 export type TurnOwnerResolver = (key: string) => string | undefined;
 
+/** Resolve the robot owner (read from getProfile after connecting). */
+export type RobotOwnerResolver = () => string | undefined;
+
+/** Minimal audit sink (the plugin's AuditLog satisfies it). */
+export interface AuditSink {
+  record(kind: string, fields?: Record<string, unknown>): void;
+}
+
 /** IM send surface (wired in index.ts). */
 export interface CardSender {
   sendText(target: ConversationTarget, text: string): Promise<void>;
@@ -213,7 +221,10 @@ interface PendingApproval {
   reason?: string;
   resolve: (value: string) => void;
   timer: NodeJS.Timeout;
+  /** Member allowed to decide (turn sender, or the robot owner when approvalOwnerOnly). */
   ownerSender?: string;
+  /** Who started the turn this approval belongs to (shown on the card). */
+  requestedBy?: string;
   cardMessageId?: string;
 }
 
@@ -228,6 +239,8 @@ export class InteractionManager {
   private cards: CardSender;
   private resolveKeyForSession: SessionKeyResolver;
   private resolveTurnOwner: TurnOwnerResolver;
+  private resolveRobotOwner: RobotOwnerResolver;
+  private audit?: AuditSink;
   private conversations = new Map<string, ConversationTarget>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private pendingApprovals = new Map<string, PendingApproval>();
@@ -245,13 +258,17 @@ export class InteractionManager {
     logger: any,
     cards: CardSender,
     resolveKeyForSession: SessionKeyResolver = () => undefined,
-    resolveTurnOwner: TurnOwnerResolver = () => undefined
+    resolveTurnOwner: TurnOwnerResolver = () => undefined,
+    resolveRobotOwner: RobotOwnerResolver = () => undefined,
+    audit?: AuditSink
   ) {
     this.config = getInteractionConfig(config);
     this.logger = logger;
     this.cards = cards;
     this.resolveKeyForSession = resolveKeyForSession;
     this.resolveTurnOwner = resolveTurnOwner;
+    this.resolveRobotOwner = resolveRobotOwner;
+    this.audit = audit;
   }
 
   /** Remember where to reply for a conversation (updated on every inbound message). */
@@ -357,6 +374,13 @@ export class InteractionManager {
     }
   }
 
+  /** Only the turn sender (ask_user) / designated approver (approval), or an admin, may decide. */
+  private canDecide(expected: string | undefined, sender: string, isAdmin: boolean): boolean {
+    if (isAdmin) return true;
+    if (!expected || !sender) return true;
+    return sender === expected;
+  }
+
   /**
    * Handle a structured DSH_Answer (201). Returns true when consumed.
    * Plain text replies are handled by `handleTextReply`.
@@ -364,7 +388,13 @@ export class InteractionManager {
   handleAnswer(key: string, payload: AgentAnswerPayload, sender: string, isAdmin = false): boolean {
     const question = this.pendingQuestions.get(key);
     if (!question || question.qid !== payload.qid) return false;
-    if (!isAdmin && question.ownerSender && sender && sender !== question.ownerSender) {
+    if (!this.canDecide(question.ownerSender, sender, isAdmin)) {
+      this.audit?.record("interaction.denied", {
+        actor: sender,
+        conversation: key,
+        interaction: "question",
+        requestedBy: question.ownerSender,
+      });
       return false; // bystander cannot answer
     }
     this.pendingQuestions.delete(key);
@@ -392,18 +422,37 @@ export class InteractionManager {
   ): boolean {
     const approval = this.pendingApprovals.get(key);
     if (!approval || approval.aid !== payload.aid) return false;
-    if (!isAdmin && approval.ownerSender && sender && sender !== approval.ownerSender) {
+    if (!this.canDecide(approval.ownerSender, sender, isAdmin)) {
+      this.audit?.record("interaction.denied", {
+        actor: sender,
+        conversation: key,
+        interaction: "approval",
+        aid: approval.aid,
+        requestedBy: approval.requestedBy,
+        approver: approval.ownerSender,
+      });
       return false;
     }
     this.pendingApprovals.delete(key);
     clearTimeout(approval.timer);
     const outcome = payload.action === "approve" ? "allowed-once" : "rejected";
+    this.audit?.record("approval.decided", {
+      actor: sender,
+      conversation: key,
+      aid: approval.aid,
+      toolName: approval.toolName,
+      requestedBy: approval.requestedBy,
+      approver: approval.ownerSender,
+      outcome,
+      source: "card",
+    });
     approval.resolve(outcome);
     // 更新卡片：保留审批信息 + 用户的选择（同意/拒绝）
     this.updateCardState(approval.cardMessageId, "approval", outcome === "allowed-once" ? "approved" : "rejected", {
       aid: approval.aid,
       toolName: approval.toolName,
       ...(approval.reason ? { reason: approval.reason } : {}),
+      ...(approval.requestedBy ? { requestedBy: approval.requestedBy } : {}),
       action: payload.action,
     });
     this.pushStatus(key, { state: "running" });
@@ -417,7 +466,13 @@ export class InteractionManager {
   handleTextReply(key: string, text: string, sender: string, isAdmin = false): boolean {
     const question = this.pendingQuestions.get(key);
     if (question) {
-      if (!isAdmin && question.ownerSender && sender && sender !== question.ownerSender) {
+      if (!this.canDecide(question.ownerSender, sender, isAdmin)) {
+        this.audit?.record("interaction.denied", {
+          actor: sender,
+          conversation: key,
+          interaction: "question",
+          requestedBy: question.ownerSender,
+        });
         return false;
       }
       this.pendingQuestions.delete(key);
@@ -435,18 +490,37 @@ export class InteractionManager {
     }
     const approval = this.pendingApprovals.get(key);
     if (approval) {
-      if (!isAdmin && approval.ownerSender && sender && sender !== approval.ownerSender) {
+      if (!this.canDecide(approval.ownerSender, sender, isAdmin)) {
+        this.audit?.record("interaction.denied", {
+          actor: sender,
+          conversation: key,
+          interaction: "approval",
+          aid: approval.aid,
+          requestedBy: approval.requestedBy,
+          approver: approval.ownerSender,
+        });
         return false;
       }
       this.pendingApprovals.delete(key);
       clearTimeout(approval.timer);
       const outcome = this.parseApproval(text);
+      this.audit?.record("approval.decided", {
+        actor: sender,
+        conversation: key,
+        aid: approval.aid,
+        toolName: approval.toolName,
+        requestedBy: approval.requestedBy,
+        approver: approval.ownerSender,
+        outcome,
+        source: "text",
+      });
       approval.resolve(outcome);
       // 更新卡片：保留审批信息 + 文本选择（同意/拒绝）
       this.updateCardState(approval.cardMessageId, "approval", outcome === "allowed-once" ? "approved" : "rejected", {
         aid: approval.aid,
         toolName: approval.toolName,
         ...(approval.reason ? { reason: approval.reason } : {}),
+        ...(approval.requestedBy ? { requestedBy: approval.requestedBy } : {}),
         action: outcome === "allowed-once" ? "approve" : "reject",
       });
       this.pushStatus(key, { state: "running" });
@@ -1173,10 +1247,20 @@ export class InteractionManager {
     if (this.pendingApprovals.has(key)) return "unavailable";
 
     const aid = randomUUID();
+    const turnOwner = this.resolveTurnOwner(key) ?? String(target.sender ?? "");
+    const robotOwner = this.config.approvalOwnerOnly ? this.resolveRobotOwner?.() : undefined;
+    if (this.config.approvalOwnerOnly && !robotOwner) {
+      this.logger?.warn?.(`[wildfire] approvalOwnerOnly set but robot owner unknown; falling back to turn sender: key=${key}`);
+    }
+    // Sensitive actions in a guest turn must be approved by the robot owner
+    // (approvalOwnerOnly), never by the guest who triggered them.
+    const approver = robotOwner || turnOwner;
     const data: AgentApprovalPayload = {
       aid,
       toolName: req?.toolName ?? "工具",
       ...(req?.reason ? { reason: req.reason } : {}),
+      ...(turnOwner ? { requestedBy: turnOwner } : {}),
+      ...(approver && approver !== turnOwner ? { approver } : {}),
     };
     let cardMessageId: string | undefined;
     try {
@@ -1189,17 +1273,39 @@ export class InteractionManager {
       );
     } catch (err: any) {
       this.logger?.warn?.(`[wildfire] approval card send failed, falling back to text: ${err.message}`);
+      const who =
+        data.approver && data.approver !== data.requestedBy
+          ? `\n发起人: ${data.requestedBy}\n审批人: ${data.approver}`
+          : "";
       await this.cards.sendText(
         target,
-        `🔐 工具审批：${data.toolName} 请求执行${data.reason ? `\n原因: ${data.reason}` : ""}\n\n回复「${this.config.approvedLabel}」放行，或「${this.config.deniedLabel}」拒绝`
+        `🔐 工具审批：${data.toolName} 请求执行${data.reason ? `\n原因: ${data.reason}` : ""}${who}\n\n回复「${this.config.approvedLabel}」放行，或「${this.config.deniedLabel}」拒绝`
       );
     }
 
+    this.audit?.record("approval.requested", {
+      actor: turnOwner,
+      conversation: key,
+      aid,
+      toolName: data.toolName,
+      requestedBy: turnOwner,
+      approver,
+      ...(data.reason ? { reason: data.reason } : {}),
+    });
+    this.logger?.info?.(
+      `[wildfire] approval requested: key=${key}, tool=${data.toolName ?? "-"}, requestedBy=${turnOwner || "-"}, approver=${approver || "-"}`
+    );
     this.pushStatus(key, { state: "waiting_user", interaction: "approval" });
-    const ownerSender = this.resolveTurnOwner(key) ?? target.sender;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingApprovals.delete(key);
+        this.audit?.record("approval.timeout", {
+          conversation: key,
+          aid,
+          toolName: data.toolName,
+          requestedBy: turnOwner,
+          approver,
+        });
         this.logger?.warn?.(`[wildfire] approval timed out: key=${key}`);
         this.updateCardState(cardMessageId, "approval", "expired");
         this.pushStatus(key, { state: "running" });
@@ -1213,7 +1319,8 @@ export class InteractionManager {
         ...(data.reason ? { reason: data.reason } : {}),
         resolve,
         timer,
-        ownerSender,
+        ownerSender: approver,
+        requestedBy: turnOwner,
         cardMessageId,
       });
     });

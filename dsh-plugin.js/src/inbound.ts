@@ -582,6 +582,7 @@ export async function handleIncomingMessage(
   // Whitelist (owner + static + dynamic /allow list).
   const whitelist: WhitelistFilter = api.whitelist ?? new WhitelistFilter(config);
   if (!bypassWhitelist && !whitelist.shouldProcess(String(sender), String(conv.target), isGroup)) {
+    auditPermission(api, "admission.denied", String(sender), conv, { reason: "whitelist" });
     api.logger?.info?.(`[wildfire] blocked by whitelist: sender=${sender}`);
     await sendDirectReply(sender, conv, whitelist.deniedMessage, api);
     return;
@@ -599,6 +600,16 @@ export async function handleIncomingMessage(
     }
     window.push(now);
     rateWindows.set(key, window);
+  }
+
+  // Private-chat admission: the desktop-provisioned personal robot is a
+  // control panel; only its owner (or a configured admin) may drive it.
+  // Group members are unaffected — they are admitted by the group registry.
+  if (conv.type === CONV_TYPE_SINGLE && api.access && !api.access.canUsePrivate(String(sender))) {
+    auditPermission(api, "admission.denied", String(sender), conv, { reason: "private-owner-only" });
+    api.logger?.info?.(`[wildfire] private chat denied: sender=${sender} is not owner/admin`);
+    await sendDirectReply(sender, conv, "无权限使用：该机器人仅限 owner 私聊", api);
+    return;
   }
 
   // Remember the conversation target for interactive seams (ask_user / approval).
@@ -791,6 +802,7 @@ export async function handleIncomingMessage(
           ? (await access.canManageWorkspace(senderId, convTarget, true)) || isDshGroupCreator(api, convTarget, senderId)
           : access.canRunCommand(senderId);
         if (isSet && !canManage) {
+          auditPermission(api, "command.denied", senderId, conv, { command: "cwd", reason: "not-creator-or-admin" });
           await sendDirectReply(sender, conv, "无权限修改本会话的工作目录（需要创建者或管理员）", api);
           return;
         }
@@ -806,6 +818,7 @@ export async function handleIncomingMessage(
           return;
         }
         if (!access.canRunCommand(senderId)) {
+          auditPermission(api, "command.denied", senderId, conv, { command: cmd, reason: "not-owner-or-admin" });
           await sendDirectReply(sender, conv, "无权限执行（需要管理员或机器人 owner）", api);
           return;
         }
@@ -814,12 +827,14 @@ export async function handleIncomingMessage(
       }
 
       if (cmd === "allow" || cmd === "disallow" || cmd === "allowlist") {
-        // Allowlist management: private = admin, group = group owner / admin.
+        // Allowlist management: private = admin, group = creator / group owner / admin.
         const permitted = isGroup
-          ? await access.canManageWorkspace(senderId, convTarget, true)
+          ? (await access.canManageWorkspace(senderId, convTarget, true)) ||
+            isDshGroupCreator(api, convTarget, senderId)
           : access.canRunCommand(senderId);
         if (!permitted) {
-          await sendDirectReply(sender, conv, "无权限管理白名单（需要管理员或群主）", api);
+          auditPermission(api, "command.denied", senderId, conv, { command: cmd, reason: "not-creator-or-admin" });
+          await sendDirectReply(sender, conv, "无权限管理白名单（需要管理员或群创建者）", api);
           return;
         }
         await handleCommand(api, key, cmd, trimmed, sender, conv, isGroup);
@@ -836,6 +851,7 @@ export async function handleIncomingMessage(
           (await access.canManageWorkspace(senderId, convTarget, true)) ||
           isDshGroupCreator(api, convTarget, senderId);
         if (!canGroupManage) {
+          auditPermission(api, "command.denied", senderId, conv, { command: cmd, reason: "not-creator-or-admin" });
           await sendDirectReply(sender, conv, `/${cmd} 需要群创建者或管理员执行`, api);
           return;
         }
@@ -849,10 +865,12 @@ export async function handleIncomingMessage(
           (await access.canManageWorkspace(senderId, convTarget, true)) ||
           isDshGroupCreator(api, convTarget, senderId);
         if (!canGroupManage) {
+          auditPermission(api, "command.denied", senderId, conv, { command: cmd, reason: "not-creator-or-admin" });
           await sendDirectReply(sender, conv, `/${cmd} 需要群创建者或管理员执行`, api);
           return;
         }
       } else if (!access.canRunCommand(senderId)) {
+        auditPermission(api, "command.denied", senderId, conv, { command: cmd, reason: "not-owner-or-admin" });
         await sendDirectReply(sender, conv, "无权限执行管理命令（请联系管理员）", api);
         return;
       }
@@ -887,6 +905,27 @@ export async function handleIncomingMessage(
   if (isSingle) {
     try {
       await sendDirectReply(sender, conv, "单聊仅用于管理命令（/help 查看全部命令）。AI 对话请在群聊中使用。", api);
+    } finally {
+      release();
+      if (sessionQueues.get(key) === slot) {
+        sessionQueues.delete(key);
+      }
+    }
+    return;
+  }
+
+  // Guest turns: optional hard switch for owner-only workspaces. Group
+  // members can still read the conversation, but only the owner (or an admin)
+  // may start an agent turn. `forceProcess` keeps owner assignments working.
+  if (
+    isGroup &&
+    !security.allowGuestTurns &&
+    !forceProcess &&
+    !isRobotOwner(String(sender), api) &&
+    !api.access?.canRunCommand?.(String(sender))
+  ) {
+    try {
+      await sendDirectReply(sender, conv, "当前群仅允许创建者发起 Agent 任务", api);
     } finally {
       release();
       if (sessionQueues.get(key) === slot) {
@@ -1373,6 +1412,10 @@ async function handleCommand(
   isGroup: boolean
 ): Promise<void> {
   const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|session|kick|invite|mute|unmute|members)\s*/, "").trim();
+  auditPermission(api, "command.executed", sender, conv, {
+    command: cmd,
+    ...(arg ? { arg: arg.slice(0, 200) } : {}),
+  });
   switch (cmd) {
     case "help":
       await handleHelpCommand(api, sender, conv, isGroup);
@@ -1535,6 +1578,28 @@ async function handleStopCommand(
   sender: string,
   conv: { type: number; target: string; line: number }
 ): Promise<void> {
+  // Only the member who owns the running turn, the robot owner, a DSH group
+  // creator, or an admin may interrupt. A bystander must not be able to kill
+  // someone else's work.
+  const senderId = String(sender);
+  const turnOwner = turnOwners.get(key);
+  const allowed =
+    isRobotOwner(senderId, api) ||
+    !!api.access?.canRunCommand?.(senderId) ||
+    (!!turnOwner && senderId === turnOwner) ||
+    ((conv.type === CONV_TYPE_GROUP || conv.type === CONV_TYPE_CHANNEL) &&
+      isDshGroupCreator(api, String(conv.target), senderId));
+  if (!allowed) {
+    auditPermission(api, "command.denied", senderId, conv, {
+      command: "stop",
+      reason: "not-turn-owner-or-admin",
+      turnOwner: turnOwner ?? "",
+    });
+    api.logger?.info?.(`[wildfire] /stop denied: sender=${senderId}, turnOwner=${turnOwner ?? "-"}, key=${key}`);
+    await sendDirectReply(sender, conv, "无权限停止该任务（需要任务发起人、群创建者或管理员）", api);
+    return;
+  }
+
   const agents = api.ctx?.get?.("agents");
   const agent = agents?.get?.(api.wildfireAgents.peekSessionId(key));
   if (!agent || agent.status !== "running") {
@@ -1919,6 +1984,13 @@ async function handleSandboxCommand(
       `/sandbox key=${key} preset=${arg} by=${sender} session=${session?.id ?? "-"} ` +
         `sandbox=${after.sandbox ?? "-"} approval=${after.approval ?? "-"} events=${sessionEventCount(session)}`
     );
+    auditPermission(api, "permission.changed", sender, conv, {
+      command: "sandbox",
+      preset: arg,
+      sandbox: after.sandbox ?? arg,
+      approval: after.approval,
+      source: "text",
+    });
     await sendTip(
       sender,
       conv,
@@ -1948,6 +2020,12 @@ async function handleSandboxCommand(
     perm.approval === "never"
       ? "\n⚠️ 审批策略仍为 never：需要审批的操作会被直接拒绝，不会弹卡片（/approval ask 可打开）"
       : "";
+  auditPermission(api, "permission.changed", sender, conv, {
+    command: "sandbox",
+    sandbox: arg,
+    approval: perm.approval,
+    source: "text",
+  });
   await sendTip(
     sender,
     conv,
@@ -2023,6 +2101,11 @@ async function handleApprovalCommand(
     `/approval key=${key} policy=${value} by=${sender} session=${session?.id ?? "-"} ` +
       `sandbox=${readPermissionState(api, session).sandbox ?? "-"} events=${sessionEventCount(session)}`
   );
+  auditPermission(api, "permission.changed", sender, conv, {
+    command: "approval",
+    policy: value,
+    source: "text",
+  });
   await sendTip(
     sender,
     conv,
@@ -2899,6 +2982,7 @@ async function handleDshCommand(
   if (command.op === "switch") {
     const target = String(command.sessionId ?? "").trim();
     if (!(await authorizePanelCmd(api, "switch", sender, conv, isGroup))) {
+      auditPermission(api, "command.denied", sender, conv, { command: "switch", reason: "panel-authorization", source: "panel" });
       api.interactions?.pushStatus(key, { error: "无权限切换会话" });
       api.interactions?.sendCommandResult?.(key, {
         ver: 1, op: "switch", seq: command.seq, robotId: command.robotId, ok: false, error: "无权限切换会话",
@@ -2934,6 +3018,7 @@ async function handleDshCommand(
       return;
     }
     if (!(await authorizePanelCmd(api, "create", sender, conv, false))) {
+      auditPermission(api, "command.denied", sender, conv, { command: "create", reason: "panel-authorization", source: "panel" });
       api.interactions?.pushStatus(key, { error: "无权限创建会话" });
       return;
     }
@@ -2952,6 +3037,7 @@ async function handleDshCommand(
     }
     const cmd = m[1];
     if (!(await authorizePanelCmd(api, cmd, sender, conv, isGroup))) {
+      auditPermission(api, "command.denied", sender, conv, { command: cmd, reason: "panel-authorization", source: "panel" });
       api.interactions?.pushStatus(key, { error: `无权限执行 /${cmd}` });
       api.logger?.warn?.(`[wildfire] DSH_Command set denied: cmd=/${cmd}, sender=${sender}, key=${key}`);
       // 明确提示（可见消息）：该机器人的面板设置仅 owner 可修改
@@ -3053,6 +3139,11 @@ async function handleDshCommand(
         });
         return;
       }
+      auditPermission(api, "permission.changed", sender, conv, {
+        command: "approval",
+        policy: approvalArg,
+        source: "panel",
+      });
       api.interactions?.pushStatus(key, {
         lastChange: `工具审批 → ${approvalArg === "ask" ? "询问（弹卡片）" : "自动拒绝（无人值守）"}（下一条消息生效）`,
       });
@@ -4116,6 +4207,26 @@ async function sendStreamingReply(
  * 发送直接回复。`asTip=true` 时发 Tip 消息（type=90，客户端渲染为居中小字提示，
  * 不占普通消息气泡）——用于命令响应等"系统提示"性质的文本。
  */
+/** Record one permission-sensitive decision (best effort; never throws). */
+function auditPermission(
+  api: any,
+  kind: string,
+  sender: string,
+  conv: { type: number; target: string; line: number },
+  fields: Record<string, unknown> = {}
+): void {
+  try {
+    api?.audit?.record(kind, {
+      actor: String(sender),
+      channel: conv.type === CONV_TYPE_SINGLE ? "private" : "group",
+      target: String(conv.target),
+      ...fields,
+    });
+  } catch {
+    // audit is best effort
+  }
+}
+
 async function sendDirectReply(
   sender: string,
   conv: { type: number; target: string; line: number },

@@ -122,6 +122,13 @@ export interface WildfireAccessConfig {
    * `getGroupInfo`; the robot must be a member of the group). Default true.
    */
   groupOwnerCanManage?: boolean;
+  /**
+   * Private chat: only the robot owner and admins may talk to the robot.
+   * Default false (keeps the historical "any admitted user" behavior).
+   * Desktop provisioning sets true so a personal robot cannot be driven by
+   * strangers who add it as a friend.
+   */
+  privateOwnerOnly?: boolean;
 }
 
 /** One selectable model preset (a dsh ModelSelection). */
@@ -173,6 +180,13 @@ export interface WildfireInteractionConfig {
   approvedLabel?: string;
   /** Label that denies (matched loosely against the IM reply). Default "拒绝". */
   deniedLabel?: string;
+  /**
+   * Group turns: route tool approvals to the robot owner instead of the member
+   * who started the turn. Default false (turn sender approves). Desktop
+   * provisioning sets true so a workspace guest can never approve a write /
+   * dangerous tool call on the owner's machine.
+   */
+  approvalOwnerOnly?: boolean;
 }
 
 /**
@@ -185,6 +199,12 @@ export interface WildfireSecurityConfig {
    * 0 = unlimited. Default 0.
    */
   maxMessagesPerMinute?: number;
+  /**
+   * Allow non-owner members of a DSH workspace group to start agent turns.
+   * Default true (collaborative groups). When false only the robot owner and
+   * admins can drive the agent; other members still see the conversation.
+   */
+  allowGuestTurns?: boolean;
 }
 
 export interface WildfireConfig {
@@ -195,6 +215,12 @@ export interface WildfireConfig {
   robotId?: string;
   /** Wildfire robot secret */
   robotSecret?: string;
+  /**
+   * Read `robotSecret` from this environment variable instead of inlining it
+   * in the profile patch. The desktop host injects `WF_ROBOT_SECRET` so the
+   * secret never reaches the on-disk YAML.
+   */
+  robotSecretEnv?: string;
   /**
    * 机器人平台号（可选覆盖）：默认**不配置**，SDK 按运行环境自动探测
    * （Linux=7 / macOS=4 / Windows=3，见 ProtoConstants.Platform）。
@@ -311,6 +337,7 @@ export function getAccessConfig(config: WildfireConfig): Required<WildfireAccess
     adminUsers: config.access?.adminUsers ?? [],
     adminGroups: config.access?.adminGroups ?? [],
     groupOwnerCanManage: config.access?.groupOwnerCanManage ?? true,
+    privateOwnerOnly: config.access?.privateOwnerOnly ?? false,
   };
 }
 
@@ -345,6 +372,7 @@ export function getInteractionConfig(
     approvalTimeoutMs: config.interaction?.approvalTimeoutMs ?? 120000,
     approvedLabel: config.interaction?.approvedLabel ?? "同意",
     deniedLabel: config.interaction?.deniedLabel ?? "拒绝",
+    approvalOwnerOnly: config.interaction?.approvalOwnerOnly ?? false,
   };
 }
 
@@ -352,5 +380,6 @@ export function getInteractionConfig(
 export function getSecurityConfig(config: WildfireConfig): Required<WildfireSecurityConfig> {
   return {
     maxMessagesPerMinute: config.security?.maxMessagesPerMinute ?? 0,
+    allowGuestTurns: config.security?.allowGuestTurns ?? true,
   };
 }

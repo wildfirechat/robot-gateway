@@ -20,10 +20,24 @@ export type GroupOwnerResolver = (groupId: string) => Promise<string | null>;
 export class AccessController {
   private config: WildfireConfig;
   private resolveGroupOwner: GroupOwnerResolver;
+  private owner: string | undefined;
 
   constructor(config: WildfireConfig, resolveGroupOwner: GroupOwnerResolver = async () => null) {
     this.config = config;
     this.resolveGroupOwner = resolveGroupOwner;
+  }
+
+  /** Remember the robot owner (read from getProfile after connecting). */
+  setOwner(owner: string | undefined): void {
+    this.owner = owner;
+  }
+
+  /** Whether the sender may use the private (control-panel) chat. */
+  canUsePrivate(senderId: string): boolean {
+    const access = getAccessConfig(this.config);
+    if (!access.privateOwnerOnly) return true;
+    if (this.owner && senderId === this.owner) return true;
+    return access.adminUsers.includes(senderId);
   }
 
   /** Whether the sender may run a private-chat management command. */
@@ -32,7 +46,7 @@ export class AccessController {
     if (access.adminUsers.length === 0 && access.adminGroups.length === 0) {
       return true;
     }
-    return access.adminUsers.includes(senderId);
+    return access.adminUsers.includes(senderId) || (!!this.owner && senderId === this.owner);
   }
 
   /**

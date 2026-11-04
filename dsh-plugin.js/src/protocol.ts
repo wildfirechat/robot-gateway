@@ -76,6 +76,13 @@ export interface AgentApprovalPayload {
   aid: string;
   toolName: string;
   reason?: string;
+  /**
+   * Who started the turn that needs approval (group guest or owner). Older
+   * clients ignore both fields; the card still renders tool + reason.
+   */
+  requestedBy?: string;
+  /** Who is allowed to decide (robot owner when approvalOwnerOnly is on). */
+  approver?: string;
 }
 
 export interface AgentApprovalResultPayload {
@@ -255,7 +262,8 @@ export function summarizeQuestion(data: AgentQuestionPayload): string {
 
 /** Human summary for an approval card. */
 export function summarizeApproval(data: AgentApprovalPayload): string {
-  return `🔐 工具审批：${data.toolName}${data.reason ? `（${data.reason}）` : ""}`;
+  const who = data.approver && data.approver !== data.requestedBy ? `，审批人 ${data.approver}` : "";
+  return `🔐 工具审批：${data.toolName}${data.reason ? `（${data.reason}）` : ""}${who}`;
 }
 
 /** Human summary for a goal card (ver:2 title / v1 objective). */
