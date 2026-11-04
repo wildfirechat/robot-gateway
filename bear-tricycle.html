@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>&#x1f43b; 骑三轮的小熊 &#x1f6b2;</title>
+<style>
+  body{margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+       min-height:100vh;background:#ede7d9;
+       font-family:'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif}
+  #ttl{color:#5d4037;font-size:20px;margin:12px 0 10px;letter-spacing:1px;text-align:center}
+  canvas{border-radius:18px;box-shadow:0 6px 48px rgba(0,0,0,.22);max-width:96vw;height:auto;
+         display:block;margin-top:-12px}
+</style>
+</head>
+<body>
+<div id="ttl">&#x1f43b; 骑三轮的小熊 &#x1f6b2;</div>
+<canvas id="cv" width="960" height="640"></canvas>
+<script>
+(function(){
+  const cv=document.getElementById('cv');const ctx=cv.getContext('2d');
+  ctx.lineCap=ctx.lineJoin='round';
+
+  /* ========== 1. 天空 ========== */
+  const sk=ctx.createLinearGradient(0,0,0,410);
+  sk.addColorStop(0,'#5cb8ff'); sk.addColorStop(.3,'#90caf9');
+  sk.addColorStop(.6,'#b3e5fc'); sk.addColorStop(1,'#e3f2fd');
+  ctx.fillStyle=sk; ctx.fillRect(0,0,960,410);
+
+  /* ========== 2. 太阳 ========== */
+  const sn={x:815,y:105,r:22};
+  const sg=ctx.createRadialGradient(sn.x,sn.y,0,sn.x,sn.y,55);
+  sg.addColorStop(0,'rgba(255,235,59,.3)'); sg.addColorStop(1,'rgba(255,235,59,0)');
+  ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(sn.x,sn.y,55,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(sn.x,sn.y,sn.r,0,Math.PI*2);
+  ctx.fillStyle='#ffee58'; ctx.fill();
+  ctx.beginPath(); ctx.arc(sn.x,sn.y,sn.r-5,0,Math.PI*2);
+  ctx.fillStyle='#fff9c4'; ctx.fill();
+
+  /* ========== 3. 云朵 ========== */
+  function cloud(x,y,s){
+    ctx.fillStyle='rgba(255,255,255,.78)';
+    ctx.beginPath(); ctx.arc(x,y,12*s,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+18*s,y-7*s,14*s,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+34*s,y-3*s,12*s,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+46*s,y+2*s,8*s,0,Math.PI*2); ctx.fill();
+  }
+  cloud(155,72,.85); cloud(415,95,.65); cloud(655,128,.95); cloud(305,155,.35);
+
+  /* ========== 4. 远山 ========== */
+  ctx.fillStyle='#a5d6a7'; ctx.beginPath(); ctx.moveTo(0,390);
+  ctx.quadraticCurveTo(120,320,240,360);
+  ctx.quadraticCurveTo(460,330,700,365);
+  ctx.quadraticCurveTo(880,345,960,380);
+  ctx.lineTo(960,420); ctx.lineTo(0,420); ctx.fill(); ctx.globalAlpha=1;
+
+  /* ========== 5. 草地 ========== */
+  const gt=ctx.createLinearGradient(0,420,0,640);
+  gt.addColorStop(0,'#a5d6a7'); gt.addColorStop(.4,'#8bc34a');
+  gt.addColorStop(.7,'#66bb6a'); gt.addColorStop(1,'#4caf50');
+  ctx.fillStyle=gt; ctx.fillRect(0,420,960,220);
+
+  /* ========== 6. 小路 ========== */
+  ctx.fillStyle='#d7ccc7'; ctx.fillRect(0,480,960,44);
+  ctx.strokeStyle='#ffa726'; ctx.lineWidth=3.5; ctx.setLineDash([12,10]);
+  ctx.beginPath(); ctx.moveTo(0,502); ctx.lineTo(960,502); ctx.stroke();
+  ctx.setLineDash([]);
+
+  /* ========== 7. 小树 ========== */
+  const trees=[{x:80,y:380,h:55,s:1.1},{x:910,y:385,h:65,s:.9},{x:175,y:372,h:40,s:.7}];
+  trees.forEach(function(t){
+    ctx.save(); ctx.fillStyle='#6d4c41';
+    ctx.fillRect(t.x-.5,t.y-t.h*.4,3,t.h*.6);
+    ctx.fillStyle='#43a047';
+    ctx.beginPath(); ctx.arc(t.x,t.y-t.h*.4,10*t.s,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(t.x-6*t.s,t.y-t.h*.55,8*t.s,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(t.x+8*t.s,t.y-t.h*.5,9*t.s,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  });
+
+  /* ========== 8. 三轮车车架 ========== */
+  const R={x:348,y:515},F={x:585,y:515};  // 后轮+前轮轴心
+  const RW=44, WY=RW; // 后轮/前轮半径 y坐标
+  // 管
+  ctx.strokeStyle='#e53935'; ctx.lineWidth=6;
+  // 座管 → 后轴
+  ctx.beginPath(); ctx.moveTo(400,410); ctx.lineTo(R.x+10,R.y+4); ctx.stroke();
+  // 后轴 → 下管
+  ctx.beginPath(); ctx.moveTo(R.x+10,R.y+4); ctx.lineTo(F.x-10,F.y-22); ctx.stroke();
+  // 后轴 → 上管
+  ctx.beginPath(); ctx.moveTo(R.x+10,R.y+4); ctx.lineTo(F.x-10,F.y-22); ctx.stroke();
+  // 上管 → 前叉
+  ctx.beginPath(); ctx.moveTo(F.x-10,F.y-22); ctx.lineTo(F.x,F.y); ctx.stroke();
+
+  /* ========== 9. 车轮 ========== */
+  function drawWheel(x,y,r){
+    ctx.save();
+    // 外胎
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.strokeStyle='#37474f'; ctx.lineWidth=5; ctx.stroke();
+    // 钢圈
+    ctx.beginPath(); ctx.arc(x,y,r-6,0,Math.PI*2);
+    ctx.strokeStyle='#bdbdbd'; ctx.lineWidth=1.5; ctx.stroke();
+    // 辐条
+    for(var i=0;i<8;i++){var a=(i/8)*Math.PI*2;
+      ctx.beginPath(); ctx.moveTo(x,y);
+      ctx.lineTo(x+Math.cos(a)*(r-6),y+Math.sin(a)*(r-6));
+      ctx.strokeStyle='#9e9e9e'; ctx.lineWidth=1; ctx.stroke();}
+    // 轮毂
+    ctx.beginPath(); ctx.arc(x,y,4.5,0,Math.PI*2);
+    ctx.fillStyle='#616161'; ctx.fill();
+    ctx.restore();
+  }
+  drawWheel(R.x,R.y,RW); drawWheel(F.x,F.y,RW);
+
+  /* ========== 10. 车座 + 车把 ========== */
+  ctx.fillStyle='#66bb6a';
+  ctx.beginPath(); ctx.ellipse(400,406,14,5,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#757575'; ctx.lineWidth=6;
+  ctx.beginPath(); ctx.moveTo(F.x-30,F.y-24);
+  ctx.quadraticCurveTo(F.x-13,F.y-37,F.x+5,F.y-20);
+  ctx.stroke();
+  ctx.fillStyle='#424242';
+  ctx.beginPath(); ctx.arc(F.x-30,F.y-24,3.5,0,Math.PI*2); ctx.fill();
+
+  /* ========== 11. 小熊 🐻 ========== */
+  // 车身 + 小熊 坐标参考: seat(400,406)
+  var bSx=406, bSy=340;  // head center
+  var hR=16;  // 头半径
+
+  // —— 耳朵 ——
+  ctx.fillStyle='#8d6e63';
+  ctx.beginPath(); ctx.arc(bSx-10,bSy-hR+9,7,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bSx+10,bSy-hR+9,7,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#d7ccc8';
+  ctx.beginPath(); ctx.arc(bSx-10,bSy-hR+9,4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bSx+10,bSy-hR+9,4,0,Math.PI*2); ctx.fill();
+
+  // —— 头 ——
+  ctx.fillStyle='#8d6e63';
+  ctx.beginPath(); ctx.arc(bSx,bSy,hR,0,Math.PI*2); ctx.fill();
+
+  // —— 面 ( muzzle ) ——
+  ctx.fillStyle='#d7ccc8';
+  ctx.beginPath(); ctx.arc(bSx+4,bSy+4,9,0,Math.PI*2); ctx.fill();
+
+  // —— 眼睛 ——
+  ctx.fillStyle='#332918';
+  ctx.beginPath(); ctx.arc(bSx-5,bSy-2,3.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bSx+9,bSy-2,3.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.beginPath(); ctx.arc(bSx-4,bSy-4,1.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bSx+10,bSy-4,1.5,0,Math.PI*2); ctx.fill();
+
+  // —— 鼻子 ——
+  ctx.fillStyle='#3e2723';
+  ctx.beginPath(); ctx.ellipse(bSx+4,bSy+1,3,2.5,0,0,Math.PI*2); ctx.fill();
+
+  // —— 笑脸 ======
+  ctx.strokeStyle='#5d4037'; ctx.lineWidth=1.8;
+  ctx.beginPath(); ctx.arc(bSx+4,bSy+7,4.5,.15*Math.PI,.85*Math.PI); ctx.stroke();
+
+  // —— 腮 ======
+  ctx.fillStyle='rgba(255,138,101,.25)';
+  ctx.beginPath(); ctx.arc(bSx-11,bSy+2,3,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bSx+13,bSy+2,3,0,Math.PI*2); ctx.fill();
+
+  // —— 身 (坐于车座) ======
+  ctx.fillStyle='#8d6e63';
+  ctx.beginPath(); ctx.ellipse(bSx+8,bSy+8,16,22,-.05,0,Math.PI*2); ctx.fill();
+  // 肚
+  ctx.beginPath(); ctx.ellipse(bSx+11,bSy+12,8,14,0,0,Math.PI*2);
+  ctx.fillStyle='#a1887f'; ctx.fill();
+
+  // —— 左臂 (向后, 坐稳) ======
+  ctx.strokeStyle='#8d6e63'; ctx.lineWidth=5;
+  ctx.beginPath(); ctx.moveTo(bSx-7,bSy+8);
+  ctx.quadraticCurveTo(bSx-25,bSy+18,bSx-28,bSy+26);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(bSx-28,bSy+26,3.5,0,Math.PI*2);
+  ctx.fillStyle='#8d6e63'; ctx.fill();
+
+  // —— 右臂 (向前握把) ======
+  ctx.beginPath(); ctx.moveTo(bSx+6,bSy+8);
+  ctx.quadraticCurveTo(bSx+28,bSy,F.x-12,F.y-20);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(F.x-12,F.y-20,3.5,0,Math.PI*2);
+  ctx.fillStyle='#8d6e63'; ctx.fill();
+
+  // —— 左腿 (坐座位上) ======
+  ctx.lineWidth=5;
+  ctx.beginPath(); ctx.moveTo(bSx-3,bSy+22);
+  ctx.quadraticCurveTo(bSx+15,bSy+28,bSx+26,bSy+26);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(bSx+26,bSy+26,3,0,Math.PI*2);
+  ctx.fillStyle='#8d6e63'; ctx.fill();
+
+  // —— 右腿 (踩踏板) ======
+  ctx.beginPath(); ctx.moveTo(bSx+5,bSy+24);
+  ctx.quadraticCurveTo(bSx+24,bSy+30,R.x+18,R.y+10);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(R.x+18,R.y+10,3,0,Math.PI*2);
+  ctx.fillStyle='#8d6e63'; ctx.fill();
+
+  /* ========== 12. 红色小围巾 ====== */
+  ctx.fillStyle='#ef5350';
+  ctx.beginPath(); ctx.arc(bSx+3,bSy+hR-1,9,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(bSx+5,bSy+hR);
+  ctx.quadraticCurveTo(bSx+10,bSy+hR+5,bSx+9,bSy+hR+9);
+  ctx.strokeStyle='#ef5350'; ctx.lineWidth=2.2; ctx.stroke();
+
+  /* ========== 13. 影子 ====== */
+  ctx.fillStyle='rgba(0,0,0,.06)';
+  ctx.beginPath(); ctx.ellipse(R.x+42,F.y+14,115,7,0,0,Math.PI*2); ctx.fill();
+
+  /* ========== 14. 细节 (草/花/蝴蝶) ====== */
+  ctx.fillStyle='#66bb6a';
+  for(var i=0;i<15;i++){var g=(25+i*55)%960;
+    ctx.beginPath(); ctx.moveTo(g,472); ctx.quadraticCurveTo(g-3,464,g,460);
+    ctx.quadraticCurveTo(g+3,464,g,472); ctx.fill();}
+
+  function flr(ox,oy,col){
+    ctx.strokeStyle='#66bb6a'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(ox,oy+10); ctx.lineTo(ox,oy); ctx.stroke();
+    for(var a=0;a<5;a++){var an=(a/5)*Math.PI*2;
+      ctx.beginPath(); ctx.arc(ox+Math.cos(an)*4,oy+Math.sin(an)*4,3,0,Math.PI*2);
+      ctx.fillStyle=col; ctx.fill();}
+    ctx.beginPath(); ctx.arc(ox,oy,2.5,0,Math.PI*2);
+    ctx.fillStyle='#ffee58'; ctx.fill();}
+  flr(115,555,'#ef5350'); flr(860,550,'#ab47bc');
+  flr(725,545,'#ffa726'); flr(235,558,'#ef5350');
+
+  // 蝴蝶
+  ctx.save(); ctx.fillStyle='#ff80ab';
+  ctx.beginPath(); ctx.ellipse(180,168,7,4,-.3,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(180,162,7,4,.4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#7b1fa2';
+  ctx.beginPath(); ctx.ellipse(180,165,1.2,5,0,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  /* ========== 15. 标题 ====== */
+  ctx.fillStyle='rgba(93,64,35,.75)';
+  var ttl='\u{1f43b} \u9a91\u4e09\u8f6e\u5c0f\u718a \u{1f6b2}';
+  ctx.font='bold 14px sans-serif'; ctx.textAlign='center';
+  var tw=ctx.measureText(ttl).width;
+  ctx.fillRect(480-tw/2-8,578,tw+16,22);
+  ctx.fillStyle='#fff'; ctx.fillText(ttl,480,592);
+  ctx.textAlign='left';
+})();
+</script>
+</body>
+</html>
