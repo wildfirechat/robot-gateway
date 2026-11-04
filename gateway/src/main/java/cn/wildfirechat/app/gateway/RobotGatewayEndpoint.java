@@ -4,6 +4,9 @@ import cn.wildfirechat.app.protocol.ConnectMessage;
 import cn.wildfirechat.app.protocol.RequestMessage;
 import cn.wildfirechat.app.protocol.ResponseMessage;
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,33 +75,46 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
             return;
         }
 
-        try {
-            // 尝试解析为鉴权消息
-            ConnectMessage connectMsg = parseConnectMessage(payload);
-            if (connectMsg != null) {
+        // 1) 鉴权消息：严格按 JSON 的 type == "connect" 判定。
+        //    不能用 payload.contains(...) —— 普通请求的 payload/params 里出现
+        //    "type" 和 "connect" 时会被误判成鉴权，导致正常请求被当成 connect 处理。
+        ConnectMessage connectMsg = parseConnectMessage(payload);
+        if (connectMsg != null) {
+            try {
                 handleConnectMessage(session, connectMsg);
+            } catch (Exception e) {
+                LOG.error("Failed to handle connect message from {}: {}", sessionId, e.getMessage(), e);
+                safeSend(session, ConnectMessage.error(500, "Internal server error: " + e.getMessage()));
+            }
+            return;
+        }
+
+        // 2) 普通请求：任何错误都只能回 ResponseMessage（带原 requestId），
+        //    绝不能回 type="connect" —— 客户端会把 connect+非0 当成鉴权失败，
+        //    进而把整条连接标记为未鉴权，之后所有请求都失败且不会重连。
+        RequestMessage request = null;
+        try {
+            request = gson.fromJson(payload, RequestMessage.class);
+
+            // 验证请求格式
+            if (request == null || request.getRequestId() == null || request.getMethod() == null) {
+                safeSend(session, ResponseMessage.error(
+                        request != null ? request.getRequestId() : null,
+                        400,
+                        "Invalid request format: requestId and method are required"
+                ));
                 return;
             }
 
             // 检查鉴权状态
             if (!sessionManager.isAuthenticated(sessionId)) {
-                ConnectMessage error = ConnectMessage.error(401, "Not authenticated. Please send connect message first.");
-                sessionManager.sendMessage(session, error);
-                session.close(CloseStatus.NOT_ACCEPTABLE.withReason("Not authenticated"));
-                return;
-            }
-
-            // 解析为普通请求
-            RequestMessage request = gson.fromJson(payload, RequestMessage.class);
-
-            // 验证请求格式
-            if (request.getRequestId() == null || request.getMethod() == null) {
-                ResponseMessage error = ResponseMessage.error(
-                        null,
-                        400,
-                        "Invalid request format: requestId and method are required"
-                );
-                sessionManager.sendMessage(session, error);
+                safeSend(session, ResponseMessage.error(request.getRequestId(), 401,
+                        "Not authenticated. Please send connect message first."));
+                try {
+                    session.close(CloseStatus.NOT_ACCEPTABLE.withReason("Not authenticated"));
+                } catch (Exception closeError) {
+                    LOG.warn("Failed to close unauthenticated session {}: {}", sessionId, closeError.getMessage());
+                }
                 return;
             }
 
@@ -117,35 +133,55 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
 
         } catch (JsonSyntaxException e) {
             LOG.error("Failed to parse message from {}: {}", sessionId, e.getMessage());
-            ConnectMessage error = ConnectMessage.error(400, "Invalid JSON format: " + e.getMessage());
-            sessionManager.sendMessage(session, error);
+            safeSend(session, ResponseMessage.error(
+                    request != null ? request.getRequestId() : null,
+                    400,
+                    "Invalid JSON format: " + e.getMessage()));
         } catch (Exception e) {
             LOG.error("Failed to handle message from {}: {}", sessionId, e.getMessage(), e);
             // 检查session是否仍然打开，避免在异常后继续操作已关闭的session
             if (session.isOpen()) {
-                try {
-                    ConnectMessage error = ConnectMessage.error(500, "Internal server error: " + e.getMessage());
-                    sessionManager.sendMessage(session, error);
-                } catch (Exception ex) {
-                    LOG.error("Failed to send error message to session {}: {}", sessionId, ex.getMessage());
-                }
+                safeSend(session, ResponseMessage.error(
+                        request != null ? request.getRequestId() : null,
+                        500,
+                        "Internal server error: " + e.getMessage()));
             }
         }
     }
 
     /**
-     * 尝试解析为鉴权消息
+     * 发送错误/控制消息：发送失败只记日志，绝不让异常冒泡（否则会被当成
+     * 请求处理失败，又触发一轮错误响应）。
+     */
+    private void safeSend(WebSocketSession session, Object message) {
+        try {
+            sessionManager.sendMessage(session, message);
+        } catch (Exception e) {
+            LOG.error("Failed to send message to session {}: {}", session.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 尝试解析为鉴权消息：必须是 JSON 对象且 type 严格等于 "connect"。
+     * （旧实现用 payload.contains 判断，任何带 "type"/"connect" 字样的普通请求
+     *   都会被误判为鉴权消息。）
      */
     private ConnectMessage parseConnectMessage(String payload) {
         try {
-            // 检查是否包含type字段且为"connect"
-            if (payload.contains("\"type\"") && payload.contains("\"connect\"")) {
-                return gson.fromJson(payload, ConnectMessage.class);
+            JsonElement root = JsonParser.parseString(payload);
+            if (!root.isJsonObject()) {
+                return null;
             }
-        } catch (JsonSyntaxException e) {
-            // 不是鉴权消息
+            JsonObject obj = root.getAsJsonObject();
+            JsonElement type = obj.get("type");
+            if (type == null || !type.isJsonPrimitive() || !"connect".equals(type.getAsString())) {
+                return null;
+            }
+            return gson.fromJson(obj, ConnectMessage.class);
+        } catch (Exception e) {
+            // 不是合法 JSON，交给普通请求解析去报错
+            return null;
         }
-        return null;
     }
 
     /**

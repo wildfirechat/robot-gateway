@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
@@ -54,6 +55,12 @@ public class SessionManager {
     // 未鉴权会话超时时间（毫秒）- 1分钟
     private static final long UNAUTHENTICATED_TIMEOUT = 60 * 1000;
 
+    // 单条消息发送超时（毫秒）：同一会话发送被串行化，排队超时视为会话异常
+    private static final int SEND_TIME_LIMIT_MS = 10 * 1000;
+
+    // 发送缓冲上限（字节）：并发发送排队消息超过该值视为会话异常
+    private static final int SEND_BUFFER_SIZE_LIMIT = 1024 * 1024;
+
     // 机器人在线状态对应的平台号（SDK 未上报 platform 时的默认值；Linux）
     private static final int ROBOT_ONLINE_PLATFORM = 7;
 
@@ -74,10 +81,21 @@ public class SessionManager {
 
     /**
      * 添加会话（未鉴权状态）
+     *
+     * 同一个 WebSocketSession 会被两类线程同时写：
+     *  - Tomcat 请求线程（handleTextMessage 里回响应/心跳）；
+     *  - asyncExecutor 推送线程（ServiceImpl.onReceiveMessage 转发 IM 消息）。
+     * Spring 的 StandardWebSocketSession 不是发送线程安全的，并发 sendMessage 会让
+     * Tomcat 抛 IllegalStateException: TEXT_PARTIAL_WRITING（轻则丢消息，重则整条
+     * 会话的响应被当成错误响应发回客户端）。这里用
+     * ConcurrentWebSocketSessionDecorator 对每个会话的发送做串行化 + 背压限流，
+     * 所有后续发送都必须使用这里保存的包装实例。
      */
     public void addSession(WebSocketSession session) {
         String sessionId = session.getId();
-        sessions.put(sessionId, session);
+        WebSocketSession concurrentSession = new ConcurrentWebSocketSessionDecorator(
+                session, SEND_TIME_LIMIT_MS, SEND_BUFFER_SIZE_LIMIT);
+        sessions.put(sessionId, concurrentSession);
         sessionInfos.put(sessionId, new SessionInfo(sessionId));
         LOG.info("Session added: {}, total sessions: {}", sessionId, sessions.size());
     }
@@ -244,24 +262,36 @@ public class SessionManager {
      * 失败。原数字字段保持不变（其他平台 SDK 兼容），JS 端优先读 String 字段。
      */
     public boolean sendMessage(WebSocketSession session, Object message) {
-        if (session != null && session.isOpen()) {
-            try {
-                String json = gson.toJson(message);
-                json = addUidStringFields(json);
-                session.sendMessage(new TextMessage(json));
-                return true;
-            } catch (IOException e) {
-                LOG.error("Failed to send message to session {}: {}", session.getId(), e.getMessage());
-                // 主动关闭 session，防止 Tomcat WebSocket 底层 socket 泄漏导致 CLOSE_WAIT
-                try {
-                    session.close();
-                } catch (IOException ex) {
-                    LOG.error("Failed to close session {} after send error: {}", session.getId(), ex.getMessage());
-                }
-                return false;
-            }
+        if (session == null) {
+            return false;
         }
-        return false;
+        // 统一使用 addSession 里保存的并发安全包装实例：调用方（handleTextMessage）
+        // 拿到的是 Tomcat 的原始 session，直接 sendMessage 会绕开串行化。
+        WebSocketSession target = sessions.get(session.getId());
+        if (target == null) {
+            target = session;
+        }
+        if (!target.isOpen()) {
+            return false;
+        }
+        try {
+            String json = gson.toJson(message);
+            json = addUidStringFields(json);
+            target.sendMessage(new TextMessage(json));
+            return true;
+        } catch (Exception e) {
+            // 任何发送异常（IOException / 并发写 IllegalStateException /
+            // 装饰器的 SessionLimitExceededException）都不能再向上抛：
+            // 一旦冒泡到 handleTextMessage 的 catch，就会被当成请求错误回给客户端。
+            // 发送失败说明该会话已不可用，直接关闭，让客户端走重连。
+            LOG.error("Failed to send message to session {}: {}", target.getId(), e.getMessage());
+            try {
+                target.close(CloseStatus.SERVER_ERROR);
+            } catch (Exception ex) {
+                LOG.error("Failed to close session {} after send error: {}", target.getId(), ex.getMessage());
+            }
+            return false;
+        }
     }
 
     /**
