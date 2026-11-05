@@ -225,7 +225,8 @@ export async function resolveAllowedLocalPath(
     }
     logger?.warn?.(`[wildfire-media] outbound path rejected (outside allowed dirs): ${pth}`);
     return null;
-  } catch {
+  } catch (e: any) {
+    logger?.warn?.(`[wildfire-media] outbound path rejected: ${pth} (${String(e?.message ?? e)})`);
     return null;
   }
 }

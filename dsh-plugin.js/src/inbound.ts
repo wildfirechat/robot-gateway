@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
-import { mkdir, readdir, realpath, stat, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import {
   TextMessageContent,
   ImageMessageContent,
@@ -481,7 +481,7 @@ export async function handleIncomingMessage(
     // 注册表未命中：遗留 DSH 群（重装 dsh 后注册表丢失，但 IM 服务端残留
     // 机器人创建的群）特殊处置——
     // - 群内发送 /destroy（明确销毁任务）→ 校验（AI 线路 + 机器人是群主）
-    //   通过后解散群并清理自动目录；
+    //   通过后解散群（工作区目录保留）；
     // - 其他消息 → 仅返回提示（限频），绝不自动销毁；
     // 普通用户群（机器人非群主）始终完全静默。
     const trimmed = (text ?? "").trim();
@@ -1170,13 +1170,20 @@ export async function handleIncomingMessage(
     if (getMediaConfig(config).outboundEnabled) {
       extracted = extractOutboundMedia(finalText);
       if (extracted.media.length > 0) {
+        logger.info?.(`[wildfire] outbound markers: ${extracted.media.map((m) => m.path).join(", ")}`);
         // Fence: only files inside the conversation workspace or the
         // configured allowedRoots may leave the machine.
         const workspaceCfg = getWorkspaceConfig(config);
         const cwd = await api.workspace.peek(key, agents.peekSessionId(key));
         const allowedDirs = [cwd, ...workspaceCfg.allowedRoots];
-        await sendOutboundMedia(sender, conv, extracted.media, api, allowedDirs);
-        finalText = extracted.text.trim();
+        const sent = await sendOutboundMedia(sender, conv, extracted.media, api, allowedDirs);
+        logger.info?.(`[wildfire] outbound media files sent: ${sent}/${extracted.media.length}`);
+        if (sent < extracted.media.length) {
+          const warning = "⚠️ 文件已生成，但上传/发送失败，未发送到聊天。请检查对象存储/上传服务后重试。";
+          finalText = extracted.text.trim() ? `${extracted.text.trim()}\n\n${warning}` : warning;
+        } else {
+          finalText = extracted.text.trim();
+        }
       }
     }
 
@@ -1184,13 +1191,18 @@ export async function handleIncomingMessage(
     // present 的 path 可能是相对路径（相对会话 cwd）——先解析为绝对路径。
     if (presentedPaths.length > 0 && getMediaConfig(config).outboundEnabled) {
       try {
+        logger.info?.(`[wildfire] present paths: ${presentedPaths.join(", ")}`);
         const workspaceCfg = getWorkspaceConfig(config);
         const cwd = await api.workspace.peek(key, agents.peekSessionId(key));
         const items = presentedPaths
           .map((p) => (path.isAbsolute(p) ? p : path.resolve(cwd, p)))
           .map((p) => ({ path: p, isImage: isImageExt(p) }));
-        await sendOutboundMedia(sender, conv, items, api, [cwd, ...workspaceCfg.allowedRoots]);
-        logger.info?.(`[wildfire] present files sent: count=${items.length}, key=${key}`);
+        const sent = await sendOutboundMedia(sender, conv, items, api, [cwd, ...workspaceCfg.allowedRoots]);
+        logger.info?.(`[wildfire] present files sent: ${sent}/${items.length}, key=${key}`);
+        if (sent < items.length) {
+          const warning = "⚠️ 文件已生成，但上传/发送失败，未发送到聊天。请检查对象存储/上传服务后重试。";
+          finalText = finalText.trim() ? `${finalText.trim()}\n\n${warning}` : warning;
+        }
       } catch (err: any) {
         logger.warn?.(`[wildfire] present files send failed: ${String(err?.message ?? err)}`);
       }
@@ -1198,7 +1210,7 @@ export async function handleIncomingMessage(
     // 回合结果推送：reason（completed/cancelled）走 type=1 状态；
     // Token 统计（usage/turn/context/cacheHitRatePct/speed）走 type=2 独立通道。
     // 与下方最终消息一致：无文本且无媒体 = cancelled（type 20）。
-    const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0);
+    const noOutput = !finalText.trim() && !(extracted?.media?.length ?? 0) && presentedPaths.length === 0;
     // NO_REPLY：模型决定不回复（流式 generating 推送已被 NO_REPLY 抑制，
     // 终态必须同样不显示正文——用取消消息（type 20）收起占位气泡）。
     // 精确匹配才算 NO_REPLY（大小写不敏感、允许首尾空白）：
@@ -1228,7 +1240,7 @@ export async function handleIncomingMessage(
       await sendStreamingReply(sender, conv, "生成已取消", streamId, "cancelled", logger);
     } else if (finalText.trim()) {
       await sendStreamingReply(sender, conv, finalText, streamId, "completed", logger);
-    } else if (extracted?.media?.length) {
+    } else if ((extracted?.media?.length ?? 0) > 0 || presentedPaths.length > 0) {
       await sendStreamingReply(sender, conv, "📎", streamId, "completed", logger);
     } else if (reasonKind && reasonKind !== "completed") {
       // 其它非正常结束（blocked / max-tokens 且无输出等）：给一句提示，而不是静默取消
@@ -1283,9 +1295,10 @@ async function sendOutboundMedia(
   mediaList: Array<{ path: string; isImage: boolean }>,
   api: any,
   allowedDirs: string[]
-): Promise<void> {
+): Promise<number> {
   const client = getClient();
-  if (!client) return;
+  if (!client) return 0;
+  let sent = 0;
 
   const conversation = {
     type: conv.type,
@@ -1294,10 +1307,15 @@ async function sendOutboundMedia(
   };
 
   for (const item of mediaList) {
+    api.logger?.info?.(`[wildfire] outbound media candidate: ${item.path} (image=${item.isImage})`);
     // Resolve and enforce the allowed-directory fence before reading anything.
     const safePath = await resolveAllowedLocalPath(item.path, allowedDirs, api.logger);
-    if (!safePath) continue;
+    if (!safePath) {
+      api.logger?.warn?.(`[wildfire] outbound media skipped: path rejected: ${item.path}`);
+      continue;
+    }
 
+    api.logger?.info?.(`[wildfire] outbound media upload start: ${safePath}`);
     const remoteUrl = await uploadToWildfire(
       safePath,
       async (data, fileName) => {
@@ -1305,11 +1323,16 @@ async function sendOutboundMedia(
         const mediaType = item.isImage ? MessageContentMediaType.Image : MessageContentMediaType.File;
         const mime = item.isImage ? "image/png" : "application/octet-stream";
         const result = await client.uploadFile(data, fileName, mediaType, mime);
-        return result?.isSuccess?.() ? (result.getResult?.() ?? null) : null;
+        const ok = !!result?.isSuccess?.();
+        api.logger?.info?.(`[wildfire] uploadFile result: ok=${ok}, code=${result?.code ?? ''}, msg=${result?.msg ?? ''}, url=${ok ? (result.getResult?.() ?? '') : ''}`);
+        return ok ? (result.getResult?.() ?? null) : null;
       },
       api.logger
     );
-    if (!remoteUrl) continue;
+    if (!remoteUrl) {
+      api.logger?.warn?.(`[wildfire] outbound media skipped: upload failed: ${safePath}`);
+      continue;
+    }
 
     const fileName = safePath.split("/").pop() ?? "file";
     let payload: any;
@@ -1327,10 +1350,13 @@ async function sendOutboundMedia(
       payload = fileContent.encode();
     }
     const result = await client.sendMessage(conversation, payload);
+    const ok = !!result?.isSuccess?.();
     api.logger?.info?.(
-      `[wildfire] outbound media sent: ${fileName}, success=${result?.isSuccess?.()}`
+      `[wildfire] outbound media send result: ${fileName}, ok=${ok}, code=${result?.code ?? ''}, msg=${result?.msg ?? ''}`
     );
+    if (ok) sent++;
   }
+  return sent;
 }
 
 /**
@@ -1557,7 +1583,7 @@ async function handleHelpCommand(
   }
   if (!isGroup && isAdmin) {
     lines.push("/create [工作区] — 创建 DSH 工作区群（/create-group 兼容）");
-    lines.push("/destroy <groupId> — 销毁工作区（解散群组 + 销毁会话 + 删除目录）");
+    lines.push("/destroy <groupId> — 销毁工作区（解散群组 + 销毁会话，工作区目录保留）");
     lines.push("/new <groupId> — 重置指定群的会话");
     lines.push("/workspaces — 列出所有 DSH 工作区群");
     lines.push("/goal <groupId> [pause|resume|目标描述] — 查看/创建/暂停/恢复目标");
@@ -2772,18 +2798,12 @@ async function handleDestroyGroupCommand(
     api.logger?.warn?.(`[wildfire] dismissGroup failed: ${dismissResult?.msg}`);
   }
 
-  // dispose agent session + remove memory
+  // dispose agent session + remove memory. Never delete the workspace
+  // directory: deleting one session/group must keep the user's files.
   await api.wildfireAgents.disposeWorkspace(`wildfire:group:${groupId}`);
 
-  // delete the workspace directory
-  if (record.workspaceDir) {
-    await rm(record.workspaceDir, { recursive: true, force: true }).catch((err: unknown) =>
-      api.logger?.warn?.(`[wildfire] failed to remove workspace dir: ${String(err)}`)
-    );
-  }
-
   api.registry?.unregister(groupId);
-  await sendTip(sender, conv, `🗑 工作区群已销毁: ${groupId}（目录已删除）`, api);
+  await sendTip(sender, conv, `🗑 工作区群已销毁: ${groupId}（工作区目录已保留）`, api);
 }
 
 /**
@@ -3422,7 +3442,7 @@ async function buildDirsResult(api: any, key: string, command: AgentCommandPaylo
  *
  * 处置策略（绝不因普通消息自动销毁）：
  * - 群内发送 /destroy（明确销毁任务）→ destroyOrphanGroup：校验通过后解散群
- *   + 清理自动分配的工作区目录 + 提示；
+ *   + 保留工作区目录 + 提示；
  * - 其他消息 → maybeNotifyOrphanGroup：仅返回提示（限频），不销毁；
  * - 普通用户群（机器人非群主）→ 两个函数都判定失败，完全静默。
  */
@@ -3468,7 +3488,7 @@ async function checkOrphanGroup(
 }
 
 /**
- * 销毁任务：解散遗留 DSH 群 + 清理自动目录 + 提示。
+ * 销毁任务：解散遗留 DSH 群 + 保留工作区目录 + 提示。
  * 仅当 checkOrphanGroup 通过（AI 线路 + 机器人是群主）才执行；否则返回 false
  * 保持静默。调用方为群内 /destroy 命令。
  */
@@ -3499,31 +3519,14 @@ async function destroyOrphanGroup(
     }
   }
 
-  // 清理自动分配的工作区目录（best effort）：自动目录为 <workspace.root>/<wsId>，
-  // wsId 是 sessionIdForConversation 的哈希段（20 位 hex）。仅删除名字匹配
-  // 自动目录格式且位于 root 内的目录，避免误删用户手动创建的同名目录。
-  try {
-    const wsId = sessionIdForConversation(`wildfire:group:${groupId}`, 0).slice("wildfire-".length);
-    if (/^[0-9a-f]{20}$/i.test(wsId)) {
-      const root = api.workspace?.root?.();
-      const dir = root ? pathJoin(root, wsId) : "";
-      if (dir && dir.startsWith(root + path.sep)) {
-        const st = await stat(dir).catch(() => null);
-        if (st?.isDirectory()) {
-          await rm(dir, { recursive: true, force: true });
-          api.logger?.info?.(`[wildfire] orphan workspace dir removed: ${dir}`);
-        }
-      }
-    }
-  } catch (err: any) {
-    api.logger?.warn?.(`[wildfire] orphan workspace cleanup failed: ${String(err?.message ?? err)}`);
-  }
+  // Keep the workspace directory: it may contain user files and may be shared
+  // by other sessions. Destroying the group only removes the session binding.
 
   try {
     await sendDirectReply(
       sender,
       conv,
-      "已解散该遗留 DSH 工作区群（机器人创建但不在插件注册表中）并清理自动工作区目录。如需继续使用，请私聊机器人发送 /create 重新创建。",
+      "已解散该遗留 DSH 工作区群（机器人创建但不在插件注册表中），工作区目录已保留。如需继续使用，请私聊机器人发送 /create 重新创建。",
       api
     );
   } catch {
@@ -3655,13 +3658,8 @@ async function handleGroupNotification(
       return;
     }
   }
-  api.logger?.info?.(`[wildfire] group dismissed, destroying workspace: ${groupId}`);
+  api.logger?.info?.(`[wildfire] group dismissed, disposing session (workspace kept): ${groupId}`);
   await api.wildfireAgents.disposeWorkspace(key);
-  if (record.workspaceDir) {
-    await rm(record.workspaceDir, { recursive: true, force: true }).catch((err: unknown) =>
-      api.logger?.warn?.(`[wildfire] failed to remove workspace dir: ${String(err)}`)
-    );
-  }
   api.registry?.unregister(groupId);
 }
 
