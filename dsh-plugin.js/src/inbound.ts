@@ -352,6 +352,13 @@ function recordRouting(decision: any, data: any, config: any, sender: string, co
   } catch { /* 记录失败不影响消息处理 */ }
 }
 
+/**
+ * 新会话初始化闸门：key → 建群后写入初始配置（模型/推理等级/权限/preset）的
+ * Promise。客户端一看到新群就可能发出首条消息，dispatch 必须等配置写完，
+ * 否则第一轮会按默认配置创建会话。
+ */
+const pendingSessionSetup = new Map<string, Promise<void>>();
+
 export async function handleIncomingMessage(
   api: any,
   message: any,
@@ -403,6 +410,13 @@ export async function handleIncomingMessage(
   let { text } = extractPayloadInfo(payload);
   const { mediaUrl } = extractPayloadInfo(payload);
   const key = conversationKey(isGroup, isGroup ? conv.target : sender);
+
+  // 新建群的首条消息可能早于初始配置写完到达：等闸门放行再继续。
+  const pendingSetup = pendingSessionSetup.get(key);
+  if (pendingSetup) {
+    api.logger?.info?.(`[wildfire] waiting for new-session setup: key=${key}`);
+    await pendingSetup;
+  }
 
   api.logger?.info?.(
     `[wildfire] message: sender=${sender}, convType=${conv.type}, target=${conv.target}, type=${payloadType}, key=${key}, text=${safePreview(text)}`
@@ -2663,6 +2677,17 @@ async function handleBindWorkspaceCommand(
 }
 
 /**
+ * 新会话的初始配置（op=create 可选携带；建群后、首条消息前写入会话级覆盖，
+ * 因此第一轮就按用户选择执行）。
+ */
+interface NewSessionOptions {
+  model?: string;
+  effort?: string;
+  sandbox?: string;
+  preset?: string;
+}
+
+/**
  * `/create [工作区]` — create a DSH workspace group via the robot
  * (single-chat control panel, admin-gated). Workspace selection (4.1.3):
  *   /create            → catalog list if configured, else auto
@@ -2675,7 +2700,8 @@ async function handleCreateGroupCommand(
   arg: string,
   sender: string,
   conv: { type: number; target: string; line: number },
-  customName = ""
+  customName = "",
+  options: NewSessionOptions = {}
 ): Promise<void> {
   const client = getClient();
   if (!client) {
@@ -2745,6 +2771,12 @@ async function handleCreateGroupCommand(
     return;
   }
 
+  // 新会话初始化闸门：先挂上，配置写完才放行该群的首条消息（见 pendingSessionSetup）。
+  const setupKey = `wildfire:group:${groupId}`.toLowerCase();
+  let markSetupDone!: () => void;
+  const setupGate = new Promise<void>((resolve) => { markSetupDone = resolve; });
+  pendingSessionSetup.set(setupKey, setupGate);
+  try {
   // 3. resolve auto directory now that the group id exists
   if (!dir) {
     const wsId = sessionIdForConversation(`wildfire:group:${groupId}`, 0).slice("wildfire-".length);
@@ -2759,15 +2791,141 @@ async function handleCreateGroupCommand(
   // 4. register and reply
   api.registry?.register(groupId, String(sender), dir);
   await syncGroupMeta(api, groupId, dir, conv.line);
+  const newKey = `wildfire:group:${groupId}`.toLowerCase();
+  const applied = await applyNewSessionOptions(api, newKey, options, sender, groupId);
   api.logger?.info?.(
-    `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})`
+    `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})` +
+      (applied.length ? `, applied=[${applied.join("; ")}]` : "")
   );
   await sendTip(
     sender,
     conv,
-    `✅ 工作区群已创建：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）\n\n请搜索群 ID 加入，进群后发第一条消息即激活`,
+    `✅ 工作区群已创建：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）` +
+      (applied.length ? `\n初始配置: ${applied.join(" · ")}` : "") +
+      `\n\n请搜索群 ID 加入，进群后发第一条消息即激活`,
     api
   );
+  } finally {
+    markSetupDone();
+    if (pendingSessionSetup.get(setupKey) === setupGate) pendingSessionSetup.delete(setupKey);
+  }
+}
+
+/**
+ * 把客户端「新会话」页选择写入新会话（建群后、首条消息前）。
+ *
+ * 模型/推理等级/preset 都是会话级覆盖（按 key 持久化），不需要会话已激活；
+ * 权限（沙箱）必须写进会话日志，所以先激活会话（getAgent）再写。任一步失败
+ * 只记录日志，不阻塞建群与首条消息——沿用默认值比建不出会话更好。
+ *
+ * @returns 供提示文案展示的已应用项（人类可读）。
+ */
+async function applyNewSessionOptions(
+  api: any,
+  key: string,
+  options: NewSessionOptions,
+  sender: string,
+  groupId: string
+): Promise<string[]> {
+  const applied: string[] = [];
+  const model = String(options.model || "").trim();
+  const effort = String(options.effort || "").trim();
+  const sandbox = String(options.sandbox || "").trim();
+  const preset = String(options.preset || "").trim();
+  if (!model && !effort && !sandbox && !preset) return applied;
+
+  // 1. 模型 / 推理等级
+  if (model || effort) {
+    try {
+      const selector = api.models;
+      let selection: ModelSelection | undefined;
+      const slash = model.indexOf("/");
+      if (slash > 0) {
+        selection = await selector.applyModel(key, model.slice(0, slash), model.slice(slash + 1));
+      } else {
+        selection = await selector.peek(key);
+      }
+      if (selection) {
+        selection = {
+          ...selection,
+          ...(effort ? { reasoningEffort: effort } : {}),
+        };
+        selector.setOverride(key, selection);
+        applied.push(
+          `模型 ${selection.provider}/${selection.model}` + (effort ? `（推理 ${effort}）` : "")
+        );
+      }
+    } catch (err: any) {
+      api.logger?.warn?.(
+        `[wildfire] /create options: model apply failed (key=${key}): ${String(err?.message ?? err)}`
+      );
+    }
+  }
+
+  // 2. agent preset（能力档位）：必须在 agent 创建前写入会话级覆盖
+  if (preset) {
+    try {
+      const presetsSvc = api.ctx?.get?.("agentPresets");
+      const list = presetsSvc?.list ? ((await presetsSvc.list().catch(() => [])) ?? []) : [];
+      if ((list as any[]).some((p) => String(p?.id) === preset)) {
+        await api.wildfireAgents.switchPreset(key, preset);
+        applied.push(`预设 ${preset}`);
+      } else {
+        api.logger?.info?.(
+          `[wildfire] /create options: preset "${preset}" unavailable, using profile default`
+        );
+      }
+    } catch (err: any) {
+      api.logger?.warn?.(`[wildfire] /create options: preset apply failed: ${String(err?.message ?? err)}`);
+    }
+  }
+
+  // 3. 权限：沙箱模式（与权限预设同名时同时对齐审批策略，与 /sandbox 一致）。
+  //    与部署默认相同时不写：省掉一次「提前激活会话」，默认值本来就生效。
+  let sandboxDefault = "";
+  try {
+    sandboxDefault = String(api.ctx?.get?.("sandboxPolicy")?.defaultMode ?? "");
+  } catch {
+    sandboxDefault = "";
+  }
+  if (sandbox && sandbox !== sandboxDefault) {
+    try {
+      const valid = (SANDBOX_MODES as readonly string[]).includes(sandbox);
+      if (valid) {
+        const agent = await api.wildfireAgents.getAgent(key);
+        const session = agent?.session;
+        if (session) {
+          let presets: any;
+          try {
+            presets = api.ctx?.get?.("permissionPresets");
+          } catch {
+            presets = undefined;
+          }
+          let names: string[] = [];
+          try {
+            names = Array.from(presets?.names ?? []) as string[];
+          } catch {
+            names = [];
+          }
+          if (presets && names.includes(sandbox)) {
+            presets.set(session, sandbox);
+          } else {
+            setSandboxMode(session, sandbox);
+          }
+          applied.push(`权限 ${sandbox}`);
+        }
+      }
+    } catch (err: any) {
+      api.logger?.warn?.(`[wildfire] /create options: sandbox apply failed: ${String(err?.message ?? err)}`);
+    }
+  }
+
+  if (applied.length) {
+    api.logger?.info?.(
+      `[wildfire] /create options: group=${groupId}, key=${key}, by=${sender}, applied=${applied.join(" | ")}`
+    );
+  }
+  return applied;
 }
 
 /**
@@ -3042,9 +3200,15 @@ async function handleDshCommand(
       api.interactions?.pushStatus(key, { error: "无权限创建会话" });
       return;
     }
-    const path = String((command as any).path || "auto").trim() || "auto";
-    const name = String((command as any).name || "").trim();
-    await handleCreateGroupCommand(api, path, sender, conv, name);
+    const path = String(command.path || "auto").trim() || "auto";
+    const name = String(command.name || "").trim();
+    const options: NewSessionOptions = {
+      model: String(command.model || "").trim(),
+      effort: String(command.effort || "").trim(),
+      sandbox: String(command.sandbox || "").trim(),
+      preset: String(command.preset || "").trim(),
+    };
+    await handleCreateGroupCommand(api, path, sender, conv, name, options);
     return;
   }
 
