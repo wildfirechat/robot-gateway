@@ -471,8 +471,10 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 桌面客户端的「新会话」页通过 207 `op=create` 携带初始配置（`model` / `effort` /
 `sandbox` / `preset`）：插件建群后、首条消息前写入会话级覆盖（模型/等级/preset
 按 key 持久化，权限写会话日志），并挂一个初始化闸门——该群的首条消息会等配置
-写完再 dispatch，所以第一轮就按用户的选择执行。当前 profile（`dsh-base`）没有
-`agentPresets` 服务，`preset` 会被忽略。
+写完再 dispatch，所以第一轮就按用户的选择执行。只有 profile 启用了 preset 模式
+（注入 `agent-preset-registry`）时 `preset` 才生效，否则忽略并使用 base 工具集；
+桌面客户端内置的 profile 已用 `scripts/enable-presets.mjs` 生成的补丁启用
+（standard / ptc / minimal / cordis）。
 
 通用命令（私聊+群聊，准入成员可用）：
 
