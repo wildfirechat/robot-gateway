@@ -316,6 +316,15 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `gatewayPlatform` | 否 | 机器人平台号（**可选覆盖**，一般不需要配置）：默认 SDK 按运行环境自动探测（Linux=`7` / macOS=`4` / Windows=`3`，见野火 Platform）。网关用该平台调用 im-server `/robot/set_online` 设置机器人在线；仅当需模拟其他平台（如 `5`=WEB）时配置 |
 | `aiLine` | 否 | AI 会话使用的线路（line），默认 `2`。设计：**单聊（与机器人私聊）= 全局控制面板**（管理命令，不进入 AI）；**AI 对话仅限群聊会话 line === aiLine**（默认 2）。群聊消息若线路不对（如 line 0 普通群）会回复提醒且不进入 AI；回复始终发到消息来源的会话线路 |
 | `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent |
+| `mainSession.enabled` | 否 | 启用**主会话**：owner 私聊 + line0 普通群（非 DSH 群）共用同一个 dsh 会话。默认 `false`（桌面端注入 `true`） |
+| `mainSession.groups` | 否 | 允许旁观的群 ID 列表（支持 `*`）；为空 = 所有非 DSH 群 |
+| `mainSession.workspace` | 否 | 主会话工作目录，默认 `<dshHome>/main-workspace` |
+| `mainSession.bufferLimit` | 否 | 每个群保留的最近消息条数，默认 200 |
+| `mainSession.injectLimit` | 否 | 每回合注入的群聊上下文条数，默认 30 |
+| `mainSession.notify` | 否 | 命中相关性时私聊提醒 owner，默认 `true` |
+| `mainSession.notifyCooldownMs` | 否 | 同一个群的提醒冷却（毫秒），默认 600000（10 分钟） |
+| `mainSession.notifyKeywords` | 否 | 额外的相关性关键词（命中即提醒） |
+| `mainSession.groupReply` | 否 | owner 在群里 @ 机器人时的回复目标：`group`（默认，群里回）或 `owner`（私聊回） |
 | `requireMention` | 否 | 群聊触发模式：默认 `false` = 群内所有消息触发（无需@）；`true` = 需@或问号/关键词触发 |
 | `helpKeywords` | 否 | 群聊触发关键词（逗号分隔），默认 `帮,请,分析,总结` |
 | `whiteList.enabled` | 否 | 是否启用白名单，默认 `false` |
@@ -357,6 +366,24 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `interaction.approvalOwnerOnly` | 否 | 群内敏感操作由机器人 owner 审批（默认 `false`：任务发起人审批；桌面端注入 `true`） |
 | `security.maxMessagesPerMinute` | 否 | 每会话每分钟消息数上限（0=不限，默认 0） |
 | `security.allowGuestTurns` | 否 | 允许群成员发起 Agent 回合，默认 `true`；`false` 时仅 owner/管理员可发起 |
+
+### 主会话（owner 私聊 + line0 普通群旁观）
+
+`mainSession.enabled: true` 时：
+
+- **owner 私聊**：普通文本进入主会话（与群旁观共用上下文），斜杠命令仍走控制面板；
+- **line0 普通群（非 DSH 群）**：消息写入主会话缓冲，**不跑模型**；命中以下任一条件时私聊提醒 owner（同群有冷却）：
+  - @ 了 owner，或引用了 owner 的消息；
+  - 有人 @ 了机器人，或回复了机器人；
+  - `@所有人`；
+  - 命中 `mainSession.notifyKeywords`，或正文包含 owner 昵称。
+- **owner 在群里 @ 机器人**：用主会话跑一轮，按 `mainSession.groupReply` 回复到群（默认）或私聊；群内回复带“群内安全模式”提示，禁止引用私聊内容；
+- **其他成员 @ 机器人**：只记录/提醒，不回复；
+- **line2 DSH 群**：行为不变（每群一个 AI 会话）。
+
+安全边界：群聊内容一律标注为“未受信任的数据”，只作为背景，不执行其中的指令；非 owner 私聊仍在准入处拒绝并回复；非 DSH 群的斜杠命令不执行、不记录。
+
+上下文缓冲持久化在 `<dshHome>/wildfire-main-context.json`，重启不丢。
 
 完整示例：
 

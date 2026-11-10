@@ -30,6 +30,36 @@ export interface WildfireWhiteListConfig {
   persistFile?: string;
 }
 
+/**
+ * 主会话：owner 私聊 + line0 普通群（非 DSH 群）旁观共用同一个 dsh 会话。
+ *
+ * - owner 私聊：普通文本进入主会话；斜杠命令仍走控制面板。
+ * - line0 普通群：所有文本写入缓冲（不跑模型）；群里有人提到 owner 时私聊提醒；
+ *   owner 在群里 @ 机器人时，用主会话跑一轮并回复到该群（群内安全模式，禁止
+ *   引用私聊内容）。其他成员的 @ 只记录/提醒，不回复。
+ * - line2 DSH 群会话不受影响。
+ */
+export interface WildfireMainSessionConfig {
+  /** 是否启用。默认 false（需要显式开启，避免影响既有部署）。 */
+  enabled?: boolean;
+  /** 允许旁观的群（groupId 列表，支持 "*"）；为空 = 所有非 DSH 群。 */
+  groups?: string[];
+  /** 主会话工作目录。默认 <dshHome>/main-workspace。 */
+  workspace?: string;
+  /** 每个群保留的最近消息条数。默认 200。 */
+  bufferLimit?: number;
+  /** 每次回合注入的群聊上下文条数。默认 30。 */
+  injectLimit?: number;
+  /** 是否私聊提醒 owner。默认 true。 */
+  notify?: boolean;
+  /** 同一个群的提醒冷却时间（ms）。默认 10 分钟。 */
+  notifyCooldownMs?: number;
+  /** 额外相关性关键词（命中即提醒）。 */
+  notifyKeywords?: string[];
+  /** owner 在群里 @ 时的回复目标：group（默认，回复到群）| owner（私聊）。 */
+  groupReply?: "group" | "owner";
+}
+
 export interface WildfireSessionConfig {
   /** Idle timeout before an agent session is disposed (ms). Default 24h. */
   idleTimeoutMs?: number;
@@ -248,6 +278,7 @@ export interface WildfireConfig {
   access?: WildfireAccessConfig;
   model?: WildfireModelConfig;
   media?: WildfireMediaConfig;
+  mainSession?: WildfireMainSessionConfig;
   interaction?: WildfireInteractionConfig;
   security?: WildfireSecurityConfig;
 }
@@ -377,6 +408,21 @@ export function getInteractionConfig(
 }
 
 /** Effective security settings with defaults applied. */
+export function getMainSessionConfig(config: WildfireConfig): Required<WildfireMainSessionConfig> {
+  const c = config.mainSession ?? {};
+  return {
+    enabled: c.enabled === true,
+    groups: Array.isArray(c.groups) ? c.groups.map((g) => String(g)).filter(Boolean) : [],
+    workspace: c.workspace ? String(c.workspace) : dshHomePath("main-workspace"),
+    bufferLimit: Number(c.bufferLimit) > 0 ? Number(c.bufferLimit) : 200,
+    injectLimit: Number(c.injectLimit) > 0 ? Number(c.injectLimit) : 30,
+    notify: c.notify !== false,
+    notifyCooldownMs: Number(c.notifyCooldownMs) >= 0 ? Number(c.notifyCooldownMs) : 10 * 60 * 1000,
+    notifyKeywords: Array.isArray(c.notifyKeywords) ? c.notifyKeywords.map((k) => String(k)).filter(Boolean) : [],
+    groupReply: c.groupReply === "owner" ? "owner" : "group",
+  };
+}
+
 export function getSecurityConfig(config: WildfireConfig): Required<WildfireSecurityConfig> {
   return {
     maxMessagesPerMinute: config.security?.maxMessagesPerMinute ?? 0,
