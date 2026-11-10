@@ -3274,7 +3274,8 @@ async function handleCreateGroupCommand(
   sender: string,
   conv: { type: number; target: string; line: number },
   customName = "",
-  options: NewSessionOptions = {}
+  options: NewSessionOptions = {},
+  silent = false
 ): Promise<void> {
   const client = getClient();
   if (!client) {
@@ -3370,14 +3371,16 @@ async function handleCreateGroupCommand(
     `[wildfire] /create done: group=${groupId}, creator=${sender}, dir=${dir} (${dirLabel})` +
       (applied.length ? `, applied=[${applied.join("; ")}]` : "")
   );
-  await sendTip(
-    sender,
-    conv,
-    `✅ 工作区群已创建：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）` +
-      (applied.length ? `\n初始配置: ${applied.join(" · ")}` : "") +
-      `\n\n请搜索群 ID 加入，进群后发第一条消息即激活`,
-    api
-  );
+  if (!silent) {
+    await sendTip(
+      sender,
+      conv,
+      `✅ 工作区群已创建：\n群ID: ${groupId}\n工作区: ${dir}（${dirLabel}）` +
+        (applied.length ? `\n初始配置: ${applied.join(" · ")}` : "") +
+        `\n\n请搜索群 ID 加入，进群后发第一条消息即激活`,
+      api
+    );
+  }
   } finally {
     markSetupDone();
     if (pendingSessionSetup.get(setupKey) === setupGate) pendingSessionSetup.delete(setupKey);
@@ -3509,7 +3512,8 @@ async function handleDestroyGroupCommand(
   api: any,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   const client = getClient();
   const groupId = arg.trim();
@@ -3534,7 +3538,9 @@ async function handleDestroyGroupCommand(
   await api.wildfireAgents.disposeWorkspace(`wildfire:group:${groupId}`);
 
   api.registry?.unregister(groupId);
-  await sendTip(sender, conv, `🗑 工作区群已销毁: ${groupId}（工作区目录已保留）`, api);
+  if (!silent) {
+    await sendTip(sender, conv, `🗑 工作区群已销毁: ${groupId}（工作区目录已保留）`, api);
+  }
 }
 
 /**
@@ -3686,6 +3692,8 @@ async function handleDshCommand(
   conv: { type: number; target: string; line: number }
 ): Promise<void> {
   const isGroup = conv.type === CONV_TYPE_GROUP || conv.type === CONV_TYPE_CHANNEL;
+  // 本地客户端操作（silent=true）不往单聊发成功类通知；远端用户仍收到回执。
+  const silent = command.silent === true;
 
   if (command.op === "query") {
     const data = await buildPanelData(api, key);
@@ -3781,7 +3789,7 @@ async function handleDshCommand(
       sandbox: String(command.sandbox || "").trim(),
       preset: String(command.preset || "").trim(),
     };
-    await handleCreateGroupCommand(api, path, sender, conv, name, options);
+    await handleCreateGroupCommand(api, path, sender, conv, name, options, silent);
     return;
   }
 
@@ -3813,7 +3821,7 @@ async function handleDshCommand(
     // 销毁当前群：解散群组 + 销毁会话 + 删工作区目录 + 清注册（面板确认后执行）
     if (cmd === "destroy" || cmd === "destroy-group") {
       api.logger?.warn?.(`[wildfire] DSH_Command set: DESTROY group=${conv.target}, by=${sender}`);
-      await handleDestroyGroupCommand(api, String(conv.target), sender, conv);
+      await handleDestroyGroupCommand(api, String(conv.target), sender, conv, silent);
       return;
     }
     // 会话模式（interrupt/queue）：面板也可切换，改后以 lastChange 提示（状态栏可见）
@@ -3918,7 +3926,12 @@ async function handleDshCommand(
     } catch (err: any) {
       api.logger?.warn?.(`[wildfire] DSH_Command set: activate session failed: ${String(err)}`);
     }
-    await handleCommand(api, key, cmd, cmdText, sender, conv, isGroup);
+    if (silent) silentTipKeys.set(key, Date.now() + 30000);
+    try {
+      await handleCommand(api, key, cmd, cmdText, sender, conv, isGroup);
+    } finally {
+      if (silent) silentTipKeys.delete(key);
+    }
     // 刷新面板数据（type=3）（修改结果由 tip 小灰条展示，不再写 type=1 lastChange）
     const data = await buildPanelData(api, key).catch(() => undefined);
     if (data) api.interactions?.pushPanelData(key, data);
@@ -5000,7 +5013,28 @@ async function sendTip(
   api?: any,
   targetLine?: number
 ): Promise<void> {
+  // 本地客户端的静默面板指令（207 silent=true）执行期间，不向单聊/群聊发 tip。
+  if (suppressTipsFor(String(sender), conv)) {
+    api?.logger?.info?.(`[wildfire] tip suppressed (silent command): ${safePreview(text, 120)}`);
+    return;
+  }
   await sendDirectReply(sender, conv, text, api, targetLine, true);
+}
+
+/** 静默面板指令的 key → 截止时间。命令按会话串行执行，窗口内只影响该会话。 */
+const silentTipKeys = new Map<string, number>();
+
+function suppressTipsFor(sender: string, conv: { type: number; target: string; line: number }): boolean {
+  const key = conv.type === CONV_TYPE_SINGLE
+    ? conversationKey(false, String(sender))
+    : conversationKey(true, String(conv.target));
+  const until = silentTipKeys.get(key);
+  if (!until) return false;
+  if (until < Date.now()) {
+    silentTipKeys.delete(key);
+    return false;
+  }
+  return true;
 }
 
 // ═══════════════════ 会话切换（207 op=sessions / op=switch） ═══════════════════
