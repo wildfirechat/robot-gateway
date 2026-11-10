@@ -325,6 +325,9 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `mainSession.notifyCooldownMs` | 否 | 同一个群的提醒冷却（毫秒），默认 600000（10 分钟） |
 | `mainSession.notifyKeywords` | 否 | 额外的相关性关键词（命中即提醒） |
 | `mainSession.groupReply` | 否 | owner 在群里 @ 机器人时的回复目标：`group`（默认，群里回）或 `owner`（私聊回） |
+| `mainSession.history.enabled` | 否 | 把旁观的群消息按天/群写入历史 Markdown 文件，默认 `true` |
+| `mainSession.history.dir` | 否 | 历史目录，默认 `<workspace>/group-history` |
+| `mainSession.history.retainDays` | 否 | 历史保留天数，`0` = 永久保留（默认） |
 | `requireMention` | 否 | 群聊触发模式：默认 `false` = 群内所有消息触发（无需@）；`true` = 需@或问号/关键词触发 |
 | `helpKeywords` | 否 | 群聊触发关键词（逗号分隔），默认 `帮,请,分析,总结` |
 | `whiteList.enabled` | 否 | 是否启用白名单，默认 `false` |
@@ -384,6 +387,9 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 安全边界：群聊内容一律标注为“未受信任的数据”，只作为背景，不执行其中的指令；非 owner 私聊仍在准入处拒绝并回复；非 DSH 群的斜杠命令不执行、不记录。
 
 上下文缓冲持久化在 `<dshHome>/wildfire-main-context.json`，重启不丢。
+群历史另外按天/群写入 Markdown（默认 `<主会话目录>/group-history/<YYYY-MM-DD>/<群名>-<群ID前6>.md`），
+agent 可用 `grep`/`glob`/`read` 检索更早的消息；`mainSession.history.retainDays=0`（默认）永久保留，
+大于 0 时启动后首次写入会清理过期目录。
 
 完整示例：
 

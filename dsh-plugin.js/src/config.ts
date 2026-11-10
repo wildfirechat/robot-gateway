@@ -58,6 +58,18 @@ export interface WildfireMainSessionConfig {
   notifyKeywords?: string[];
   /** owner 在群里 @ 时的回复目标：group（默认，回复到群）| owner（私聊）。 */
   groupReply?: "group" | "owner";
+  /**
+   * 群历史文件：把旁观的群消息按天/按群追加到 Markdown 文件，
+   * 供 agent 用 grep/glob/read 检索更早的上下文。
+   */
+  history?: {
+    /** 是否写历史文件，默认 true。 */
+    enabled?: boolean;
+    /** 历史目录，默认 <workspace>/group-history。 */
+    dir?: string;
+    /** 保留天数，0 = 永久保留（默认）。 */
+    retainDays?: number;
+  };
 }
 
 export interface WildfireSessionConfig {
@@ -408,7 +420,20 @@ export function getInteractionConfig(
 }
 
 /** Effective security settings with defaults applied. */
-export function getMainSessionConfig(config: WildfireConfig): Required<WildfireMainSessionConfig> {
+export interface ResolvedMainSessionConfig {
+  enabled: boolean;
+  groups: string[];
+  workspace: string;
+  bufferLimit: number;
+  injectLimit: number;
+  notify: boolean;
+  notifyCooldownMs: number;
+  notifyKeywords: string[];
+  groupReply: "group" | "owner";
+  history: { enabled: boolean; dir: string; retainDays: number };
+}
+
+export function getMainSessionConfig(config: WildfireConfig): ResolvedMainSessionConfig {
   const c = config.mainSession ?? {};
   return {
     enabled: c.enabled === true,
@@ -420,6 +445,11 @@ export function getMainSessionConfig(config: WildfireConfig): Required<WildfireM
     notifyCooldownMs: Number(c.notifyCooldownMs) >= 0 ? Number(c.notifyCooldownMs) : 10 * 60 * 1000,
     notifyKeywords: Array.isArray(c.notifyKeywords) ? c.notifyKeywords.map((k) => String(k)).filter(Boolean) : [],
     groupReply: c.groupReply === "owner" ? "owner" : "group",
+    history: {
+      enabled: c.history?.enabled !== false,
+      dir: String(c.history?.dir || "").trim(),
+      retainDays: Number(c.history?.retainDays) >= 0 ? Number(c.history?.retainDays) : 0,
+    },
   };
 }
 
