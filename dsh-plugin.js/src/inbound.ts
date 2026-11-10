@@ -2022,7 +2022,8 @@ async function handleCommand(
   text: string,
   sender: string,
   conv: { type: number; target: string; line: number },
-  isGroup: boolean
+  isGroup: boolean,
+  silent = false
 ): Promise<void> {
   const arg = text.replace(/^\/(cwd|ls|model|effort|reset|allow|disallow|allowlist|create(?:-group)?|destroy|workspaces|goal|help|jobs|new|plan|compact|sandbox|approval|session|kick|invite|mute|unmute|members)\s*/, "").trim();
   auditPermission(api, "command.executed", sender, conv, {
@@ -2034,25 +2035,25 @@ async function handleCommand(
       await handleHelpCommand(api, sender, conv, isGroup);
       return;
     case "cwd":
-      await handleCwdCommand(api, key, arg, sender, conv, isGroup);
+      await handleCwdCommand(api, key, arg, sender, conv, isGroup, silent);
       return;
     case "ls":
       await handleListCommand(api, key, arg, sender, conv, isGroup);
       return;
     case "model":
-      await handleModelCommand(api, key, arg, sender, conv);
+      await handleModelCommand(api, key, arg, sender, conv, silent);
       return;
     case "effort":
-      await handleEffortCommand(api, key, arg, sender, conv);
+      await handleEffortCommand(api, key, arg, sender, conv, silent);
       return;
     case "plan":
-      await handlePlanCommand(api, key, arg, sender, conv);
+      await handlePlanCommand(api, key, arg, sender, conv, silent);
       return;
     case "compact":
-      await handleCompactCommand(api, key, sender, conv);
+      await handleCompactCommand(api, key, sender, conv, silent);
       return;
     case "sandbox":
-      await handleSandboxCommand(api, key, arg, sender, conv);
+      await handleSandboxCommand(api, key, arg, sender, conv, silent);
       return;
     case "approval":
       await handleApprovalCommand(api, key, arg, sender, conv);
@@ -2078,7 +2079,9 @@ async function handleCommand(
     case "reset":
       await api.wildfireAgents.resetSession(key);
       api.interactions?.resetTaskCards(key);
-      await sendTip(sender, conv, "已新建会话（原会话保留，可在 AI 面板「会话」里切回）", api);
+      if (!silent) {
+        await sendTip(sender, conv, "已新建会话（原会话保留，可在 AI 面板「会话」里切回）", api);
+      }
       return;
     case "create":
     case "create-group":
@@ -2337,7 +2340,8 @@ async function handlePlanCommand(
   key: string,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   let planMode: any;
   try {
@@ -2383,7 +2387,9 @@ async function handlePlanCommand(
           : result === "cancelled"
             ? `已取消待生效的切换，计划模式保持${on ? "关闭" : "开启"}`
             : `计划模式已经是${on ? "开启" : "关闭"}状态`;
-    await sendTip(sender, conv, text, api);
+    if (!silent) {
+      await sendTip(sender, conv, text, api);
+    }
   } catch (err: any) {
     await sendTip(sender, conv, `计划模式操作失败: ${err?.message ?? String(err)}`, api);
   }
@@ -2398,7 +2404,8 @@ async function handleCompactCommand(
   api: any,
   key: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   let compaction: any;
   try {
@@ -2422,12 +2429,14 @@ async function handleCompactCommand(
       await sendTip(sender, conv, "当前没有可压缩的历史内容", api);
       return;
     }
-    await sendTip(
-      sender,
-      conv,
-      `✅ 上下文已压缩：折叠 ${result.shadowedSeqs?.length ?? 0} 个节点（约 ${result.shadowedTokenCount ?? 0} tokens）`,
-      api
-    );
+    if (!silent) {
+      await sendTip(
+        sender,
+        conv,
+        `✅ 上下文已压缩：折叠 ${result.shadowedSeqs?.length ?? 0} 个节点（约 ${result.shadowedTokenCount ?? 0} tokens）`,
+        api
+      );
+    }
   } catch (err: any) {
     if (err?.code === "busy") {
       await sendTip(sender, conv, "当前会话正在运行任务，请稍后再试（或先 /stop）", api);
@@ -2503,7 +2512,8 @@ async function handleSandboxCommand(
   key: string,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   let policy: any;
   try {
@@ -2604,13 +2614,15 @@ async function handleSandboxCommand(
       approval: after.approval,
       source: "text",
     });
-    await sendTip(
-      sender,
-      conv,
-      `已切换到权限预设 ${arg}：沙箱=${modeLabel(after.sandbox ?? arg)}，审批=${approvalLabel(after.approval)}\n` +
-        "下一次工具调用生效（随会话持久化）",
-      api
-    );
+    if (!silent) {
+      await sendTip(
+        sender,
+        conv,
+        `已切换到权限预设 ${arg}：沙箱=${modeLabel(after.sandbox ?? arg)}，审批=${approvalLabel(after.approval)}\n` +
+          "下一次工具调用生效（随会话持久化）",
+        api
+      );
+    }
     return;
   }
 
@@ -2639,12 +2651,14 @@ async function handleSandboxCommand(
     approval: perm.approval,
     source: "text",
   });
-  await sendTip(
-    sender,
-    conv,
-    `沙箱模式已切换为 ${modeLabel(arg)}，下一次工具调用生效（随会话持久化）${approvalNote}`,
-    api
-  );
+  if (!silent) {
+    await sendTip(
+      sender,
+      conv,
+      `沙箱模式已切换为 ${modeLabel(arg)}，下一次工具调用生效（随会话持久化）${approvalNote}`,
+      api
+    );
+  }
 }
 
 /**
@@ -3926,12 +3940,7 @@ async function handleDshCommand(
     } catch (err: any) {
       api.logger?.warn?.(`[wildfire] DSH_Command set: activate session failed: ${String(err)}`);
     }
-    if (silent) silentTipKeys.set(key, Date.now() + 30000);
-    try {
-      await handleCommand(api, key, cmd, cmdText, sender, conv, isGroup);
-    } finally {
-      if (silent) silentTipKeys.delete(key);
-    }
+    await handleCommand(api, key, cmd, cmdText, sender, conv, isGroup, silent);
     // 刷新面板数据（type=3）（修改结果由 tip 小灰条展示，不再写 type=1 lastChange）
     const data = await buildPanelData(api, key).catch(() => undefined);
     if (data) api.interactions?.pushPanelData(key, data);
@@ -4429,7 +4438,8 @@ async function handleCwdCommand(
   arg: string,
   sender: string,
   conv: { type: number; target: string; line: number },
-  isGroup: boolean
+  isGroup: boolean,
+  silent = false
 ): Promise<void> {
   const workspace = api.workspace;
   const agents: AgentSessionManager = api.wildfireAgents;
@@ -4470,11 +4480,13 @@ async function handleCwdCommand(
     } catch (e: any) {
       api.logger?.warn?.(`[wildfire] /cwd clear: failed to sync default cwd: ${String(e)}`);
     }
-    await sendTip(sender, conv, "已清除自定义工作目录，恢复默认配置（会话已切换，原上下文保留）", api);
+    if (!silent) {
+      await sendTip(sender, conv, "已清除自定义工作目录，恢复默认配置（会话已切换，原上下文保留）", api);
+    }
     return;
   }
 
-  await bindWorkspacePath(api, key, arg, sender, conv, label, 0);
+  await bindWorkspacePath(api, key, arg, sender, conv, label, 0, silent);
 }
 
 /**
@@ -4493,7 +4505,8 @@ async function bindWorkspacePath(
   sender: string,
   conv: { type: number; target: string; line: number },
   label: string,
-  depth: number
+  depth: number,
+  silent = false
 ): Promise<void> {
   const workspace = api.workspace;
   const agents: AgentSessionManager = api.wildfireAgents;
@@ -4529,7 +4542,9 @@ async function bindWorkspacePath(
     api.interactions?.pushStatus(key, { cwd: canon });
     // 群聊：把群名改成目录的最后一段名字（/a/b/c → 群名 c）
     await renameGroupToDirname(api, conv, canon);
-    await sendTip(sender, conv, `工作目录已绑定: ${canon}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
+    if (!silent) {
+      await sendTip(sender, conv, `工作目录已绑定: ${canon}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
+    }
     return;
   }
 
@@ -4588,7 +4603,9 @@ async function bindWorkspacePath(
     api.interactions?.pushStatus(key, { cwd: info.resolved });
     // 群聊：把群名改成目录的最后一段名字
     await renameGroupToDirname(api, conv, info.resolved);
-    await sendTip(sender, conv, `目录已创建并绑定: ${info.resolved}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
+    if (!silent) {
+      await sendTip(sender, conv, `目录已创建并绑定: ${info.resolved}（已持久化，会话已切换：原上下文保留，切回可恢复）`, api);
+    }
     return;
   }
   if (selected === "❌ 取消") {
@@ -4699,7 +4716,8 @@ async function handleModelCommand(
   key: string,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   const selector = api.models;
   if (!arg) {
@@ -4761,11 +4779,13 @@ async function handleModelCommand(
     // Catalog path: switch provider/model only, keep the current effort.
     const selection = await selector.applyModel(key, match.provider, match.id);
     const live = api.wildfireAgents.applyModelLive(key, selection);
-    await sendTip(
-      sender,
-      conv,
-      `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? `（推理等级保留=${selection.reasoningEffort}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
-    );
+    if (!silent) {
+      await sendTip(
+        sender,
+        conv,
+        `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? `（推理等级保留=${selection.reasoningEffort}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
+      );
+    }
     return;
   }
 
@@ -4776,11 +4796,13 @@ async function handleModelCommand(
     return;
   }
   const live = api.wildfireAgents.applyModelLive(key, selection);
-  await sendTip(
-    sender,
-    conv,
-    `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (推理等级=${selection.reasoningEffort})` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
-  );
+  if (!silent) {
+    await sendTip(
+      sender,
+      conv,
+      `模型已切换: ${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (推理等级=${selection.reasoningEffort})` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
+    );
+  }
 }
 
 /**
@@ -4852,7 +4874,8 @@ async function handleEffortCommand(
   key: string,
   arg: string,
   sender: string,
-  conv: { type: number; target: string; line: number }
+  conv: { type: number; target: string; line: number },
+  silent = false
 ): Promise<void> {
   const selector = api.models;
   if (!arg) {
@@ -4891,11 +4914,13 @@ async function handleEffortCommand(
   const selection = { ...current, reasoningEffort: arg };
   selector.setOverride(key, selection);
   const live = api.wildfireAgents.applyModelLive(key, selection);
-  await sendTip(
-    sender,
-    conv,
-    `推理等级已设为 ${arg}${hit ? `（${hit.name}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
-  );
+  if (!silent) {
+    await sendTip(
+      sender,
+      conv,
+      `推理等级已设为 ${arg}${hit ? `（${hit.name}）` : ""}${live ? "，下一条消息生效" : "，下次会话生效"}`, api
+    );
+  }
 }
 
 /** Send a streaming message to Wildfire.
@@ -5013,28 +5038,7 @@ async function sendTip(
   api?: any,
   targetLine?: number
 ): Promise<void> {
-  // 本地客户端的静默面板指令（207 silent=true）执行期间，不向单聊/群聊发 tip。
-  if (suppressTipsFor(String(sender), conv)) {
-    api?.logger?.info?.(`[wildfire] tip suppressed (silent command): ${safePreview(text, 120)}`);
-    return;
-  }
   await sendDirectReply(sender, conv, text, api, targetLine, true);
-}
-
-/** 静默面板指令的 key → 截止时间。命令按会话串行执行，窗口内只影响该会话。 */
-const silentTipKeys = new Map<string, number>();
-
-function suppressTipsFor(sender: string, conv: { type: number; target: string; line: number }): boolean {
-  const key = conv.type === CONV_TYPE_SINGLE
-    ? conversationKey(false, String(sender))
-    : conversationKey(true, String(conv.target));
-  const until = silentTipKeys.get(key);
-  if (!until) return false;
-  if (until < Date.now()) {
-    silentTipKeys.delete(key);
-    return false;
-  }
-  return true;
 }
 
 // ═══════════════════ 会话切换（207 op=sessions / op=switch） ═══════════════════
