@@ -78,8 +78,9 @@ public class ServiceImpl implements Service {
     @Override
     @Async("asyncExecutor")
     public void onReceiveMessage(OutputMessageData messageData) {
-        LOG.info("Received message {} for conversation: {}",
+        LOG.info("Received message {} from {} for conversation: {}",
                 messageData.getMessageId(),
+                messageData.getSender(),
                 messageData.getConv() != null ? messageData.getConv().getTarget() : "unknown");
 
         // 获取目标机器人ID
@@ -104,7 +105,11 @@ public class ServiceImpl implements Service {
         LOG.info("Robot {} has {} active connection(s)", targetRobotId, connectionCount);
 
         if (connectionCount == 0) {
-            LOG.warn("Robot {} not connected, message {} not delivered", targetRobotId, messageData.getMessageId());
+            // 把当前真正连着的机器人一并打出来：消息目标与在线机器人不是同一个
+            // robotId 时（客户端换了机器人账号、用户还在旧会话里发消息），
+            // 只看 "has 0 active connection(s)" 无法定位。
+            LOG.warn("Robot {} not connected, message {} not delivered; online robots: {}",
+                    targetRobotId, messageData.getMessageId(), sessionManager.describeOnlineRobots());
             return;
         }
 
@@ -133,7 +138,8 @@ public class ServiceImpl implements Service {
         LOG.info("Robot {} has {} active connection(s)", targetRobotId, connectionCount);
 
         if (connectionCount == 0) {
-            LOG.warn("Robot {} not connected, conference event {} not delivered", targetRobotId, event);
+            LOG.warn("Robot {} not connected, conference event {} not delivered; online robots: {}",
+                    targetRobotId, event, sessionManager.describeOnlineRobots());
             return;
         }
 

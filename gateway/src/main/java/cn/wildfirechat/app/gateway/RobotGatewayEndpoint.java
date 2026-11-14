@@ -207,10 +207,10 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
         AuthHandler.AuthResult result = authHandler.authenticateWithResult(robotId, secret);
 
         if (result.isSuccess()) {
-            // 鉴权成功
+            // 鉴权成功。authenticateSession 内部已经异步调用 setOnline(true)，
+            // 这里不要再调 updateRobotOnlineStatus，否则每次鉴权都会重复发一次
+            // /robot/set_online（日志里会看到两条一样的 set_online 请求）。
             sessionManager.authenticateSession(sessionId, robotId, result.getRobotService(), platform);
-            // 通知 IMSDK 设置机器人在线
-            sessionManager.updateRobotOnlineStatus(sessionId, true);
             ConnectMessage success = ConnectMessage.success();
             sessionManager.sendMessage(session, success);
             LOG.info("Session {} authenticated as robot {}", sessionId, robotId);

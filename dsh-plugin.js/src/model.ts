@@ -64,40 +64,124 @@ export class ModelSelector {
    * `model.map[key]` > `model.default` > dsh `agentDefaultModel`.
    */
   async resolve(key: string, session?: any): Promise<ModelSelection> {
+    const candidates: Array<{ selection: ModelSelection; source: string }> = [];
     const override = this.overrides.get(key);
-    if (override) return { ...override };
+    if (override) candidates.push({ selection: override, source: "runtime override" });
 
     const durable = readDurableSelection(session);
-    if (durable) return durable;
+    if (durable) candidates.push({ selection: durable, source: "session record" });
 
     const mappedId = this.mapLookup(key);
     if (mappedId) {
       const preset = this.config.allowed[mappedId];
-      if (preset) return { ...preset };
-      this.logger?.warn?.(
-        `[wildfire-model] map of ${key} points to unknown preset "${mappedId}", falling back`
-      );
+      if (preset) candidates.push({ selection: preset, source: "model.map" });
+      else {
+        this.logger?.warn?.(
+          `[wildfire-model] map of ${key} points to unknown preset "${mappedId}", falling back`
+        );
+      }
     }
 
     if (this.config.default) {
       const preset = this.config.allowed[this.config.default];
-      if (preset) return { ...preset };
-      this.logger?.warn?.(
-        `[wildfire-model] default preset "${this.config.default}" not found in allowed`
-      );
+      if (preset) candidates.push({ selection: preset, source: "model.default" });
+      else {
+        this.logger?.warn?.(
+          `[wildfire-model] default preset "${this.config.default}" not found in allowed`
+        );
+      }
     }
 
     const current = this.ctx?.get?.("agentDefaultModel")?.currentSelection?.();
     if (current?.provider && current?.model) {
-      return {
-        provider: current.provider,
-        model: current.model,
-        reasoningEffort: current.reasoningEffort,
-      };
+      candidates.push({
+        selection: {
+          provider: current.provider,
+          model: current.model,
+          reasoningEffort: current.reasoningEffort,
+        },
+        source: "agentDefaultModel",
+      });
+    }
+
+    for (const { selection, source } of candidates) {
+      // 客户端或旧配置可能指向已不存在/未注册 adapter 的 provider（例如
+      // deepseek-official 在禁用内置 DeepSeek 路由后）。选到这种 provider
+      // 会让整轮直接 NO_ADAPTER，因此跳过并继续找下一个可用来源。
+      if (this.isAvailable(selection) === false) {
+        this.logger?.warn?.(
+          `[wildfire-model] skip ${source} selection ${selection.provider}/${selection.model}: provider has no registered adapter`
+        );
+        continue;
+      }
+      return { ...selection };
+    }
+
+    const fallback = await this.firstAvailableSelection();
+    if (fallback) {
+      this.logger?.warn?.(
+        `[wildfire-model] no valid configured selection; falling back to ${fallback.provider}/${fallback.model}`
+      );
+      return fallback;
     }
     throw new Error(
       "no model selection available: configure model.allowed / model.default or check the dsh agentDefaultModel"
     );
+  }
+
+  /**
+   * Whether the provider currently has a registered llm adapter.
+   * Returns undefined when the llm service cannot be inspected (allow).
+   */
+  isAvailable(selection: { provider?: string } | undefined): boolean | undefined {
+    if (!selection || !selection.provider) return false;
+    let llm: any;
+    try {
+      llm = this.ctx?.get?.("llm");
+    } catch {
+      llm = undefined;
+    }
+    if (!llm?.listProviders) return undefined;
+    try {
+      const providers = llm.listProviders() ?? [];
+      // 启动阶段 adapter 尚未注册时不要误判：留空视为“无法检查”。
+      if (providers.length === 0) return undefined;
+      return providers.some((p: any) => String(p?.id) === String(selection.provider));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** First model of the first registered provider (prefers the "default" relay). */
+  private async firstAvailableSelection(): Promise<ModelSelection | undefined> {
+    let llm: any;
+    try {
+      llm = this.ctx?.get?.("llm");
+    } catch {
+      llm = undefined;
+    }
+    if (!llm?.listProviders) return undefined;
+    let providers: any[] = [];
+    try {
+      providers = llm.listProviders() ?? [];
+    } catch {
+      return undefined;
+    }
+    const ordered = [...providers].sort((a: any, b: any) =>
+      (a?.id === "default" ? -1 : 0) - (b?.id === "default" ? -1 : 0)
+    );
+    for (const provider of ordered) {
+      try {
+        const models = (await llm.listModels?.(provider.id)) ?? [];
+        if (models.length > 0) {
+          const model = models[0];
+          return { provider: String(provider.id), model: String(model.id ?? model.model) };
+        }
+      } catch {
+        // try next provider
+      }
+    }
+    return undefined;
   }
 
   /** Alias for resolve(); used by `/model` queries. */
@@ -115,6 +199,12 @@ export class ModelSelector {
   applyPreset(key: string, presetId: string): ModelSelection | null {
     const preset = this.config.allowed[presetId];
     if (!preset) return null;
+    if (this.isAvailable(preset) === false) {
+      this.logger?.warn?.(
+        `[wildfire-model] preset "${presetId}" points to provider "${preset.provider}" without a registered adapter; ignoring`
+      );
+      return null;
+    }
     const selection: ModelSelection = { ...preset };
     this.overrides.set(key, selection);
     this.logger?.info?.(
@@ -131,6 +221,12 @@ export class ModelSelector {
   async applyModel(key: string, provider: string, modelId: string): Promise<ModelSelection> {
     const current = await this.resolve(key);
     const selection: ModelSelection = { ...current, provider, model: modelId };
+    if (this.isAvailable(selection) === false) {
+      this.logger?.warn?.(
+        `[wildfire-model] model ${provider}/${modelId} ignored: provider has no registered adapter`
+      );
+      return current;
+    }
     this.setOverride(key, selection);
     return selection;
   }
@@ -165,6 +261,12 @@ export class ModelSelector {
 
   /** Apply a selection directly (used by `/effort` to keep the current model). */
   setOverride(key: string, selection: ModelSelection): void {
+    if (this.isAvailable(selection) === false) {
+      this.logger?.warn?.(
+        `[wildfire-model] override ignored for ${key}: provider "${selection.provider}" has no registered adapter`
+      );
+      return;
+    }
     this.overrides.set(key, { ...selection });
     this.logger?.info?.(
       `[wildfire-model] override: ${key} -> ${selection.provider}/${selection.model}${selection.reasoningEffort ? ` (effort=${selection.reasoningEffort})` : ""}`

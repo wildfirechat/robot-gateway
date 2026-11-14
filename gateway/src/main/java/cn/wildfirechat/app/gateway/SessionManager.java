@@ -117,6 +117,12 @@ public class SessionManager {
         SessionInfo info = sessionInfos.remove(sessionId);
         WebSocketSession session = sessions.remove(sessionId);
 
+        // handleTransportError 和 afterConnectionClosed 都会走到这里：
+        // 第二次进来时会话已经被清理，直接返回，避免重复打印 "Session removed"。
+        if (info == null && session == null) {
+            return;
+        }
+
         if (info != null && info.getRobotId() != null) {
             Set<String> robotSessions = robotSessionMap.get(info.getRobotId());
             boolean isLastSession = false;
@@ -524,6 +530,30 @@ public class SessionManager {
             LOG.info("Cleaned up {} expired (heartbeat) and {} unauthenticated sessions, remaining: {}", 
                     expiredCount, unauthCount, sessions.size());
         }
+    }
+
+    /**
+     * 当前在线机器人的可读快照，例如
+     * {@code [robot_xxx_db059a(1)]}，仅用于排障日志。
+     *
+     * <p>典型场景：IM 回调里的 toRobotId 与真正连上来的 robotId 不是同一个机器人账号
+     * （例如客户端换新机器人后，用户还在旧机器人的会话/群里发消息）。只打印
+     * "has 0 active connection(s)" 看不出这一点，把当前连着的机器人一起打出来，
+     * 一眼就能发现两者 ID 不同。
+     */
+    public String describeOnlineRobots() {
+        StringBuilder sb = new StringBuilder("[");
+        for (String robotId : new ArrayList<>(robotSessionMap.keySet())) {
+            int count = getConnectionCount(robotId);
+            if (count == 0) {
+                continue;
+            }
+            if (sb.length() > 1) {
+                sb.append(", ");
+            }
+            sb.append(robotId).append('(').append(count).append(')');
+        }
+        return sb.append(']').toString();
     }
 
     /**

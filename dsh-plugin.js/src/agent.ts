@@ -292,6 +292,20 @@ export class AgentSessionManager {
     );
   }
 
+  /** Whether the selection's provider currently has a registered llm adapter. */
+  private selectionAvailable(selection?: ModelSelection): boolean {
+    if (!selection?.provider) return false;
+    try {
+      const llm = this.ctx?.get?.("llm");
+      if (!llm?.listProviders) return true;
+      const providers = llm.listProviders() ?? [];
+      if (providers.length === 0) return true;
+      return providers.some((p: any) => String(p?.id) === String(selection.provider));
+    } catch {
+      return true;
+    }
+  }
+
   /** 该会话生效的 agent preset id（会话级覆盖 > 配置默认）。 */
   getPreset(key: string): string {
     return this.presetByKey.get(key) ?? this.config.preset;
@@ -580,19 +594,39 @@ export class AgentSessionManager {
     try {
       const override = this.modelOverrideProvider?.(key);
       const durable = readDurableSelection(handle.agent.session);
-      if (override) {
+      // 旧会话/客户端可能记录过已不存在的 provider（例如禁用内置
+      // deepseek-official 后）。这种选择会让整轮 NO_ADAPTER，恢复时必须跳过。
+      const validOverride = override && this.selectionAvailable(override) ? override : undefined;
+      const validDurable = durable && this.selectionAvailable(durable) ? durable : undefined;
+      if (override && !validOverride) {
+        this.logger?.warn?.(
+          `[wildfire-agent] skip override model ${override.provider}/${override.model}: provider has no registered adapter`
+        );
+      }
+      if (durable && !validDurable) {
+        this.logger?.warn?.(
+          `[wildfire-agent] skip recorded model ${durable.provider}/${durable.model}: provider has no registered adapter`
+        );
+        // 自愈：把解析后的可用默认写回会话记录，之后不再反复告警/回退。
+        try {
+          persistSelection(handle.agent.session, selection, this.logger);
+        } catch {
+          // ignore
+        }
+      }
+      if (validOverride) {
         // 显式选择：立即生效 + 落盘（不依赖 modelProvider 是否已把它解析出来）
-        if (!sameSelection(selectionRef.current, override)) selectionRef.current = { ...override };
-        if (!sameSelection(durable, override)) {
-          persistSelection(handle.agent.session, override, this.logger);
+        if (!sameSelection(selectionRef.current, validOverride)) selectionRef.current = { ...validOverride };
+        if (!sameSelection(validDurable, validOverride)) {
+          persistSelection(handle.agent.session, validOverride, this.logger);
           this.logger?.info?.(
-            `[wildfire-agent] persisted model selection: key=${key}, ${override.provider}/${override.model}${override.reasoningEffort ? ` (effort=${override.reasoningEffort})` : ""}`
+            `[wildfire-agent] persisted model selection: key=${key}, ${validOverride.provider}/${validOverride.model}${validOverride.reasoningEffort ? ` (effort=${validOverride.reasoningEffort})` : ""}`
           );
         }
-      } else if (durable && !sameSelection(durable, selection)) {
-        selectionRef.current = { ...durable };
+      } else if (validDurable && !sameSelection(validDurable, selection)) {
+        selectionRef.current = { ...validDurable };
         this.logger?.info?.(
-          `[wildfire-agent] restored model selection from session: key=${key}, ${durable.provider}/${durable.model}${durable.reasoningEffort ? ` (effort=${durable.reasoningEffort})` : ""}`
+          `[wildfire-agent] restored model selection from session: key=${key}, ${validDurable.provider}/${validDurable.model}${validDurable.reasoningEffort ? ` (effort=${validDurable.reasoningEffort})` : ""}`
         );
       }
     } catch (err: unknown) {
