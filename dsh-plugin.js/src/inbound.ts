@@ -1267,6 +1267,22 @@ export async function handleIncomingMessage(
   sessionQueues.set(key, slot);
   await prev.catch(() => {});
 
+  // 桥接会话（官方 Web UI 创建、映射到 IM 群）：消息交给 sessionController，
+  // 不走本插件的 AgentSessionManager（避免两个 agent 抢同一个 session）。
+  if (isGroup && api.bridge?.isBridged?.(key)) {
+    try {
+      await api.bridge.handleImMessage(key, String(sender), text);
+    } catch (e: any) {
+      api.logger?.warn?.(`[wildfire] bridge message failed: ${String(e?.message ?? e)}`);
+    } finally {
+      release();
+      if (sessionQueues.get(key) === slot) {
+        sessionQueues.delete(key);
+      }
+    }
+    return;
+  }
+
   // Group trigger policy (normal chat only; interaction replies already
   // consumed, slash commands always pass).
   if (isGroup && !isSlashCommand && !forceProcess && !shouldRespondToGroupMessage(text, data, config)) {

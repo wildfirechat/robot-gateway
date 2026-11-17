@@ -19,6 +19,7 @@ import { buildPayload } from "./protocol.js";
 import { WhitelistFilter } from "./whitelist.js";
 import { AuditLog } from "./audit.js";
 import { TextMessageContent } from "@wildfirechat/server-sdk";
+import { registerSessionBridge } from "./bridge.js";
 import { panelDebug } from "./panelDebug.js";
 
 export const name = "wildfire";
@@ -327,6 +328,16 @@ export function apply(ctx: any, config: any): void {
       }
     ),
   };
+
+  // Phase 0 spike：DSH Web UI ↔ IM 会话桥接（默认关闭，WF_BRIDGE_SPIKE=1 才启用）。
+  if (process.env.WF_BRIDGE_SPIKE === "1") {
+    try {
+      (api as any).bridge = registerSessionBridge(api, ctx, logger);
+      logger.info?.("[wildfire] bridge spike enabled (WF_BRIDGE_SPIKE=1)");
+    } catch (err: any) {
+      logger.error?.(`[wildfire] bridge spike registration failed: ${String(err?.message ?? err)}`);
+    }
+  }
 
   // cordis 4 has no `ready` event — initialize after the loader tree settles,
   // exactly like the web-runtime and headless runner (fire-and-forget so the

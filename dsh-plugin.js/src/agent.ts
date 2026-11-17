@@ -716,6 +716,21 @@ export class AgentSessionManager {
   }
 
   /**
+   * 桥接模式：把一个由 DSH Web UI 创建的 session 映射到 IM 会话 key。
+   * 只登记映射关系（用于审批/提问卡片路由），不创建/接管 agent —— 桥接会话
+   * 由 sessionController 统一持有，避免两个 agent 抢同一个 session。
+   */
+  bindExternalSession(key: string, sessionId: string): void {
+    if (!key || !sessionId) return;
+    this.sessionIdToKey.set(sessionId, key);
+    this.logger?.info?.(`[wildfire-agent] external session bound: key=${key}, session=${sessionId}`);
+  }
+
+  unbindExternalSession(sessionId: string): void {
+    this.sessionIdToKey.delete(sessionId);
+  }
+
+  /**
    * All live sessions as `[{key, agent}]` — for cross-workspace queries like
    * `/jobs` that must see jobs owned by every conversation's agent, not just
    * the control panel session's.
