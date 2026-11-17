@@ -15,7 +15,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { TextMessageContent } from "@wildfirechat/server-sdk";
+import {
+    StreamingTextGeneratedMessageContent,
+    StreamingTextGeneratingMessageContent,
+    TextMessageContent,
+} from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
 import type { WildfireConfig } from "./config.js";
@@ -81,6 +85,43 @@ async function sendGroupText(groupId: string, line: number, text: string): Promi
     content.content = text;
     try {
         await client.sendMessage({ type: GROUP_TYPE, target: groupId, line }, content.encode());
+    } catch {
+        // best effort
+    }
+}
+
+/**
+ * 流式回复（野火 14/15/20 协议，按 streamId 全量替换）：
+ * - generating(14)：生成中，客户端按 streamId 替换气泡内容（全量文本）；
+ * - completed(15)：最终文本；
+ * - cancelled(20)：取消生成（客户端按 streamId 删除生成中/已生成气泡）。
+ */
+async function sendGroupStream(
+    groupId: string,
+    line: number,
+    text: string,
+    streamId: string,
+    state: "generating" | "completed" | "cancelled"
+): Promise<void> {
+    const client = getConnectedClient();
+    if (!client) return;
+    const conversation = { type: GROUP_TYPE, target: groupId, line };
+    let payload: any;
+    try {
+        if (state === "generating") {
+            const generating = new StreamingTextGeneratingMessageContent();
+            generating.text = text;
+            generating.streamId = streamId;
+            payload = generating.encode();
+        } else if (state === "cancelled") {
+            payload = { type: 20, searchableContent: text || "生成已取消", content: streamId };
+        } else {
+            const generated = new StreamingTextGeneratedMessageContent();
+            generated.text = text;
+            generated.streamId = streamId;
+            payload = generated.encode();
+        }
+        await client.sendMessage(conversation, payload);
     } catch {
         // best effort
     }
@@ -181,6 +222,72 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
             // 模型信息拿不到不影响状态推送
         }
         pushStatus(rec, patch);
+    };
+
+    // ── 流式回复镜像（14/15/20，按 streamId 全量替换）────────────────────
+    // 官方 UI 的助手增量在 session/event 的 assistant/chunk 里；按会话节流成
+    // generating 消息，回合结束用最终文本补一条 completed。NO_REPLY（模型决定
+    // 不回复）或取消则发 cancelled(20) 让客户端删掉气泡。
+    const STREAM_THROTTLE_MS = 300;
+    interface BridgeStream {
+        streamId: string;
+        text: string;
+        timer?: NodeJS.Timeout;
+        lastFlush: number;
+    }
+    const streams = new Map<string, BridgeStream>();
+    /** 实时增量帧去重（dsh 可能按 revision 重放同一帧）：`attemptId:index`。 */
+    const streamFrames = new Map<string, Set<string>>();
+    const newStreamId = () =>
+        `wildfire-bridge-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    const flushStream = (rec: BridgeRecord, st: BridgeStream): void => {
+        const text = st.text.trim();
+        if (!text) return;
+        // 与 IM 会话路径一致：整段文本精确等于 NO_REPLY 时不显示、最后取消。
+        if (text.toUpperCase() === "NO_REPLY") return;
+        st.lastFlush = Date.now();
+        logger?.info?.(`[wildfire-bridge] stream flush: len=${text.length}`);
+        void sendGroupStream(rec.groupId, rec.line, text, st.streamId, "generating");
+    };
+
+    const pushStreamChunk = (rec: BridgeRecord, delta: string): void => {
+        let st = streams.get(rec.sessionId);
+        if (!st) {
+            st = { streamId: newStreamId(), text: "", lastFlush: 0 };
+            streams.set(rec.sessionId, st);
+            logger?.info?.(`[wildfire-bridge] stream start: session=${rec.sessionId}`);
+            void sendGroupStream(rec.groupId, rec.line, "…", st.streamId, "generating");
+        }
+        st.text += delta;
+        if (st.timer) return;
+        const wait = Math.max(0, STREAM_THROTTLE_MS - (Date.now() - st.lastFlush));
+        const cur = st;
+        cur.timer = setTimeout(() => {
+            cur.timer = undefined;
+            flushStream(rec, cur);
+        }, wait);
+        cur.timer.unref?.();
+    };
+
+    const finishStream = (rec: BridgeRecord, kind: string, failureText?: string): void => {
+        const st = streams.get(rec.sessionId);
+        streams.delete(rec.sessionId);
+        if (st?.timer) clearTimeout(st.timer);
+        const streamId = st?.streamId ?? newStreamId();
+        const text = (st?.text ?? "").trim();
+        const cancelled = ["aborted", "interrupted", "cancelled"].includes(kind);
+        const noReply = text.toUpperCase() === "NO_REPLY";
+        const action: "generating" | "completed" | "cancelled" =
+            kind === "error" ? "completed" : cancelled || noReply || !text ? "cancelled" : "completed";
+        logger?.info?.(
+            `[wildfire-bridge] stream finish: action=${action}, kind=${kind}, len=${text.length}, text=${JSON.stringify(text.slice(0, 60))}`
+        );
+        if (action === "completed") {
+            void sendGroupStream(rec.groupId, rec.line, text || failureText || "⚠️ 本轮失败", streamId, "completed");
+        } else {
+            void sendGroupStream(rec.groupId, rec.line, "生成已取消", streamId, "cancelled");
+        }
     };
 
     // 建群是异步的：会话刚创建时第一回合的 turn/start 可能早于 BridgeRecord。
@@ -320,14 +427,28 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
                     return;
                 }
                 case "assistant/message": {
+                    // 该 step 的完整助手消息：作为流式气泡的权威全文（后续 steps 覆盖）。
                     const text = contentText(event?.data?.message?.content).trim();
-                    if (text) void sendGroupText(rec.groupId, rec.line, text);
+                    const st = streams.get(sessionId);
+                    if (text && st) st.text = text;
                     return;
                 }
-                // ── scope=31 type=1 运行状态 ──
-                case "turn/start":
+                // ── 流式回复：turn 开始的占位气泡 ──
+                case "turn/start": {
+                    const stream = { streamId: newStreamId(), text: "", lastFlush: 0 } as BridgeStream;
+                    streams.set(sessionId, stream);
+                    streamFrames.delete(sessionId);
+                    void sendGroupStream(rec.groupId, rec.line, "…", stream.streamId, "generating");
                     void pushTurnStart(session, rec);
                     return;
+                }
+                case "assistant/chunk": {
+                    const chunk = event.data?.chunk;
+                    if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text) {
+                        pushStreamChunk(rec, chunk.text);
+                    }
+                    return;
+                }
                 case "step/start":
                     pushStatus(rec, { state: "running", phase: "thinking" });
                     return;
@@ -344,15 +465,19 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
                     const kind = turnReasonKind(reason);
                     if (kind === "error") {
                         const failure = extractTurnFailure(reason);
+                        const notice = failure ? describeTurnFailure(failure) : "回合失败";
+                        finishStream(rec, kind, notice);
                         pushStatus(rec, {
                             state: "done",
                             phase: "done",
                             reason: "error",
-                            error: failure ? describeTurnFailure(failure) : "回合失败",
+                            error: notice,
                         });
                     } else if (["aborted", "interrupted", "cancelled"].includes(kind)) {
+                        finishStream(rec, kind);
                         pushStatus(rec, { state: "done", phase: "done", reason: "cancelled" });
                     } else {
+                        finishStream(rec, kind);
                         pushStatus(rec, { state: "done", phase: "done", reason: "completed" });
                     }
                     return;
@@ -365,6 +490,34 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
         }
     };
     ctx.on?.("session/event", onEvent, { global: true });
+
+    // dsh >= 0.1.3 的实时模型增量走 process-local 的 `agent/assistant-stream`
+    // （会话事件里的 assistant/chunk 已移除）。这里按 payload.agent.session.id
+    // 路由到桥接会话，合成流式增量；frame 带 (attemptId, index) 时去重。
+    ctx.on?.("agent/assistant-stream", (payload: any) => {
+        try {
+            const frame = payload?.frame;
+            if (frame?.type !== "chunk") return;
+            const chunk = frame.chunk;
+            if (chunk?.type !== "text-delta" || typeof chunk.text !== "string" || !chunk.text) return;
+            const sessionId = String(payload?.agent?.session?.id ?? "");
+            const rec = bySession.get(sessionId);
+            if (!rec) return;
+            if (frame.attemptId !== undefined && frame.index !== undefined) {
+                const frameKey = `${String(frame.attemptId)}:${String(frame.index)}`;
+                let seen = streamFrames.get(sessionId);
+                if (!seen) {
+                    seen = new Set();
+                    streamFrames.set(sessionId, seen);
+                }
+                if (seen.has(frameKey)) return;
+                seen.add(frameKey);
+            }
+            pushStreamChunk(rec, chunk.text);
+        } catch (err: any) {
+            logger?.warn?.(`[wildfire-bridge] assistant-stream handling failed: ${String(err?.message ?? err)}`);
+        }
+    });
 
     // 等待审批/提问时同步 waiting_user（手机端显示"等待审批/等待确认"）。
     // 只旁观，不注册 answerer：回答仍由官方 Web UI 处理，这里只把 next() 透传。

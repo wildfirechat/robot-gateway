@@ -245,6 +245,8 @@ export class InteractionManager {
   private pendingQuestions = new Map<string, PendingQuestion>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private registered = false;
+  /** 会话是否由官方 Web UI 桥接（bridged 会话要同时在手机与桌面出交互）。 */
+  private isBridged: (key: string) => boolean = () => false;
   // Conversation state accumulator (scope=31 user setting), coalesced 300ms.
   // 按会话 key 分槽：多个会话并发推送时互不覆盖（旧实现单槽 + key 覆盖，
   // 300ms 窗口内第二个会话会把第一个会话的状态更新吞掉）。
@@ -301,9 +303,10 @@ export class InteractionManager {
    * Register the userQuestions provider and the approval answerer.
    * Safe to call once; swallows DUPLICATE_PROVIDER from the web profile.
    */
-  register(ctx: any): void {
+  register(ctx: any, isBridged?: (key: string) => boolean): void {
     if (this.registered) return;
     this.registered = true;
+    this.isBridged = isBridged ?? (() => false);
 
     if (this.config.askUserEnabled) {
       // Shared answerer: map the asking agent back to its IM conversation.
@@ -335,6 +338,11 @@ export class InteractionManager {
               ? this.resolveKeyForSession(String(request.agent.session?.id))
               : undefined;
             if (!key) return next();
+            // 桥接会话（官方 Web UI 创建的会话）：手机和桌面同时出题，谁先答算谁。
+            // 注册为 prepend，保证在 api-remotes 把问题转发给浏览器之前先发 IM 卡片。
+            if (this.isBridged(key) && typeof next === "function") {
+              return this.raceWithGui(key, answer(request), next);
+            }
             try {
               return await answer(request);
             } catch (err: any) {
@@ -343,7 +351,7 @@ export class InteractionManager {
               );
               return next();
             }
-          });
+          }, { prepend: true });
           this.logger?.info?.(
             "[wildfire] userQuestions answerer registered (waterfall user-questions/request; ask_user via IM)"
           );
@@ -363,14 +371,60 @@ export class InteractionManager {
       ctx.on("approval/request", async (req: any, next: () => Promise<string>) => {
         const key = req?.agent ? this.resolveKeyForSession(String(req.agent.session?.id)) : undefined;
         if (!key) return next();
+        if (this.isBridged(key) && typeof next === "function") {
+          // 桥接会话：手机审批卡片与桌面审批同时存在，先答先算。
+          return this.raceWithGui(key, this.requestApproval(key, req).catch((err: any) => {
+            this.logger?.warn?.(`[wildfire] approval answerer failed: ${String(err)}`);
+            return "unavailable" as string;
+          }), next);
+        }
         try {
           return await this.requestApproval(key, req);
         } catch (err: any) {
           this.logger?.warn?.(`[wildfire] approval answerer failed: ${String(err)}`);
           return "unavailable";
         }
-      });
+      }, { prepend: true });
       this.logger?.info?.("[wildfire] approval answerer registered (approvals via IM)");
+    }
+  }
+
+  /**
+   * 桥接会话的交互“双端竞速”：IM 卡片（im）与桌面 GUI（next()）同时等待，
+   * 谁先给出结果用谁；另一边未完成的交互在结束后过期，避免留下僵尸卡片。
+   */
+  private async raceWithGui<T>(
+    key: string,
+    im: Promise<T>,
+    next: () => Promise<T>
+  ): Promise<T> {
+    im.catch(() => {});
+    let gui: Promise<T>;
+    try {
+      gui = Promise.resolve(next());
+    } catch (err) {
+      gui = Promise.reject(err);
+    }
+    gui.catch(() => {});
+    // 谁先【成功】给出答案用谁；一边失败（如桌面端没有连接的 Web 客户端）
+    // 不影响另一边继续等待。两边都失败才把最后一个错误抛给调用方。
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        let pending = 2;
+        let lastError: unknown;
+        const settle = (p: Promise<T>) => {
+          p.then(resolve, (err) => {
+            lastError = err;
+            pending -= 1;
+            if (pending === 0) reject(lastError);
+          });
+        };
+        settle(im);
+        settle(gui);
+      });
+    } finally {
+      // 桌面端先答：把手机端还挂着的卡片标记过期（IM 先答时这里通常已清空）。
+      try { this.expirePending(key); } catch { /* ignore */ }
     }
   }
 

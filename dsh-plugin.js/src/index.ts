@@ -329,13 +329,15 @@ export function apply(ctx: any, config: any): void {
     ),
   };
 
-  // Phase 0 spike：DSH Web UI ↔ IM 会话桥接（默认关闭，WF_BRIDGE_SPIKE=1 才启用）。
-  if (process.env.WF_BRIDGE_SPIKE === "1") {
+  // 官方 Web UI ↔ IM 会话桥接：官方 UI 新建的会话自动建 line2 群、双向镜像消息、
+  // 镜像回合状态（scope=31 type=1）。默认开启；Environment 变量 WF_BRIDGE_SPIKE
+  // 仅作为历史灰度开关保留兼容（=0 时关闭）。
+  if (process.env.WF_BRIDGE_SPIKE !== "0") {
     try {
       (api as any).bridge = registerSessionBridge(api, ctx, logger);
-      logger.info?.("[wildfire] bridge spike enabled (WF_BRIDGE_SPIKE=1)");
+      logger.info?.("[wildfire] session bridge registered");
     } catch (err: any) {
-      logger.error?.(`[wildfire] bridge spike registration failed: ${String(err?.message ?? err)}`);
+      logger.error?.(`[wildfire] bridge registration failed: ${String(err?.message ?? err)}`);
     }
   }
 
@@ -358,7 +360,7 @@ export function apply(ctx: any, config: any): void {
       // Register the interactive seams AFTER the loader tree settled: in the
       // web profile the Host apiproxy has already claimed the userQuestions
       // provider, and registering first would crash ITS activation instead.
-      api.interactions.register(ctx);
+      api.interactions.register(ctx, (key) => !!(api as any).bridge?.isBridged?.(key));
       // 任务进度卡片（208）：subagent 事件是 scoped 分发，需在每个 agent 的
       // setup(agentCtx) 里绑定（AgentSessionManager 的 agentScopeBinder）。
       api.interactions.registerTaskFeed(ctx);
