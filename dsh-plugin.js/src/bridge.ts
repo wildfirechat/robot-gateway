@@ -26,6 +26,7 @@ import type { WildfireConfig } from "./config.js";
 import { conversationKey, dshHomePath } from "./utils.js";
 import { turnOwners } from "./inbound.js";
 import { describeTurnFailure, extractTurnFailure, turnReasonKind } from "./failures.js";
+import { applyAsrHint } from "./asrPrompt.js";
 
 const GROUP_TYPE = 1;
 const SPIKE_PREFIX = "wildfire:";
@@ -40,10 +41,45 @@ interface BridgeRecord {
     createdAt: number;
 }
 
+/** 桥接群里手机端消息的附加信息（目前用于语音的 ASR 结果）。 */
+export interface BridgeInboundOptions {
+    /** ASR 转写结果（语音消息且 ASR 成功时）。 */
+    transcript?: string;
+    /** 是否对这条消息尝试过 ASR（配置了 asrServer 的语音消息）。 */
+    asrAttempted?: boolean;
+    /** 消息 payload type（2 = 语音）。 */
+    payloadType?: number;
+}
+
 export interface SessionBridge {
     isBridged(key: string): boolean;
-    handleImMessage(key: string, sender: string, text: string): Promise<void>;
+    handleImMessage(
+        key: string,
+        sender: string,
+        text: string,
+        options?: BridgeInboundOptions,
+    ): Promise<void>;
     dispose(): void;
+}
+
+/**
+ * 手机端消息 → 注入官方 UI 会话的正文。
+ * 语音消息的 ASR 结果会加上「这是识别文本，请结合上下文静默纠正」的提示；
+ * 未转写成功的语音则提示模型不要猜测。普通文本原样返回。
+ */
+export function buildBridgedPrompt(
+    bodyText: string,
+    options?: BridgeInboundOptions,
+): string {
+    const text = String(bodyText || "").trim();
+    if (!text) return "";
+    if (options?.transcript || options?.asrAttempted) {
+        return applyAsrHint(text, {
+            transcript: options.transcript,
+            attempted: !!options.asrAttempted,
+        });
+    }
+    return text;
 }
 
 interface BridgeState {
@@ -546,11 +582,21 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
         isBridged(key: string): boolean {
             return byKey.has(key);
         },
-        async handleImMessage(key: string, sender: string, text: string): Promise<void> {
+        async handleImMessage(
+            key: string,
+            sender: string,
+            text: string,
+            options?: BridgeInboundOptions,
+        ): Promise<void> {
             const rec = byKey.get(key);
             if (!rec) return;
-            const body = String(text || "").trim();
+            const body = buildBridgedPrompt(text, options);
             if (!body) return;
+            if (options?.asrAttempted) {
+                logger?.info?.(
+                    `[wildfire-bridge] inbound voice: group=${rec.groupId}, asr=${options.transcript ? "ok" : "failed"}, bodyLen=${body.length}`
+                );
+            }
             if (!sessionController?.prompt) {
                 logger?.warn?.("[wildfire-bridge] sessionController unavailable; cannot prompt");
                 await sendGroupText(rec.groupId, rec.line, "桥接会话暂不可用（sessionController 未就绪）");

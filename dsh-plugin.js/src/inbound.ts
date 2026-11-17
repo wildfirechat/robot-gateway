@@ -1271,8 +1271,30 @@ export async function handleIncomingMessage(
   // 桥接会话（官方 Web UI 创建、映射到 IM 群）：消息交给 sessionController，
   // 不走本插件的 AgentSessionManager（避免两个 agent 抢同一个 session）。
   if (isGroup && api.bridge?.isBridged?.(key)) {
+    // 语音消息：桥接会话不走本插件的 AgentSessionManager，但 ASR 仍要在
+    // 插件侧完成（会话在官方 UI 里，没有别的地方能做转写），再把「ASR 提示 +
+    // 转写文本」注入同一个 session。
+    let bridgedText = String(text ?? "");
+    let bridgeTranscript: string | undefined;
+    let bridgeAsrAttempted = false;
+    if (payloadType === MESSAGE_TYPE_VOICE && mediaUrl) {
+      if (config.asrServer) {
+        bridgeAsrAttempted = true;
+        bridgeTranscript = await transcribeWithAsrServer(config.asrServer, mediaUrl, api.logger);
+        api.logger?.info?.(
+          `[wildfire] bridge ASR transcript: len=${bridgeTranscript?.length ?? 0}, preview=${safePreview(bridgeTranscript ?? "")}`
+        );
+        if (bridgeTranscript) bridgedText = bridgeTranscript;
+      } else {
+        api.logger?.info?.("[wildfire] bridged voice message without asrServer; forwarding placeholder");
+      }
+    }
     try {
-      await api.bridge.handleImMessage(key, String(sender), text);
+      await api.bridge.handleImMessage(key, String(sender), bridgedText, {
+        transcript: bridgeTranscript,
+        asrAttempted: bridgeAsrAttempted,
+        payloadType,
+      });
     } catch (e: any) {
       api.logger?.warn?.(`[wildfire] bridge message failed: ${String(e?.message ?? e)}`);
     } finally {
