@@ -315,7 +315,7 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `robotSecretEnv` | 否 | 从该环境变量读取 `robotSecret`（桌面端用 `WF_ROBOT_SECRET`），避免密钥落盘 |
 | `gatewayPlatform` | 否 | 机器人平台号（**可选覆盖**，一般不需要配置）：默认 SDK 按运行环境自动探测（Linux=`7` / macOS=`4` / Windows=`3`，见野火 Platform）。网关用该平台调用 im-server `/robot/set_online` 设置机器人在线；仅当需模拟其他平台（如 `5`=WEB）时配置 |
 | `aiLine` | 否 | AI 会话使用的线路（line），默认 `2`。设计：**单聊（与机器人私聊）= 全局控制面板**（管理命令，不进入 AI）；**AI 对话仅限群聊会话 line === aiLine**（默认 2）。群聊消息若线路不对（如 line 0 普通群）会回复提醒且不进入 AI；回复始终发到消息来源的会话线路 |
-| `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent；转写结果会带一段 ASR 提示（可能有识别错误，要求模型结合上下文静默纠正，危险操作不确定时先确认）。桥接会话（官方 Web UI 创建的会话）里的语音同样先转写再注入 session |
+| `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent；转写结果会带一段 ASR 提示（可能有识别错误，要求模型结合上下文静默纠正，危险操作不确定时先确认）。桥接会话（官方 Web UI 创建的会话）里的语音同样先转写再注入 session。**未配置或转写失败时不进模型**，直接回复用户「去设置里配置 ASR / 改发文字」，避免模型对着占位文本瞎猜 |
 | `mainSession.enabled` | 否 | 启用**主会话**：owner 私聊 + line0 普通群（非 DSH 群）共用同一个 dsh 会话。默认 `false`（桌面端注入 `true`） |
 | `mainSession.groups` | 否 | 允许旁观的群 ID 列表（支持 `*`）；为空 = 所有非 DSH 群 |
 | `mainSession.workspace` | 否 | 主会话工作目录，默认 `<dshHome>/main-workspace` |

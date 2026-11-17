@@ -1285,9 +1285,23 @@ export async function handleIncomingMessage(
           `[wildfire] bridge ASR transcript: len=${bridgeTranscript?.length ?? 0}, preview=${safePreview(bridgeTranscript ?? "")}`
         );
         if (bridgeTranscript) bridgedText = bridgeTranscript;
-      } else {
-        api.logger?.info?.("[wildfire] bridged voice message without asrServer; forwarding placeholder");
       }
+    }
+    if (shouldGuidanceReplyForVoice(payloadType, bridgeTranscript)) {
+      const notice = voiceUnavailableNotice(config.asrServer);
+      api.logger?.info?.(
+        `[wildfire] bridged voice without transcript; replied guidance (asrServer=${config.asrServer ? "set" : "unset"})`
+      );
+      try {
+        await sendDirectReply(sender, conv, notice, api);
+      } catch (e: any) {
+        api.logger?.warn?.(`[wildfire] voice guidance reply failed: ${String(e?.message ?? e)}`);
+      }
+      release();
+      if (sessionQueues.get(key) === slot) {
+        sessionQueues.delete(key);
+      }
+      return;
     }
     try {
       await api.bridge.handleImMessage(key, String(sender), bridgedText, {
@@ -1580,6 +1594,20 @@ export async function handleIncomingMessage(
       api.logger?.info?.(
         `[wildfire] ASR transcript: len=${transcript?.length ?? 0}, preview=${safePreview(transcript ?? "")}`
       );
+    }
+
+    // 语音无法转写：直接回复用户如何处理，不把占位文本/音频路径交给模型。
+    if (shouldGuidanceReplyForVoice(payloadType, transcript)) {
+      const notice = voiceUnavailableNotice(config.asrServer);
+      api.logger?.info?.(
+        `[wildfire] voice without transcript; replied guidance (asrServer=${config.asrServer ? "set" : "unset"})`
+      );
+      try {
+        await sendDirectReply(sender, conv, notice, api);
+      } catch (e: any) {
+        api.logger?.warn?.(`[wildfire] voice guidance reply failed: ${String(e?.message ?? e)}`);
+      }
+      return;
     }
 
     // Inbound media: images become content blocks (when the model supports
@@ -1993,6 +2021,22 @@ async function sendOutboundMedia(
     if (ok) sent++;
   }
   return sent;
+}
+
+/**
+ * 语音消息无法转写（未配置 ASR / ASR 服务失败）时给用户的提示。
+ * 这种情况不要把「[语音]」占位或音频附件路径交给模型——模型读不到音频，
+ * 只会凭空猜测；直接回复用户下一步怎么做更清楚。
+ */
+function voiceUnavailableNotice(asrServer?: string): string {
+  return asrServer
+    ? "⚠️ 语音转文字失败（ASR 服务不可用），请稍后重试，或直接发文字告诉我。"
+    : "🎤 语音消息需要先开启语音转文字：设置 → DSH 设置 → AI 服务 → 填写 ASR 服务地址；也可以直接发文字。";
+}
+
+/** 语音消息无法转写时是否要直接回复用户（而不是进入模型）。 */
+function shouldGuidanceReplyForVoice(payloadType: number, transcript?: string): boolean {
+  return payloadType === MESSAGE_TYPE_VOICE && !String(transcript ?? "").trim();
 }
 
 /**
