@@ -315,7 +315,7 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `robotSecretEnv` | 否 | 从该环境变量读取 `robotSecret`（桌面端用 `WF_ROBOT_SECRET`），避免密钥落盘 |
 | `gatewayPlatform` | 否 | 机器人平台号（**可选覆盖**，一般不需要配置）：默认 SDK 按运行环境自动探测（Linux=`7` / macOS=`4` / Windows=`3`，见野火 Platform）。网关用该平台调用 im-server `/robot/set_online` 设置机器人在线；仅当需模拟其他平台（如 `5`=WEB）时配置 |
 | `aiLine` | 否 | AI 会话使用的线路（line），默认 `2`。设计：**单聊（与机器人私聊）= 全局控制面板**（管理命令，不进入 AI）；**AI 对话仅限群聊会话 line === aiLine**（默认 2）。群聊消息若线路不对（如 line 0 普通群）会回复提醒且不进入 AI；回复始终发到消息来源的会话线路 |
-| `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent |
+| `asrServer` | 否 | 语音转文字服务地址，配置后语音消息先转文字再进入 Agent；转写结果会带一段 ASR 提示（可能有识别错误，要求模型结合上下文静默纠正，危险操作不确定时先确认） |
 | `mainSession.enabled` | 否 | 启用**主会话**：owner 私聊 + line0 普通群（非 DSH 群）共用同一个 dsh 会话。默认 `false`（桌面端注入 `true`） |
 | `mainSession.groups` | 否 | 允许旁观的群 ID 列表（支持 `*`）；为空 = 所有非 DSH 群 |
 | `mainSession.workspace` | 否 | 主会话工作目录，默认 `<dshHome>/main-workspace` |
@@ -555,7 +555,7 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 - **会话隔离**：私聊/群聊各自独立 DSH 会话
 - **群聊过滤**：@提及、问号、关键词触发
 - **白名单**：用户/群组两级控制
-- **媒体收发**：图片（模型可看图）、文件、语音（ASR 转文字）；Agent 产出文件经 `[image:path]` 标记回传
+- **媒体收发**：图片（模型可看图）、文件、语音（ASR 转文字 + 识别纠错提示）；Agent 产出文件经 `[image:path]` 标记回传
 - **ask_user 提问**：Agent 提问 → DSH_Question 卡片（选项按钮/自定义输入，支持 plan 审阅样式）→ 用户应答即答案
 - **工具审批**：Agent 工具请求 → DSH_Approval 卡片 → 用户同意/拒绝放行或拦截
 - **状态可见**：Agent 生命周期（运行中/思考/工具/等待输入/空闲）经 scope=31 会话级用户设置实时推送，客户端渲染状态徽标

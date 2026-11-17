@@ -42,6 +42,7 @@ import {
   shouldRespondToGroupMessage,
 } from "./utils.js";
 import { dshHome, dshHomePath } from "./utils.js";
+import { applyAsrHint } from "./asrPrompt.js";
 import {
   cleanupTemp,
   extractOutboundMedia,
@@ -1543,6 +1544,8 @@ export async function handleIncomingMessage(
   const logger = api.logger;
   let media: PreparedMedia | undefined;
   let transcript: string | undefined;
+  /** 本条是否尝试过 ASR（配置了 ASR 地址的语音消息）。 */
+  let asrAttempted = false;
 
   // This conversation's turn is owned by the sender until the turn completes.
   turnOwners.set(key, String(sender));
@@ -1550,6 +1553,7 @@ export async function handleIncomingMessage(
   try {
     // Voice + ASR: transcribe first so the agent gets the spoken text.
     if (payloadType === MESSAGE_TYPE_VOICE && mediaUrl && config.asrServer) {
+      asrAttempted = true;
       transcript = await transcribeWithAsrServer(config.asrServer, mediaUrl, logger);
       api.logger?.info?.(
         `[wildfire] ASR transcript: len=${transcript?.length ?? 0}, preview=${safePreview(transcript ?? "")}`
@@ -1696,6 +1700,13 @@ export async function handleIncomingMessage(
     }
     if (ctxPrefix) {
       bodyText = ctxPrefix + bodyText;
+    }
+    // 语音消息：显式告诉模型“这是 ASR 结果”，要求结合上下文静默纠正。
+    if (asrAttempted || transcript) {
+      bodyText = applyAsrHint(bodyText, { transcript, attempted: asrAttempted });
+      logger?.info?.(
+        `[wildfire] ASR prompt hint applied: transcript=${transcript ? "yes" : "no"}, len=${bodyText.length}`
+      );
     }
 
     // 回合开始：刷新会话信息（sessionId/cwd/model，best effort）。

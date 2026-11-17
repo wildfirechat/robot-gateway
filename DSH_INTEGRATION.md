@@ -652,7 +652,7 @@ dsh --profile headless "用户消息"        # 输出最后一条 assistant 文�
 | `/plan` 命令 | `ui-commands` | ✅ 已实现 | `/plan` 查询 / `/plan on\|off` 切换（`ctx.planMode.get/set`）；计划审阅经 userQuestions → DSH_Question 卡片 | P1 ✅ |
 | `/compact` | 命令面板 | ✅ 已实现 | `/compact` 手动压缩（`ctx.compaction.compactNow`），回复压缩规模；运行中提示 busy | P1 ✅ |
 | `/jobs` | `ui-jobs` | ✅ 已实现 | `/jobs` 汇总所有存活会话 agent 的 `ctx.jobs.list()`，标注所属群/私聊 | P1 ✅ |
-| 语音 ASR | — | ✅ 已实现（复用 openclaw 的 SSE 解析） | `asrServer` 配置后语音先转文字再进 Agent | P1 ✅ |
+| 语音 ASR | — | ✅ 已实现（复用 openclaw 的 SSE 解析） | `asrServer` 配置后语音先转文字再进 Agent；转写文本前加「ASR 识别」提示（要求结合上下文静默纠正、危险操作先确认），ASR 失败则提示模型不要猜测 | P1 ✅ |
 | `/stop` | — | ✅ 已实现 | `agent.cancel({kind:'user'})` 中断当前 turn，pending 卡片过期，状态回 idle；私聊+群聊可用 | P1 ✅ |
 | `/new` | — | ✅ 已实现 | `/new <groupId>` 重置指定群会话（epoch++ 重建，工作区保留） | P1 ✅ |
 | 消息反馈 | `ui-message-feedback` 👍/👎 | ❌ 无 | `/feedback <text>`（`recordFeedback(session, text)`）或 👍/👎 表情消息 | P2 |
