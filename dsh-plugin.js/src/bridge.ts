@@ -118,6 +118,27 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
         persist();
     };
 
+    // 把映射重新登记到插件运行时（IM 回复目标 / 工作区 / 外部会话路由）。
+    // 进程内新建的会话与重启后从文件加载的会话都必须登记：否则 pushStatus
+    // 找不到 ConversationTarget 会静默丢弃状态，IM 消息也找不到会话。
+    const ownerUserId = () => String(api.robotOwner || process.env.WF_OWNER_USER_ID || "");
+    const registerRecord = (rec: BridgeRecord) => {
+        const owner = ownerUserId();
+        try { api.registry?.register?.(rec.groupId, owner, rec.cwd); } catch { /* ignore */ }
+        try { api.workspace?.setOverride?.(rec.key, rec.cwd); } catch { /* ignore */ }
+        try {
+            api.interactions?.remember?.(rec.key, owner, {
+                type: GROUP_TYPE,
+                target: rec.groupId,
+                line: rec.line,
+            });
+        } catch { /* ignore */ }
+        try { api.wildfireAgents?.bindExternalSession?.(rec.key, rec.sessionId); } catch { /* ignore */ }
+    };
+    // 启动时把历史上已建群的会话重新登记（重启后状态/消息路由仍然有效）。
+    for (const rec of bySession.values()) registerRecord(rec);
+    if (bySession.size) logger?.info?.(`[wildfire-bridge] re-registered ${bySession.size} bridged session(s)`);
+
     // Session controller is provided by the Web composition; inject lazily so
     // a chat-only profile (without dsh-web-app) still loads the plugin.
     try {
@@ -238,14 +259,7 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
                 createdAt: Date.now(),
             };
             addRecord(record);
-            api.registry?.register?.(groupId, owner, cwd);
-            try {
-                api.workspace?.setOverride?.(key, cwd);
-            } catch {
-                // ignore
-            }
-            api.interactions?.remember?.(key, owner, { type: GROUP_TYPE, target: groupId, line });
-            api.wildfireAgents?.bindExternalSession?.(key, String(session.id));
+            registerRecord(record);
             const pending = pendingStatus.get(record.sessionId);
             if (pending) {
                 pendingStatus.delete(record.sessionId);
