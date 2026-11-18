@@ -379,6 +379,66 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
         }
     };
 
+    /** 读取 DSH 会话当前标题（session-title 服务；拿不到时返回空串）。 */
+    const sessionTitleOf = (session: any): string => {
+        try {
+            const service = ctx.get?.("sessionTitle");
+            const snapshot = service?.get?.(session);
+            const title = snapshot && typeof snapshot === "object" ? snapshot.title : snapshot;
+            return String(title || "").trim();
+        } catch (e) {
+            return "";
+        }
+    };
+
+    // ── 会话标题 → IM 群名 同步 ────────────────────────────────────────────
+    // 建群时群名用 cwd basename（此时标题通常还没有）；DSH 生成/用户修改标题后
+    // 会追加 `session/title` 事件，这里把群名改成标题，手机端看到的群名才和
+    // 官方 UI 里的会话名一致。机器人是群主，可以直接改群信息。
+    const pendingTitleRenames = new Map<string, NodeJS.Timeout>();
+    const renameGroupForTitle = async (rec: BridgeRecord, rawTitle: string, delayMs = 300): Promise<void> => {
+        const clean = String(rawTitle || "").trim();
+        if (!clean) return;
+        // IM 群名长度保守截断（DSH 标题上限 80 字节，这里再留余量）
+        const name = clean.length > 128 ? clean.slice(0, 128) : clean;
+        if (name === rec.title) return;
+        const existing = pendingTitleRenames.get(rec.groupId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => {
+            pendingTitleRenames.delete(rec.groupId);
+            void doRenameGroup(rec, name);
+        }, delayMs);
+        timer.unref?.();
+        pendingTitleRenames.set(rec.groupId, timer);
+    };
+
+    const doRenameGroup = async (rec: BridgeRecord, name: string): Promise<void> => {
+        const client = getConnectedClient();
+        if (!client) {
+            logger?.warn?.(`[wildfire-bridge] skip group rename (client not ready): group=${rec.groupId}`);
+            return;
+        }
+        try {
+            // type 0 = 群名；群通知发到 AI 线路
+            const result: any = await client.modifyGroupInfo(rec.groupId, 0, name, [rec.line]);
+            const ok = typeof result?.isSuccess === "function" ? result.isSuccess() : result?.code === 0;
+            if (!ok) {
+                logger?.warn?.(
+                    `[wildfire-bridge] group rename failed: group=${rec.groupId}, msg=${result?.msg ?? result?.code ?? "unknown"}`
+                );
+                return;
+            }
+            rec.title = name;
+            state.records[rec.groupId] = rec;
+            persist();
+            logger?.info?.(`[wildfire-bridge] group renamed to session title: group=${rec.groupId}, name=${JSON.stringify(name)}`);
+        } catch (err: any) {
+            logger?.warn?.(
+                `[wildfire-bridge] group rename error: group=${rec.groupId}, ${String(err?.message ?? err)}`
+            );
+        }
+    };
+
     const createGroupForSession = async (session: any): Promise<void> => {
         const client = getConnectedClient();
         const owner = String(api.robotOwner || process.env.WF_OWNER_USER_ID || "");
@@ -390,7 +450,8 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
             return;
         }
         const cwd = String(session?.header?.cwd || "");
-        const title = path.basename(cwd) || "DSH Web 会话";
+        const initialTitle = sessionTitleOf(session) || path.basename(cwd) || "DSH Web 会话";
+        const title = initialTitle;
         const line = getAiLine(api.config);
         try {
             const result = await client.createGroup(
@@ -495,8 +556,18 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
                     if (text && st) st.text = text;
                     return;
                 }
+                // 会话标题变化（自动生成 / 用户重命名）→ 同步 IM 群名
+                case "session/title": {
+                    const title = String(event.data?.title || "").trim();
+                    if (title) void renameGroupForTitle(rec, title);
+                    return;
+                }
                 // ── 流式回复：turn 开始的占位气泡 ──
                 case "turn/start": {
+                    // 会话打开/恢复后首次活动：用日志里的最新标题校正群名
+                    // （启动/恢复不会重放 session/title 事件）。
+                    const liveTitle = sessionTitleOf(session);
+                    if (liveTitle) void renameGroupForTitle(rec, liveTitle);
                     const stream = { streamId: newStreamId(), text: "", lastFlush: 0 } as BridgeStream;
                     streams.set(sessionId, stream);
                     streamFrames.delete(sessionId);
