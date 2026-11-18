@@ -163,6 +163,25 @@ async function sendGroupStream(
     }
 }
 
+/**
+ * 是否是「真人用户」发的 user/message。
+ *
+ * DSH 的 user-role 消息不只有人类输入：时间上下文（dsh-time-context）、
+ * 文件变更通知、goal 续轮、AGENTS.md 注入等都会以 user/message 形式写进会话
+ * 日志，source.kind 不是 "user"。这些是给模型看的合成上下文，不能镜像到 IM——
+ * 否则手机群里会出现 "[桌面] Time sampled while preparing turn..." 这类噪音。
+ */
+export function isHumanUserMessage(
+    message: any,
+    spikePrefix = SPIKE_PREFIX,
+): boolean {
+    const source = message?.source || {};
+    const kind = typeof source.kind === "string" ? source.kind : "user";
+    if (kind !== "user") return false;
+    const rpcId = String(source.rpcId || "");
+    return !rpcId.startsWith(spikePrefix);
+}
+
 export function registerSessionBridge(api: any, ctx: any, logger: any): SessionBridge {
     const state = loadState();
     const byKey = new Map<string, BridgeRecord>();
@@ -454,10 +473,17 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
             switch (event?.type) {
                 case "user/message": {
                     const message = event.data;
-                    const rpcId = String(message?.source?.rpcId || "");
-                    // IM-origin prompts are injected by this bridge; don't echo them
-                    // back into the same group.
-                    if (rpcId.startsWith(SPIKE_PREFIX)) return;
+                    // 只镜像真人用户输入：IM 注入的 prompt（rpcId 前缀）不回声；
+                    // 时间上下文等合成 user/message（source.kind != user）不镜像。
+                    if (!isHumanUserMessage(message)) {
+                        const kind = String(message?.source?.kind || "user");
+                        if (kind !== "user") {
+                            logger?.info?.(
+                                `[wildfire-bridge] skip synthetic user/message: kind=${kind}`
+                            );
+                        }
+                        return;
+                    }
                     const text = contentText(message?.content).trim();
                     if (text) void sendGroupText(rec.groupId, rec.line, `【桌面】${text}`);
                     return;
