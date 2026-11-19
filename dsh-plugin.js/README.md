@@ -436,6 +436,20 @@ agent 可用 `grep`/`glob`/`read` 检索更早的消息；`mainSession.history.r
           allowModelCommand: true
 ```
 
+### 桌面端：会话自动建群开关（环境变量）
+
+桌面端的 DSH Web UI 会话默认会桥接到一个 IM line2 群（`session/created` → 建群）。
+服务端可以按客户关闭这个能力（只有 PC、不需要手机端）：
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `WF_SESSION_GROUP_BRIDGE` | 开启 | `0`/`false`/`off` 关闭：新 session 不再自动建群、不写桥接映射；**已存在的桥接群保持可用**；官方 Web UI 正常使用。缺省或 `1` 保持现有行为。 |
+
+桌面客户端的 `hostManager` 根据 `/provision` 的 `features.sessionGroupBridge` 注入该变量，
+并在 Host 启动日志打印 `session group bridge: enabled|disabled by provision`；
+插件注册日志会显示 `session-group-bridge=enabled|disabled by provision`。
+
+
 ## 工作目录（Workspace）与多群
 
 Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），之后不可变。插件按以下优先级解析：

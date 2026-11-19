@@ -283,7 +283,17 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
     // 官方 UI 的助手增量在 session/event 的 assistant/chunk 里；按会话节流成
     // generating 消息，回合结束用最终文本补一条 completed。NO_REPLY（模型决定
     // 不回复）或取消则发 cancelled(20) 让客户端删掉气泡。
-    const STREAM_THROTTLE_MS = 300;
+    /**
+ * 服务端下发的「是否为新建 DSH session 自动创建 IM 群」开关。
+ * 由 PC 客户端通过环境变量传入：WF_SESSION_GROUP_BRIDGE=0 关闭；缺省/1 开启。
+ * 关闭后：新 session 不建群、不写桥接映射；已存在的桥接群仍保持可用。
+ */
+function sessionGroupBridgeEnabled(): boolean {
+    const raw = String(process.env.WF_SESSION_GROUP_BRIDGE ?? "").trim().toLowerCase();
+    return !["0", "false", "off", "no", "disabled"].includes(raw);
+}
+
+const STREAM_THROTTLE_MS = 300;
     interface BridgeStream {
         streamId: string;
         text: string;
@@ -506,6 +516,13 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
             if (!id || id.startsWith("wildfire-")) return;
             if (session?.header?.parentSession) return;
             if (bySession.has(id)) return;
+            if (!sessionGroupBridgeEnabled()) {
+                // 服务端关闭了“自动建群/手机端同步”：只保留 PC Web UI，不建群、不写映射。
+                logger?.info?.(
+                    `[wildfire-bridge] disabled by provision: skip group for session id=${id}, cwd=${session?.header?.cwd ?? "-"}`
+                );
+                return;
+            }
             logger?.info?.(`[wildfire-bridge] web session created: id=${id}, cwd=${session?.header?.cwd ?? "-"}`);
             void createGroupForSession(session);
         } catch (err: any) {
@@ -673,7 +690,11 @@ export function registerSessionBridge(api: any, ctx: any, logger: any): SessionB
     observeInteraction("user-questions/request", "question");
     observeInteraction("approval/request", "approval");
 
-    logger?.info?.(`[wildfire-bridge] spike registered (records=${bySession.size})`);
+    logger?.info?.(
+        `[wildfire-bridge] spike registered (records=${bySession.size}), session-group-bridge=${
+            sessionGroupBridgeEnabled() ? "enabled" : "disabled by provision"
+        }`
+    );
 
     return {
         isBridged(key: string): boolean {
