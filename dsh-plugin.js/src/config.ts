@@ -202,6 +202,19 @@ export interface WildfireMediaConfig {
   downloadDir?: string;
   /** Parse `[media:path]` / `[image:path]` markers in replies and send as media. Default true. */
   outboundEnabled?: boolean;
+  /**
+   * 入站媒体 URL 允许的主机（精确域名/IP，或 *.example.com 只匹配子域）。
+   * 空 = 不限制主机（仍会拦截回环/链路本地/metadata 等危险地址）。
+   * 桌面端由服务端 /provision 的 features.mediaAllowedHosts 注入。
+   */
+  allowedHosts?: string[];
+  /**
+   * 是否允许 RFC1918/CGNAT/ULA 内网地址。默认 true（兼容私有化部署的
+   * 内网媒体服务）；公网部署可设为 false 以阻止所有内网 SSRF。
+   */
+  allowPrivateHosts?: boolean;
+  /** 入站媒体下载最多跟随的重定向次数，默认 3；每一跳都会重新校验。 */
+  maxRedirects?: number;
 }
 
 /**
@@ -398,9 +411,19 @@ export function getModelConfig(
 
 /** Effective media settings with defaults applied. */
 export function getMediaConfig(config: WildfireConfig): Required<WildfireMediaConfig> {
+  const allowedHosts = Array.isArray(config.media?.allowedHosts)
+    ? config.media!.allowedHosts.filter((h): h is string => typeof h === "string").map((h) => h.trim()).filter(Boolean)
+    : [];
+  const maxRedirects = Number.isInteger(config.media?.maxRedirects) && (config.media?.maxRedirects ?? 0) >= 0
+    ? Number(config.media!.maxRedirects)
+    : 3;
   return {
     downloadDir: config.media?.downloadDir ?? "/tmp/wildfire-media",
     outboundEnabled: config.media?.outboundEnabled ?? true,
+    allowedHosts,
+    // 默认允许内网媒体（兼容私有化部署）；公网部署可显式设 false
+    allowPrivateHosts: config.media?.allowPrivateHosts !== false,
+    maxRedirects,
   };
 }
 

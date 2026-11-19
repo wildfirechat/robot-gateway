@@ -11,6 +11,11 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, realpath, stat, writeFile, unlink } from "node:fs/promises";
+import {
+  fetchMediaWithPolicy,
+  MediaUrlError,
+  type MediaUrlPolicy,
+} from "./mediaPolicy.js";
 
 export interface PreparedMedia {
   /** Text to include in the agent message (path note / transcript). */
@@ -76,20 +81,10 @@ const MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
 export async function downloadToTemp(
   remoteUrl: string,
   downloadDir: string,
-  logger?: any
+  logger?: any,
+  policy?: MediaUrlPolicy
 ): Promise<{ path: string; ext: string } | null> {
   try {
-    let parsed: URL;
-    try {
-      parsed = new URL(remoteUrl);
-    } catch {
-      logger?.warn?.(`[wildfire-media] download rejected (invalid URL): ${remoteUrl}`);
-      return null;
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      logger?.warn?.(`[wildfire-media] download rejected (non-http(s) scheme): ${parsed.protocol}//`);
-      return null;
-    }
     await mkdir(downloadDir, { recursive: true });
     const urlPath = remoteUrl.split("?")[0];
     const ext = (urlPath.split(".").pop()?.toLowerCase() ?? "bin").replace(/[^a-z0-9]/g, "");
@@ -98,7 +93,8 @@ export async function downloadToTemp(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("media download timeout")), MEDIA_DOWNLOAD_TIMEOUT_MS);
     try {
-      const resp = await fetch(remoteUrl, { signal: controller.signal });
+      // 来源校验：scheme/host 白名单/私网与 metadata 地址拦截，重定向每跳重新校验
+      const resp = await fetchMediaWithPolicy(remoteUrl, policy, { signal: controller.signal });
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       if (!resp.body) throw new Error("no response body");
       const chunks: Buffer[] = [];
@@ -120,7 +116,11 @@ export async function downloadToTemp(
       clearTimeout(timer);
     }
   } catch (e: any) {
-    logger?.warn?.(`[wildfire-media] download failed for ${remoteUrl}: ${e.message}`);
+    if (e instanceof MediaUrlError) {
+      logger?.warn?.(`[wildfire-media] download blocked (${e.code}) host=${e.host ?? "-"}: ${e.message}`);
+    } else {
+      logger?.warn?.(`[wildfire-media] download failed for ${remoteUrl}: ${e.message}`);
+    }
     return null;
   }
 }
@@ -140,15 +140,17 @@ export async function prepareInboundMedia(params: {
   /** Whether the current model accepts image content blocks. When false,
    * images are exposed as a local path note instead (agent reads with tools). */
   supportsImage?: boolean;
+  /** 入站媒体 URL 安全策略（来源白名单 + 私网/metadata 拦截）。 */
+  mediaPolicy?: MediaUrlPolicy;
 }): Promise<PreparedMedia> {
-  const { mediaUrl, payloadType, downloadDir, attachments, logger, transcript, supportsImage = true } = params;
+  const { mediaUrl, payloadType, downloadDir, attachments, logger, transcript, supportsImage = true, mediaPolicy } = params;
 
   // Voice with an ASR transcript: text only, no download needed.
   if (payloadType === 2 && transcript) {
     return { text: transcript };
   }
 
-  const downloaded = await downloadToTemp(mediaUrl, downloadDir, logger);
+  const downloaded = await downloadToTemp(mediaUrl, downloadDir, logger, mediaPolicy);
   if (!downloaded) {
     return { text: payloadType === 3 ? "[图片]" : "[附件]" };
   }

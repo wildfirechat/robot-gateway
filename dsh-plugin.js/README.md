@@ -360,6 +360,15 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `model.allowModelCommand` | 否 | 允许私聊 `/model`、`/effort` 命令，默认 `false` |
 | `media.downloadDir` | 否 | 入站媒体临时目录，默认 `/tmp/wildfire-media` |
 | `media.outboundEnabled` | 否 | 解析回复中的 `[image:path]`/`[media:path]` 标记并发送媒体，默认 `true` |
+| `media.allowedHosts` | 否 | 入站媒体 URL 的主机白名单：精确域名/IP 或 `*.example.com`（只匹配子域）；空 = 不限制主机（仍拦截回环/链路本地/metadata）。桌面端由服务端 `/provision` 的 `features.mediaAllowedHosts` 注入 |
+| `media.allowPrivateHosts` | 否 | 是否允许 RFC1918/CGNAT/ULA 内网地址，默认 `true`（兼容私有化部署的内网媒体服务）；公网部署建议设 `false` |
+| `media.maxRedirects` | 否 | 入站媒体下载最多跟随重定向次数，默认 `3`；每一跳都会重新做 URL/主机/IP 校验 |
+
+> **入站媒体 URL 安全**：`mediaUrl` 来自消息 payload，任意用户可构造。插件只允许
+> http/https、拒绝内嵌凭据，DNS 解析后拦截回环、链路本地（含 169.254.169.254 等
+> 云 metadata）、组播/保留地址；RFC1918/CGNAT/ULA 由 `media.allowPrivateHosts` 控制。
+> 重定向手动跟随并逐跳校验，下载保留 30s 超时 + 64MB 上限。语音消息在转发给 ASR
+> 服务前也会做同一套校验，避免 ASR 服务被用来访问内网。
 | `interaction.askUserEnabled` | 否 | 注册 userQuestions provider（Agent 提问→IM 回答），默认 `true` |
 | `interaction.approvalEnabled` | 否 | 注册审批 answerer（工具审批→IM 同意/拒绝），默认 `true` |
 | `interaction.askUserTimeoutMs` | 否 | 提问等待超时，默认 300000 |

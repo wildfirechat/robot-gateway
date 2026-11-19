@@ -22,6 +22,7 @@ import {
 } from "@wildfirechat/server-sdk";
 import type { WildfireConfig } from "./config.js";
 import { getStreamingConfig, getMediaConfig, getSecurityConfig, getWorkspaceConfig, getWhitelistConfig, getAiLine, getMainSessionConfig } from "./config.js";
+import { validateMediaUrl, MediaUrlError, type MediaUrlPolicy } from "./mediaPolicy.js";
 import { getClient } from "./clients.js";
 import { handleMetadataMessage, publishGuestMetadata, routeMultiRobotMessage } from "./multiRobot.js";
 import { WhitelistFilter } from "./whitelist.js";
@@ -1280,7 +1281,12 @@ export async function handleIncomingMessage(
     if (payloadType === MESSAGE_TYPE_VOICE && mediaUrl) {
       if (config.asrServer) {
         bridgeAsrAttempted = true;
-        bridgeTranscript = await transcribeWithAsrServer(config.asrServer, mediaUrl, api.logger);
+        bridgeTranscript = await transcribeWithAsrServer(
+          config.asrServer,
+          mediaUrl,
+          api.logger,
+          getMediaConfig(config)
+        );
         api.logger?.info?.(
           `[wildfire] bridge ASR transcript: len=${bridgeTranscript?.length ?? 0}, preview=${safePreview(bridgeTranscript ?? "")}`
         );
@@ -1590,7 +1596,12 @@ export async function handleIncomingMessage(
     // Voice + ASR: transcribe first so the agent gets the spoken text.
     if (payloadType === MESSAGE_TYPE_VOICE && mediaUrl && config.asrServer) {
       asrAttempted = true;
-      transcript = await transcribeWithAsrServer(config.asrServer, mediaUrl, logger);
+      transcript = await transcribeWithAsrServer(
+        config.asrServer,
+        mediaUrl,
+        logger,
+        getMediaConfig(config)
+      );
       api.logger?.info?.(
         `[wildfire] ASR transcript: len=${transcript?.length ?? 0}, preview=${safePreview(transcript ?? "")}`
       );
@@ -1618,14 +1629,16 @@ export async function handleIncomingMessage(
         const supports = await modelSupportsImage(api, key);
         if (supports !== null) supportsImage = supports;
       }
+      const mediaConfig = getMediaConfig(config);
       const prepared = await prepareInboundMedia({
         mediaUrl,
         payloadType,
-        downloadDir: getMediaConfig(config).downloadDir,
+        downloadDir: mediaConfig.downloadDir,
         attachments: api.ctx?.get?.("attachments"),
         logger,
         transcript,
         supportsImage,
+        mediaPolicy: mediaConfig,
       });
       media = prepared;
     }
@@ -2046,8 +2059,21 @@ function shouldGuidanceReplyForVoice(payloadType: number, transcript?: string): 
 async function transcribeWithAsrServer(
   asrServer: string,
   mediaUrl: string,
-  logger?: any
+  logger?: any,
+  policy?: MediaUrlPolicy
 ): Promise<string | undefined> {
+  // mediaUrl 来自消息 payload（可被任意用户构造），先按媒体来源策略校验，
+  // 避免把内网/metadata 地址转发给 ASR 服务造成 SSRF。
+  try {
+    await validateMediaUrl(mediaUrl, policy);
+  } catch (e: any) {
+    if (e instanceof MediaUrlError) {
+      logger?.warn?.(`[wildfire] ASR media URL rejected (${e.code}) host=${e.host ?? "-"}: ${e.message}`);
+    } else {
+      logger?.warn?.(`[wildfire] ASR media URL check failed: ${String(e?.message ?? e)}`);
+    }
+    return undefined;
+  }
   // 超时保护：ASR 服务无响应时不能让回合无限挂起（fetch 默认无超时）。
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("ASR request timeout")), 30_000);
