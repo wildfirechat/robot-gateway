@@ -861,6 +861,14 @@ async function runMainSessionTurn(
     const reasonKind = turnReasonKind(outcome.reason);
     const cancelled = ["cancelled", "aborted", "interrupted"].includes(reasonKind);
     const noReply = !cancelled && finalText.trim().toUpperCase() === "NO_REPLY";
+    const noOutput = !finalText.trim() && presented.length === 0;
+    // 主会话也要落最终状态：NO_REPLY 视为正常完成（正文用 type=20 取消气泡）；
+    // 被取消/完全无产出才是 cancelled。
+    api.interactions?.pushStatus(key, {
+      state: "done",
+      phase: "done",
+      reason: cancelled || noOutput ? "cancelled" : "completed",
+    });
     if (cancelled || noReply) {
       await sendStreamingReply(opts.sender, opts.replyConv, "生成已取消", streamId, "cancelled", logger);
     } else if (finalText.trim()) {
@@ -1898,9 +1906,12 @@ export async function handleIncomingMessage(
     // dsh 的 reason 是对象（{kind:"aborted"|"interrupted"|...}），不是字符串，
     // 因此按 kind 判定（旧代码用 String(reason) 永远匹配不到 "cancelled"）。
     const cancelled = ["cancelled", "aborted", "interrupted"].includes(reasonKind);
+    // NO_REPLY 只是「不发送正文」，回合本身正常完成：状态记 completed，
+    // 正文气泡仍用上面的 type=20 取消消息收起（客户端不会留下生成中气泡）。
     api.interactions?.pushStatus(key, {
       state: "done",
-      reason: noOutput || noReply || cancelled ? "cancelled" : "completed",
+      phase: "done",
+      reason: noOutput || cancelled ? "cancelled" : "completed",
     });
     // 统计独立于状态推送：即使无文本产出/出错也推当轮统计（有值才推）
     api.interactions?.pushMetrics(key, {
