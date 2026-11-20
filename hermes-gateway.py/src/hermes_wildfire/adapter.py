@@ -12,8 +12,17 @@ from gateway.config import HomeChannel, Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import MessageDeduplicator
 
+from hermes_wildfire.access import AccessPolicy
 from hermes_wildfire.client import RobotGatewayClient
 from hermes_wildfire.config import WildfireConfig
+from hermes_wildfire.media import (
+    MediaDownloadError,
+    cache_inbound_media,
+    guess_media_filename,
+    is_media_payload_type,
+)
+from hermes_wildfire.media_policy import MediaUrlError, MediaUrlPolicy, redact_url
+from hermes_wildfire.rate_limit import SlidingWindowRateLimiter
 from hermes_wildfire.message import (
     CONTENT_TYPE_STREAMING_GENERATED,
     CONTENT_TYPE_STREAMING_GENERATING,
@@ -56,6 +65,27 @@ class WildfireAdapter(BasePlatformAdapter):
         self.wf_config = WildfireConfig.from_platform_config(config)
         self._client: RobotGatewayClient | None = None
         self._client_lock = asyncio.Lock()
+
+        # Access control: fail-closed allowlists, split between DM and group
+        # traffic. The robot owner is learned from getProfile at connect time
+        # and always keeps DM access (see access.py).
+        self._owner_id: str | None = None
+        self._profile_ready = False
+        self._access = self._build_access_policy()
+
+        # Inbound media (URL from the message payload) is attacker-controlled:
+        # every download goes through this SSRF policy.
+        self._media_policy = MediaUrlPolicy(
+            allowed_hosts=tuple(self.wf_config.media_allowed_hosts),
+            allow_private_hosts=self.wf_config.media_allow_private_hosts,
+            max_redirects=self.wf_config.media_max_redirects,
+        )
+        self._user_rate_limiter = SlidingWindowRateLimiter(
+            self.wf_config.rate_limit_per_minute
+        )
+        self._group_rate_limiter = SlidingWindowRateLimiter(
+            self.wf_config.group_rate_limit_per_minute
+        )
 
         # Tracks chat_id -> stream_id for Hermes draft streaming. When a draft
         # stream is active, the next textual ``send()`` finalizes it using
@@ -102,66 +132,104 @@ class WildfireAdapter(BasePlatformAdapter):
                 )
                 return False
 
-            # Fetch the robot profile and auto-add the owner to the
-            # allowed-users list so the robot owner is never locked out.
-            try:
-                resp = await self._client.send_request(
-                    "getProfile", []
-                )
-                logger.info(
-                    "getProfile response: code=%s msg=%s result=%s",
-                    resp.code,
-                    resp.message,
-                    resp.result,
-                )
-                if resp.is_success and isinstance(resp.result, dict):
-                    im_result = resp.result
-                    logger.info(
-                        "getProfile IMResult: code=%s msg=%s result=%s",
-                        im_result.get("code"),
-                        im_result.get("msg"),
-                        im_result.get("result"),
+            # Learn the robot owner so DM access keeps working for the operator.
+            # Retry: when this fails we stay connected but FAIL CLOSED (nobody is
+            # admitted beyond explicitly configured allowlists) — see access.py.
+            owner = await self._fetch_owner()
+            if owner:
+                self._owner_id = owner
+                self._profile_ready = True
+                self._access = self._build_access_policy()
+                if not self.wf_config.home_channel:
+                    self.wf_config.home_channel = owner
+                    # Also update the underlying PlatformConfig.home_channel so
+                    # gateway's get_home_channel() can find it.
+                    self.config.home_channel = HomeChannel(
+                        platform=Platform("wildfire"),
+                        chat_id=owner,
+                        name="Home",
                     )
-                    if im_result.get("code") == 0:
-                        profile = im_result.get("result") or {}
-                        owner = profile.get("owner")
-                        logger.info(
-                            "getProfile robot profile: %s, owner=%s",
-                            profile,
-                            owner,
-                        )
-                        if owner:
-                            self.wf_config.allowed_users.add(str(owner))
-                            # Also set owner as home_channel fallback
-                            if not self.wf_config.home_channel:
-                                self.wf_config.home_channel = str(owner)
-                                # Also update the underlying PlatformConfig.home_channel
-                                # so gateway's get_home_channel() can find it
-                                self.config.home_channel = HomeChannel(
-                                    platform=Platform("wildfire"),
-                                    chat_id=str(owner),
-                                    name="Home",
-                                )
-                                logger.info(
-                                    "Auto-set robot owner %s as Wildfire home_channel fallback",
-                                    owner,
-                                )
-                            logger.info(
-                                "Auto-added robot owner %s to Wildfire allowed users",
-                                owner,
-                            )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Failed to fetch robot profile for owner, continuing without",
+                    logger.info(
+                        "Auto-set robot owner %s as Wildfire home_channel fallback", owner
+                    )
+            else:
+                self._profile_ready = False
+                self._access = self._build_access_policy()
+                logger.error(
+                    "Wildfire robot owner unknown after %d getProfile attempt(s); "
+                    "access is FAIL-CLOSED (only explicitly configured allowlists apply: "
+                    "WILDFIRE_ALLOWED_USERS / WILDFIRE_ALLOWED_GROUPS / "
+                    "WILDFIRE_GROUP_ALLOWED_USERS, or WILDFIRE_ALLOW_ALL_USERS)",
+                    self.wf_config.profile_fetch_retries,
                 )
 
         self._mark_connected()
         logger.info(
-            "Wildfire IM connected: robot=%s gateway=%s",
+            "Wildfire IM connected: robot=%s gateway=%s access[%s] profile_ready=%s",
             self.wf_config.robot_id,
             self.wf_config.gateway_url,
+            self._access.describe(),
+            self._profile_ready,
         )
         return True
+
+    async def _fetch_owner(self) -> str | None:
+        """Fetch the robot owner via getProfile, retrying transient failures."""
+        attempts = max(1, self.wf_config.profile_fetch_retries)
+        timeout = min(10.0, max(1.0, float(self.wf_config.request_timeout)))
+        for attempt in range(1, attempts + 1):
+            try:
+                if self._client is None:
+                    return None
+                resp = await asyncio.wait_for(
+                    self._client.send_request("getProfile", []), timeout=timeout
+                )
+                if not resp.is_success or not isinstance(resp.result, dict):
+                    logger.warning(
+                        "getProfile failed (attempt %d/%d): code=%s msg=%s",
+                        attempt,
+                        attempts,
+                        resp.code,
+                        resp.message,
+                    )
+                else:
+                    im_result = resp.result
+                    if im_result.get("code") != 0:
+                        logger.warning(
+                            "getProfile returned IM code=%s msg=%s (attempt %d/%d)",
+                            im_result.get("code"),
+                            im_result.get("msg"),
+                            attempt,
+                            attempts,
+                        )
+                    else:
+                        profile = im_result.get("result") or {}
+                        owner = str(profile.get("owner") or "").strip()
+                        if owner:
+                            logger.info("Wildfire robot owner: %s", owner)
+                            return owner
+                        logger.warning(
+                            "getProfile returned no owner for robot %s (attempt %d/%d)",
+                            self.wf_config.robot_id,
+                            attempt,
+                            attempts,
+                        )
+            except Exception:  # noqa: BLE001 - retry, then fail closed
+                logger.warning(
+                    "getProfile request raised (attempt %d/%d)", attempt, attempts, exc_info=True
+                )
+            if attempt < attempts:
+                await asyncio.sleep(min(1.5 * attempt, 5.0))
+        return None
+
+    def _build_access_policy(self) -> AccessPolicy:
+        return AccessPolicy(
+            allowed_users=frozenset(self.wf_config.allowed_users),
+            allowed_groups=frozenset(self.wf_config.allowed_groups),
+            group_allowed_users=frozenset(self.wf_config.group_allowed_users),
+            allow_all_users=self.wf_config.allow_all_users,
+            owner_id=self._owner_id,
+        )
 
     async def disconnect(self) -> None:
         self._running = False
@@ -195,6 +263,9 @@ class WildfireAdapter(BasePlatformAdapter):
         if not sender or not conv or not payload:
             logger.debug("Ignoring incomplete Wildfire push message")
             return
+        if not isinstance(conv, dict) or not isinstance(payload, dict):
+            logger.debug("Ignoring malformed Wildfire push message (conv/payload)")
+            return
 
         # Skip non-text-like content types for now
         payload_type = payload.get("type", 0)
@@ -218,31 +289,60 @@ class WildfireAdapter(BasePlatformAdapter):
 
         text, media_url = extract_message_text(payload)
         is_group = is_group_conversation(conv)
+        chat_id = str(conv.get("target", ""))
 
-        # Authorization
-        if not self._is_authorized(sender, conv.get("target", ""), is_group):
+        # Authorization: DM and group rules are separate (see access.py). The
+        # policy fails closed when no allowlist is configured at all.
+        if not self._is_authorized(sender_id, chat_id, is_group):
             logger.info(
-                "Wildfire message from %s blocked by allowlist (group=%s)",
-                sender,
+                "Wildfire message from %s blocked by access policy (group=%s chat=%s)",
+                sender_id,
                 is_group,
+                chat_id,
             )
             return
 
-        # Group filtering
+        # Group filtering: mention-only by default; ?/help-keyword triggers are
+        # opt-in via WILDFIRE_GROUP_KEYWORD_TRIGGERS.
         if is_group and not should_respond_to_group(
             text,
             self.wf_config.robot_id,
             payload,
             self.wf_config.require_mention,
             self.wf_config.help_keywords,
+            keyword_triggers=self.wf_config.group_keyword_triggers,
         ):
             logger.debug(
-                "Wildfire group message ignored (no mention/help keyword): %s",
-                text[:60],
+                "Wildfire group message ignored (no mention): %s",
+                (text or "")[:60],
             )
             return
 
-        media_urls = [media_url] if media_url else []
+        # Rate limiting: per sender for every chat, plus a per-group budget.
+        if not self._user_rate_limiter.allow(f"user:{sender_id}"):
+            logger.warning(
+                "Wildfire message from %s rate-limited (user budget %d/min)",
+                sender_id,
+                self.wf_config.rate_limit_per_minute,
+            )
+            return
+        if is_group and not self._group_rate_limiter.allow(f"group:{chat_id}"):
+            logger.warning(
+                "Wildfire group %s rate-limited (group budget %d/min)",
+                chat_id,
+                self.wf_config.group_rate_limit_per_minute,
+            )
+            return
+
+        # Inbound media: the URL is attacker-controlled, so download it only
+        # after it passes the SSRF policy, then hand Hermes a local cached path.
+        media_urls: list[str] = []
+        media_types: list[str] = []
+        if media_url and is_media_payload_type(payload_type):
+            cached = await self._cache_inbound_media(media_url, payload_type, payload)
+            if cached is not None:
+                media_urls = [cached[0]]
+                media_types = [cached[1]]
 
         source = build_session_source(
             self.build_source,
@@ -259,20 +359,49 @@ class WildfireAdapter(BasePlatformAdapter):
             text=text,
             message_id=message_id,
             media_urls=media_urls,
+            media_types=media_types,
             raw_message=message_data,
             message_type=infer_message_type(payload_type, MessageType),
         )
 
         await self.handle_message(event)
 
+    async def _cache_inbound_media(
+        self, media_url: str, payload_type: int, payload: dict[str, Any]
+    ) -> tuple[str, str] | None:
+        """Download inbound media safely and cache it; None when unusable."""
+        try:
+            path, mime = await cache_inbound_media(
+                media_url,
+                payload_type,
+                self._media_policy,
+                filename=guess_media_filename(payload, media_url),
+            )
+            logger.info("Wildfire inbound media cached: %s", path)
+            return path, mime
+        except MediaUrlError as exc:
+            logger.warning(
+                "Wildfire inbound media rejected (%s): %s (%s)",
+                exc.code,
+                redact_url(media_url),
+                exc,
+            )
+        except MediaDownloadError as exc:
+            logger.warning(
+                "Wildfire inbound media download failed (%s): %s", exc.code, exc
+            )
+        except Exception:  # noqa: BLE001 - media is best-effort; never drop the text
+            logger.exception(
+                "Wildfire inbound media download failed: %s", redact_url(media_url)
+            )
+        return None
+
     def _is_authorized(self, sender: str, chat_id: str, is_group: bool) -> bool:
-        if self.wf_config.allow_all_users:
-            return True
-        if self.wf_config.allowed_users and sender not in self.wf_config.allowed_users:
-            return False
-        if is_group and self.wf_config.allowed_groups and chat_id not in self.wf_config.allowed_groups:
-            return False
-        return True
+        return self._access.is_authorized(str(sender or ""), str(chat_id or ""), is_group)
+
+    def _is_dm_allowed(self, sender_id: str) -> bool:
+        """Live DM verdict re-checked by Hermes when no env allowlist exists."""
+        return self._access.is_dm_allowed(str(sender_id or ""))
 
     # ------------------------------------------------------------------
     # Sending

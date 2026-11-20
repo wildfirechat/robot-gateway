@@ -1,4 +1,5 @@
 websockets<16.0,>=14.0
+httpx>=0.24
 
 [dev]
 pytest>=8.0

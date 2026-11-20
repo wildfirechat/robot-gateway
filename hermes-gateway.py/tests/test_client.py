@@ -186,7 +186,8 @@ async def test_receive_loop_handles_connection_closed_without_rcvd():
             raise websockets.ConnectionClosedError(
                 rcvd=None,
                 sent=websockets.frames.Close(1000, "OK"),
-                rcvd_then_sent=False,
+                # websockets >= 15 asserts rcvd_then_sent is None when rcvd is None.
+                rcvd_then_sent=None,
             )
 
         async def close(self):

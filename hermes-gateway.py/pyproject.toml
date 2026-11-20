@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-wildfire"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hermes Agent platform adapter for Wildfire IM via robot-gateway WebSocket"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +27,8 @@ dependencies = [
     # plugin installs do not downgrade the gateway's pinned version.
     # 16.0 has handshake issues on some Python 3.13 builds, so cap below it.
     "websockets>=14.0,<16.0",
+    # Used for inbound media downloads (SSRF-checked, manual redirects).
+    "httpx>=0.24",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +46,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

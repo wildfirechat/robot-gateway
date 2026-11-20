@@ -16,6 +16,15 @@ def _clean_env(monkeypatch):
         "WILDFIRE_HELP_KEYWORDS",
         "WILDFIRE_ALLOWED_USERS",
         "WILDFIRE_ALLOWED_GROUPS",
+        "WILDFIRE_GROUP_ALLOWED_USERS",
+        "WILDFIRE_ALLOW_ALL_USERS",
+        "WILDFIRE_GROUP_KEYWORD_TRIGGERS",
+        "WILDFIRE_RATE_LIMIT_PER_MINUTE",
+        "WILDFIRE_GROUP_RATE_LIMIT_PER_MINUTE",
+        "WILDFIRE_PROFILE_FETCH_RETRIES",
+        "WILDFIRE_MEDIA_ALLOWED_HOSTS",
+        "WILDFIRE_MEDIA_ALLOW_PRIVATE_HOSTS",
+        "WILDFIRE_MEDIA_MAX_REDIRECTS",
         "WILDFIRE_RECONNECT_WAIT_TIMEOUT",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -119,3 +128,82 @@ def test_config_reconnect_wait_timeout_from_env(monkeypatch):
         )
     )
     assert cfg.reconnect_wait_timeout == 4.5
+
+
+def test_config_access_policy_defaults_are_fail_closed():
+    cfg = WildfireConfig.from_platform_config(SimpleNamespace(extra={}))
+    assert cfg.allowed_users == set()
+    assert cfg.allowed_groups == set()
+    assert cfg.group_allowed_users == set()
+    assert cfg.allow_all_users is False
+    assert cfg.group_keyword_triggers is False
+
+
+def test_config_access_policy_from_extra():
+    cfg = WildfireConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "allowed_users": "alice,bob",
+                "allowed_groups": "group-1",
+                "group_allowed_users": "carol",
+                "allow_all_users": False,
+                "group_keyword_triggers": True,
+                "rate_limit_per_minute": 5,
+                "group_rate_limit_per_minute": 10,
+                "profile_fetch_retries": 2,
+            }
+        )
+    )
+    assert cfg.allowed_users == {"alice", "bob"}
+    assert cfg.allowed_groups == {"group-1"}
+    assert cfg.group_allowed_users == {"carol"}
+    assert cfg.group_keyword_triggers is True
+    assert cfg.rate_limit_per_minute == 5
+    assert cfg.group_rate_limit_per_minute == 10
+    assert cfg.profile_fetch_retries == 2
+
+
+def test_config_access_policy_from_env(monkeypatch):
+    monkeypatch.setenv("WILDFIRE_ALLOWED_USERS", "env-user")
+    monkeypatch.setenv("WILDFIRE_GROUP_ALLOWED_USERS", "env-group-user")
+    monkeypatch.setenv("WILDFIRE_GROUP_KEYWORD_TRIGGERS", "true")
+    monkeypatch.setenv("WILDFIRE_RATE_LIMIT_PER_MINUTE", "7")
+    cfg = WildfireConfig.from_platform_config(
+        SimpleNamespace(extra={"allowed_users": "extra-user"})
+    )
+    assert cfg.allowed_users == {"env-user"}
+    assert cfg.group_allowed_users == {"env-group-user"}
+    assert cfg.group_keyword_triggers is True
+    assert cfg.rate_limit_per_minute == 7
+
+
+def test_config_media_policy_from_nested_extra():
+    cfg = WildfireConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "media": {
+                    "allowedHosts": ["cdn.example.com", "*.example.org"],
+                    "allowPrivateHosts": False,
+                    "maxRedirects": 1,
+                }
+            }
+        )
+    )
+    assert cfg.media_allowed_hosts == ["cdn.example.com", "*.example.org"]
+    assert cfg.media_allow_private_hosts is False
+    assert cfg.media_max_redirects == 1
+
+
+def test_config_media_policy_defaults_and_env(monkeypatch):
+    cfg = WildfireConfig.from_platform_config(SimpleNamespace(extra={}))
+    assert cfg.media_allowed_hosts == []
+    assert cfg.media_allow_private_hosts is True
+    assert cfg.media_max_redirects == 3
+
+    monkeypatch.setenv("WILDFIRE_MEDIA_ALLOWED_HOSTS", "media.example.com")
+    monkeypatch.setenv("WILDFIRE_MEDIA_ALLOW_PRIVATE_HOSTS", "false")
+    monkeypatch.setenv("WILDFIRE_MEDIA_MAX_REDIRECTS", "0")
+    cfg = WildfireConfig.from_platform_config(SimpleNamespace(extra={}))
+    assert cfg.media_allowed_hosts == ["media.example.com"]
+    assert cfg.media_allow_private_hosts is False
+    assert cfg.media_max_redirects == 0

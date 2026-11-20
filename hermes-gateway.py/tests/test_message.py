@@ -91,19 +91,38 @@ def test_group_mention_triggers():
     assert should_respond_to_group("hi", "robot1", payload, True, ["帮"])
 
 
-def test_group_question_triggers():
+def test_group_question_does_not_trigger_by_default():
     payload = {"mentionedType": 0}
-    assert should_respond_to_group("你好？", "robot1", payload, True, ["帮"])
+    assert not should_respond_to_group("你好？", "robot1", payload, True, ["帮"])
 
 
-def test_group_keyword_triggers():
+def test_group_keyword_does_not_trigger_by_default():
     payload = {"mentionedType": 0}
-    assert should_respond_to_group("请帮我", "robot1", payload, True, ["帮", "请"])
+    assert not should_respond_to_group("请帮我", "robot1", payload, True, ["帮", "请"])
+
+
+def test_group_question_triggers_when_keyword_triggers_enabled():
+    payload = {"mentionedType": 0}
+    assert should_respond_to_group(
+        "你好？", "robot1", payload, True, ["帮"], keyword_triggers=True
+    )
+
+
+def test_group_keyword_triggers_when_keyword_triggers_enabled():
+    payload = {"mentionedType": 0}
+    assert should_respond_to_group(
+        "请帮我", "robot1", payload, True, ["帮", "请"], keyword_triggers=True
+    )
 
 
 def test_group_require_mention_blocks():
     payload = {"mentionedType": 0}
     assert not should_respond_to_group("hello", "robot1", payload, True, ["帮"])
+
+
+def test_group_require_mention_false_allows_every_message():
+    payload = {"mentionedType": 0}
+    assert should_respond_to_group("hello", "robot1", payload, False, ["帮"])
 
 
 def test_build_streaming_generating_payload():

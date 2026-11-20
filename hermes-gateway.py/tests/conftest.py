@@ -19,6 +19,13 @@ class _Platform:
         self.name = name
 
 
+class _HomeChannel:
+    def __init__(self, platform: Any = None, chat_id: str = "", name: str = ""):
+        self.platform = platform
+        self.chat_id = chat_id
+        self.name = name
+
+
 def _build_source(
     chat_id: str = "",
     chat_name: str = "",
@@ -54,6 +61,7 @@ class _MessageEvent:
     source: Any = None
     message_id: str | None = None
     media_urls: list[str] = field(default_factory=list)
+    media_types: list[str] = field(default_factory=list)
     raw_message: dict[str, Any] | None = None
     timestamp: Any = None
 
@@ -106,6 +114,7 @@ class _BasePlatformAdapter:
 gateway_pkg = types.ModuleType("gateway")
 gateway_config_mod = types.ModuleType("gateway.config")
 gateway_config_mod.Platform = _Platform
+gateway_config_mod.HomeChannel = _HomeChannel
 gateway_pkg.config = gateway_config_mod
 
 gateway_platforms_pkg = types.ModuleType("gateway.platforms")

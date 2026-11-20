@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: hermes-wildfire
-Version: 0.1.0
+Version: 0.2.0
 Summary: Hermes Agent platform adapter for Wildfire IM via robot-gateway WebSocket
 Author: Wildfire IM Team
 License: MIT
@@ -15,6 +15,7 @@ Classifier: Programming Language :: Python :: 3.13
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: websockets<16.0,>=14.0
+Requires-Dist: httpx>=0.24
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.24; extra == "dev"

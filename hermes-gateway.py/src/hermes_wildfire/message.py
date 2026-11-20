@@ -214,19 +214,27 @@ def should_respond_to_group(
     payload: dict[str, Any],
     require_mention: bool,
     help_keywords: list[str],
+    keyword_triggers: bool = False,
 ) -> bool:
-    """Apply group chat filtering rules similar to OpenClaw/Moltbot."""
+    """Apply group chat filtering rules.
+
+    Default behaviour is **mention-only**: a group message must mention the
+    robot. ``keyword_triggers`` (``WILDFIRE_GROUP_KEYWORD_TRIGGERS``) explicitly
+    re-enables the legacy "? / help keyword" triggers, which fire without an
+    @mention and are therefore opt-in. ``require_mention=False`` still means
+    "answer every group message" (explicit opt-out).
+    """
     if is_mention(robot_id, payload):
         return True
-    if require_mention:
-        # Without mention, only reply to question/help-keyword triggers
-        if re.search(r"[?？]$", text.strip()):
-            return True
-        lower = text.lower()
-        if any(kw.lower() in lower for kw in help_keywords):
-            return True
+    if not require_mention:
+        return True
+    if not keyword_triggers:
         return False
-    return True
+    stripped = (text or "").strip()
+    if re.search(r"[?？]$", stripped):
+        return True
+    lower = stripped.lower()
+    return any(kw.lower() in lower for kw in help_keywords if kw)
 
 
 def build_session_source(
@@ -300,6 +308,7 @@ def build_message_event(
     media_urls: list[str] | None = None,
     raw_message: dict[str, Any] | None = None,
     message_type: Any = None,
+    media_types: list[str] | None = None,
 ) -> Any:
     """Construct a Hermes MessageEvent from a Wildfire inbound message.
 
@@ -315,6 +324,7 @@ def build_message_event(
         source=source,
         message_id=message_id or "",
         media_urls=list(media_urls or []),
+        media_types=list(media_types or []),
         raw_message=raw_message,
         timestamp=datetime.now(),
     )

@@ -245,6 +245,10 @@ class RobotGatewayClient:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
+        # Drop the stale reference so is_connected/reconnect never observe a dead
+        # socket (a concurrent reconnect may already have installed a new one).
+        if self._ws is ws:
+            self._ws = None
         self._fail_pending_futures("Connection lost")
         if self._running:
             self._schedule_reconnect()

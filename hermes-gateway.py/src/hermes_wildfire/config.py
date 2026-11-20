@@ -20,9 +20,25 @@ class WildfireConfig:
     home_channel: str | None = None
     require_mention: bool = True
     help_keywords: list[str] = field(default_factory=list)
+    # DM access: empty allowlist = nobody (fail-closed) unless allow_all_users.
     allowed_users: set[str] = field(default_factory=set)
+    # Group access: empty allowlist = no groups (fail-closed) unless allow_all_users.
     allowed_groups: set[str] = field(default_factory=set)
+    # Optional sender allowlist applied inside allowed groups (empty = any member).
+    group_allowed_users: set[str] = field(default_factory=set)
     allow_all_users: bool = False
+    # Group chats answer @mentions only by default; enable ?/help-keyword triggers
+    # explicitly (they fire without an @mention).
+    group_keyword_triggers: bool = False
+    # Per-sender and per-group inbound message limits (0 disables).
+    rate_limit_per_minute: int = 20
+    group_rate_limit_per_minute: int = 60
+    # getProfile retries at connect time before falling back to fail-closed.
+    profile_fetch_retries: int = 3
+    # Inbound media URL policy (see media_policy.py).
+    media_allowed_hosts: list[str] = field(default_factory=list)
+    media_allow_private_hosts: bool = True
+    media_max_redirects: int = 3
     reconnect_interval: float = 5.0
     reconnect_wait_timeout: float = 2.0
     request_timeout: float = 30.0
@@ -70,6 +86,55 @@ class WildfireConfig:
             extra.get("allow_all_users", False),
         )
 
+        group_allowed_users = set(
+            _comma_list(
+                os.getenv("WILDFIRE_GROUP_ALLOWED_USERS", ""),
+                extra.get("group_allowed_users", ""),
+            )
+        )
+
+        group_keyword_triggers = _env_bool(
+            "WILDFIRE_GROUP_KEYWORD_TRIGGERS",
+            extra.get("group_keyword_triggers", False),
+        )
+
+        rate_limit_per_minute = _env_int(
+            "WILDFIRE_RATE_LIMIT_PER_MINUTE",
+            extra.get("rate_limit_per_minute", 20),
+            minimum=0,
+        )
+        group_rate_limit_per_minute = _env_int(
+            "WILDFIRE_GROUP_RATE_LIMIT_PER_MINUTE",
+            extra.get("group_rate_limit_per_minute", 60),
+            minimum=0,
+        )
+        profile_fetch_retries = _env_int(
+            "WILDFIRE_PROFILE_FETCH_RETRIES",
+            extra.get("profile_fetch_retries", 3),
+            minimum=1,
+        )
+
+        # Inbound media policy: accept both flat keys and a nested ``media:`` block
+        # (matches the DSH plugin's ``media.allowedHosts``/``allowPrivateHosts``).
+        media_extra = extra.get("media")
+        if not isinstance(media_extra, dict):
+            media_extra = {}
+        media_allowed_hosts = _comma_list(
+            os.getenv("WILDFIRE_MEDIA_ALLOWED_HOSTS", ""),
+            media_extra.get("allowedHosts", extra.get("media_allowed_hosts", [])),
+        )
+        media_allow_private_hosts = _env_bool(
+            "WILDFIRE_MEDIA_ALLOW_PRIVATE_HOSTS",
+            media_extra.get(
+                "allowPrivateHosts", extra.get("media_allow_private_hosts", True)
+            ),
+        )
+        media_max_redirects = _env_int(
+            "WILDFIRE_MEDIA_MAX_REDIRECTS",
+            media_extra.get("maxRedirects", extra.get("media_max_redirects", 3)),
+            minimum=0,
+        )
+
         reconnect_interval = _env_float(
             "WILDFIRE_RECONNECT_INTERVAL",
             extra.get("reconnect_interval", 5.0),
@@ -92,7 +157,15 @@ class WildfireConfig:
             help_keywords=help_keywords,
             allowed_users=allowed_users,
             allowed_groups=allowed_groups,
+            group_allowed_users=group_allowed_users,
             allow_all_users=allow_all_users,
+            group_keyword_triggers=group_keyword_triggers,
+            rate_limit_per_minute=rate_limit_per_minute,
+            group_rate_limit_per_minute=group_rate_limit_per_minute,
+            profile_fetch_retries=profile_fetch_retries,
+            media_allowed_hosts=media_allowed_hosts,
+            media_allow_private_hosts=media_allow_private_hosts,
+            media_max_redirects=media_max_redirects,
             reconnect_interval=reconnect_interval,
             reconnect_wait_timeout=reconnect_wait_timeout,
             request_timeout=request_timeout,
@@ -154,6 +227,18 @@ def _env_float(env_name: str, default: float) -> float:
     except ValueError:
         logger.warning("Invalid %s value '%s', using default %s", env_name, raw, default)
         return float(default)
+
+
+def _env_int(env_name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(env_name, "").strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s value '%s', using default %s", env_name, raw, default)
+        value = int(default)
+    if minimum is not None and value < minimum:
+        value = minimum
+    return value
 
 
 def _comma_list(env_value: str, extra_value: str | list[str]) -> list[str]:
