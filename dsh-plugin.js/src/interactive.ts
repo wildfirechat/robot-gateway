@@ -408,24 +408,83 @@ export class InteractionManager {
     gui.catch(() => {});
     // 谁先【成功】给出答案用谁；一边失败（如桌面端没有连接的 Web 客户端）
     // 不影响另一边继续等待。两边都失败才把最后一个错误抛给调用方。
+    const winner = { value: "none" as "im" | "gui" | "none" };
+    let guiSettled = false;
+    let guiValue: any;
     try {
       return await new Promise<T>((resolve, reject) => {
         let pending = 2;
         let lastError: unknown;
-        const settle = (p: Promise<T>) => {
-          p.then(resolve, (err) => {
+        const settle = (p: Promise<T>, side: "im" | "gui") => {
+          p.then((value) => {
+            if (winner.value === "none") winner.value = side;
+            if (side === "gui") {
+              guiSettled = true;
+              guiValue = value;
+            }
+            resolve(value);
+          }, (err) => {
             lastError = err;
             pending -= 1;
             if (pending === 0) reject(lastError);
           });
         };
-        settle(im);
-        settle(gui);
+        settle(im, "im");
+        settle(gui, "gui");
       });
     } finally {
-      // 桌面端先答：把手机端还挂着的卡片标记过期（IM 先答时这里通常已清空）。
-      try { this.expirePending(key); } catch { /* ignore */ }
+      // 桌面端先答：把手机端还挂着的卡片改为「已回答 / 已同意 / 已拒绝」，
+      // 而不是笼统标记过期；同时 resolve 掉 IM 侧 pending，避免留下僵尸等待。
+      if (winner.value === "gui" && guiSettled) {
+        try { this.settlePendingFromGui(key, guiValue); } catch { /* ignore */ }
+      } else if (winner.value === "none") {
+        try { this.expirePending(key); } catch { /* ignore */ }
+      }
     }
+  }
+
+  /**
+   * 官方 Web UI 先回答时，把 IM 侧同一条 pending 交互结束掉，并把卡片更新成
+   * 实际结果（提问→已回答并带用户选择；审批→已同意/已拒绝），而不是过期。
+   */
+  private settlePendingFromGui(key: string, guiResult: any): void {
+    const question = this.pendingQuestions.get(key);
+    if (question) {
+      this.pendingQuestions.delete(key);
+      clearTimeout(question.timer);
+      const answer = guiResult && typeof guiResult === "object" ? guiResult : { answers: [] };
+      question.resolve(answer);
+      this.updateCardState(question.cardMessageId, "question", "answered", {
+        qid: question.qid,
+        questions: question.questions,
+        answers: Array.isArray(answer.answers) ? answer.answers : [],
+      });
+      this.pushStatus(key, { state: "running" });
+      return;
+    }
+    const approval = this.pendingApprovals.get(key);
+    if (!approval) {
+      return;
+    }
+    this.pendingApprovals.delete(key);
+    clearTimeout(approval.timer);
+    const outcome = typeof guiResult === "string" ? guiResult : "";
+    approval.resolve(outcome || "cancelled");
+    const approved = outcome === "allowed-once";
+    const rejected = outcome === "rejected";
+    this.updateCardState(
+      approval.cardMessageId,
+      "approval",
+      approved ? "approved" : rejected ? "rejected" : "expired",
+      {
+        aid: approval.aid,
+        toolName: approval.toolName,
+        ...(approval.reason ? { reason: approval.reason } : {}),
+        ...(approval.requestedBy ? { requestedBy: approval.requestedBy } : {}),
+        ...(approved || rejected ? { action: approved ? "approve" : "reject" } : {}),
+      }
+    );
+    this.pushStatus(key, { state: "running" });
   }
 
   /** Only the turn sender (ask_user) / designated approver (approval), or an admin, may decide. */
