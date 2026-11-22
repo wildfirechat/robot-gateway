@@ -7,6 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { TextMessageContent, FileMessageContent } from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
+import { getAiLine } from "./config.js";
 
 function rawTool(name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) {
   return {
@@ -99,6 +100,170 @@ export function registerRobotTools(api: any): void {
     api.logger?.warn?.("[wildfire] tools registry unavailable; robot tools not registered");
     return;
   }
+
+  const robotId = String(api?.config?.robotId || "");
+  const ownerId = String(api?.robotOwner || process.env.WF_OWNER_USER_ID || "");
+  const aiLines = [getAiLine(api?.config || {})];
+
+  const memberObjects = (ids: string[]) => ids
+    .map((id) => String(id || "").trim())
+    .filter(Boolean)
+    .map((id) => ({ member_id: id, type: 0 }));
+
+  tools.register(rawTool(
+    "im_bot_create_group",
+    "Create a Wildfire group as the robot. memberIds are user ids (strings); the robot and `to` are added automatically. Returns a verified group id.",
+    {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Group name." },
+        memberIds: { type: "array", items: { type: "string" }, description: "User ids to invite." },
+        to: { type: "string", description: "Inviter / owner user id; defaults to the robot owner." },
+        notifyText: { type: "string", description: "Optional group creation notification text." },
+      },
+      required: ["name", "memberIds"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const name = String(args?.name || "").trim();
+      if (!name) throw new Error("name is required");
+      const to = String(args?.to || ownerId || "").trim();
+      if (!to) throw new Error("to (owner user id) is required");
+      const requested = memberObjects(Array.isArray(args?.memberIds) ? args.memberIds : []);
+      if (robotId && !requested.some((m) => m.member_id === robotId)) requested.push({ member_id: robotId, type: 0 });
+      if (!requested.some((m) => m.member_id === to)) requested.push({ member_id: to, type: 0 });
+      const result = await client.createGroup(
+        { name, portrait: "", join_type: 2 },
+        requested,
+        to,
+        aiLines,
+        null
+      );
+      const groupId = String(result?.result?.group_id || "").trim();
+      if (result?.code !== 0 || !groupId) {
+        throw new Error(`createGroup failed: code=${result?.code ?? "-"} msg=${result?.msg || "no group_id"}`);
+      }
+      let verified = false;
+      try {
+        const members = await client.getGroupMembers(groupId);
+        const raw: any = members?.result;
+        const list = Array.isArray(raw?.members) ? raw.members : (Array.isArray(raw) ? raw : []);
+        if (list.length) {
+          const ids = new Set(list.map((m: any) => String(m?.member_id || m?.memberId || "")));
+          verified = requested.every((m) => ids.has(m.member_id));
+        }
+      } catch {
+        verified = false;
+      }
+      return { ok: true, groupId, verified, members: requested.map((m) => m.member_id) };
+    }
+  ));
+
+  tools.register(rawTool(
+    "im_bot_add_group_members",
+    "Add users to a Wildfire group as the robot. memberIds are user-id strings.",
+    {
+      type: "object",
+      properties: {
+        groupId: { type: "string" },
+        memberIds: { type: "array", items: { type: "string" } },
+      },
+      required: ["groupId", "memberIds"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const groupId = String(args?.groupId || "").trim();
+      const members = memberObjects(Array.isArray(args?.memberIds) ? args.memberIds : []);
+      if (!groupId || !members.length) throw new Error("groupId and non-empty memberIds are required");
+      const result = await client.addGroupMembers(groupId, members, ownerId, aiLines, null);
+      if (result?.code !== 0) throw new Error(`addGroupMembers failed: ${result?.msg || result?.code}`);
+      return { ok: true, groupId, members: members.map((m) => m.member_id) };
+    }
+  ));
+
+  tools.register(rawTool(
+    "im_bot_remove_group_members",
+    "Remove users from a Wildfire group as the robot. memberIds are user-id strings.",
+    {
+      type: "object",
+      properties: {
+        groupId: { type: "string" },
+        memberIds: { type: "array", items: { type: "string" } },
+      },
+      required: ["groupId", "memberIds"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const groupId = String(args?.groupId || "").trim();
+      const ids = (Array.isArray(args?.memberIds) ? args.memberIds : []).map((v: any) => String(v || "").trim()).filter(Boolean);
+      if (!groupId || !ids.length) throw new Error("groupId and non-empty memberIds are required");
+      const result = await client.kickoffGroupMembers(groupId, ids, aiLines, null);
+      if (result?.code !== 0) throw new Error(`kickoffGroupMembers failed: ${result?.msg || result?.code}`);
+      return { ok: true, groupId, members: ids };
+    }
+  ));
+
+  tools.register(rawTool(
+    "im_bot_transfer_group",
+    "Transfer a Wildfire group to a new owner as the robot.",
+    {
+      type: "object",
+      properties: {
+        groupId: { type: "string" },
+        newOwnerId: { type: "string" },
+      },
+      required: ["groupId", "newOwnerId"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const result = await client.transferGroup(
+        String(args?.groupId || "").trim(),
+        String(args?.newOwnerId || "").trim(),
+        aiLines,
+        null
+      );
+      if (result?.code !== 0) throw new Error(`transferGroup failed: ${result?.msg || result?.code}`);
+      return { ok: true };
+    }
+  ));
+
+  tools.register(rawTool(
+    "im_bot_dismiss_group",
+    "Dismiss a Wildfire group as the robot.",
+    {
+      type: "object",
+      properties: { groupId: { type: "string" } },
+      required: ["groupId"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const result = await client.dismissGroup(String(args?.groupId || "").trim(), aiLines, null);
+      if (result?.code !== 0) throw new Error(`dismissGroup failed: ${result?.msg || result?.code}`);
+      return { ok: true };
+    }
+  ));
+
+  tools.register(rawTool(
+    "im_bot_recall_message",
+    "Recall a message sent by the robot. messageUid must be a string.",
+    {
+      type: "object",
+      properties: { messageUid: { type: "string" } },
+      required: ["messageUid"],
+      additionalProperties: false,
+    },
+    async (args: any) => {
+      const client = requireClient();
+      const result = await client.recallMessage(String(args?.messageUid || ""));
+      if (result?.code !== 0) throw new Error(`recallMessage failed: ${result?.msg || result?.code}`);
+      return { ok: true, messageUid: String(args?.messageUid || "") };
+    }
+  ));
 
   tools.register(rawTool(
     "im_bot_send_message",
@@ -234,5 +399,5 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  api.logger?.info?.("[wildfire] robot tools registered: send_message, send_file, user_info, group_info, group_members, api");
+  api.logger?.info?.("[wildfire] robot tools registered: send_message, send_file, user_info, group_info, group_members, create_group/add/remove/transfer/dismiss/recall, api");
 }

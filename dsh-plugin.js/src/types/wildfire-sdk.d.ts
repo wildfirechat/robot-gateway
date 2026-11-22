@@ -36,9 +36,11 @@ declare module "@wildfirechat/robot-gateway-client-sdk" {
     updateMessage(messageId: string, payload: any): Promise<{ code: number; msg?: string }>;
     /** 群管理：踢人/拉人/禁言/成员列表（机器人以群主身份操作；lines=通知线路，用 AI 线） */
     kickoffGroupMembers(groupId: string, members: string[], lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
-    addGroupMembers(groupId: string, members: string[], to?: string | null, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
+    addGroupMembers(groupId: string, members: Array<{ member_id: string; type?: number }>, to?: string | null, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
+    transferGroup(groupId: string, newOwner: string, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string }>;
+    recallMessage(messageUid: string): Promise<{ code: number; msg?: string }>;
     muteGroupMember(groupId: string, members: string[], mute: boolean, lines?: number[] | null, payload?: any): Promise<{ code: number; msg?: string; isSuccess?: () => boolean }>;
-    getGroupMembers(groupId: string): Promise<{ code: number; msg?: string; result?: Array<{ member_id?: string; type?: number }> }>;
+    getGroupMembers(groupId: string): Promise<{ code: number; msg?: string; result?: { members?: Array<{ member_id?: string; type?: number }> } | Array<{ member_id?: string; type?: number }> }>;
     /** 获取用户信息（@提及上下文解析被 @ 用户显示名用） */
     getUserInfo(userId: string): Promise<{ code: number; msg?: string; result?: { userId?: string; name?: string; displayName?: string } | any; isSuccess?: () => boolean }>;
     /** 获取单条消息（只能获取机器人参与会话中的消息）。messageUid 是超长 long，

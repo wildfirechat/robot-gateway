@@ -7,6 +7,27 @@ import { IMResult } from '@wildfirechat/server-sdk';
  * 
  * 注意：使用 @../server-sdk.js 中的模型类（Conversation, MessagePayload 等）
  */
+/**
+ * Validate the group-member wire shape shared by createGroup/addGroupMembers.
+ * Wildfire's group API expects objects such as { member_id: "userId", type: 0 },
+ * not a list of bare user-id strings. Failing here is intentional: the IM
+ * server otherwise returns code=0 with a null result for malformed members.
+ */
+function assertGroupMembers(method, members) {
+    if (!Array.isArray(members) || members.length === 0) {
+        throw new TypeError(`${method}: members must be a non-empty array of { member_id, type? } objects`);
+    }
+    members.forEach((member, index) => {
+        if (typeof member === 'string') {
+            throw new TypeError(`${method}: members[${index}] must be an object with member_id; bare string ids are invalid (use [{ member_id: "..." }])`);
+        }
+        if (!member || typeof member !== 'object' || typeof member.member_id !== 'string' || member.member_id.length === 0) {
+            throw new TypeError(`${method}: members[${index}].member_id is required`);
+        }
+    });
+    return members;
+}
+
 export class RobotServiceClient {
     /**
      * 创建客户端实例
@@ -147,6 +168,9 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async recallMessage(messageId) {
+        if (typeof messageId !== 'string' || messageId.length === 0) {
+            return new IMResult(-1, 'messageId 是超长 long，必须传非空字符串（JS number 会丢失精度）', null);
+        }
         return this.invoke('recallMessage', [messageId]);
     }
 
@@ -281,13 +305,14 @@ export class RobotServiceClient {
     /**
      * 创建群组
      * @param {Object} groupInfo - 群组信息
-     * @param {Array} members - 成员列表
+     * @param {Array<{member_id: string, type?: 0|2}>} members - 成员对象数组
      * @param {string} to - 目标用户（创建群时的邀请者）
      * @param {Array<number>} lines - 会话线路
      * @param {MessagePayload} payload - 通知消息
      * @returns {Promise<IMResult>}
      */
     async createGroup(groupInfo, members, to, lines, payload) {
+        assertGroupMembers('createGroup', members);
         return this.invoke('createGroup', [groupInfo, members, to, lines, payload]);
     }
 
@@ -358,13 +383,14 @@ export class RobotServiceClient {
     /**
      * 添加群成员
      * @param {string} groupId - 群组ID
-     * @param {Array} members - 成员列表
+     * @param {Array<{member_id: string, type?: 0|2}>} members - 成员对象数组
      * @param {string} to - 目标用户
      * @param {Array<number>} lines - 会话线路
      * @param {MessagePayload} payload - 通知消息
      * @returns {Promise<IMResult>}
      */
     async addGroupMembers(groupId, members, to, lines, payload) {
+        assertGroupMembers('addGroupMembers', members);
         return this.invoke('addGroupMembers', [groupId, members, to, lines, payload]);
     }
 

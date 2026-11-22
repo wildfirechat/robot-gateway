@@ -3100,7 +3100,7 @@ async function handleInviteCommand(
     return;
   }
   try {
-    const result = await client.addGroupMembers(String(conv.target), [userId], null, [getAiLine(api.config)], null);
+    const result = await client.addGroupMembers(String(conv.target), [{ member_id: userId, type: 0 }], null, [getAiLine(api.config)], null);
     if (result?.code === 0 || result?.isSuccess?.()) {
       api.logger?.info?.(`[wildfire] /invite: group=${conv.target}, member=${userId}, by=${sender}`);
       await sendTip(sender, conv, `已邀请 ${userId} 进群`, api);

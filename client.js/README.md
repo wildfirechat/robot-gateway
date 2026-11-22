@@ -130,38 +130,49 @@ await client.applicationGetUserInfo(applicationId, userId);
 ### 群组相关
 
 ```javascript
-// 创建群组
-await client.createGroup(groupInfo, members, lines, notifyMessage);
+// 群组 API 的 members 不是字符串 ID 数组，而是对象数组：
+//   [{ member_id: "userId", type: 0 }, ...]
+// 建群成功后必须检查 result.group_id 非空；群成员操作后建议再回读一次。
+const members = [
+    { member_id: 'ownerUserId', type: 0 },
+    { member_id: 'robotId', type: 0 },
+];
+
+// 创建群组（5 个参数，to 不能省略）
+await client.createGroup({ name: '群名', portrait: '', join_type: 2 }, members, 'ownerUserId', [2], null);
 
 // 获取群组信息
-await client.getGroupInfo(groupId, updateDt);
+await client.getGroupInfo(groupId);
 
 // 解散群组
-await client.dismissGroup(groupId);
+await client.dismissGroup(groupId, lines, payload);
 
 // 转让群组
-await client.transferGroup(groupId, newOwner);
+await client.transferGroup(groupId, newOwner, lines, payload);
 
 // 修改群组信息
-await client.modifyGroupInfo(groupId, modifyType, value);
+await client.modifyGroupInfo(groupId, modifyType, value, lines, payload);
 
 // 获取群组成员
-await client.getGroupMembers(groupId, updateDt);
+await client.getGroupMembers(groupId);
 
-// 添加群成员
-await client.addGroupMembers(groupId, members, lines, notifyMessage);
+// 添加群成员（members 同样是对象数组）
+await client.addGroupMembers(groupId, members, to, lines, payload);
 
-// 踢出群成员
-await client.kickoffGroupMembers(groupId, memberIds, lines, notifyMessage);
+// 踢出群成员（这些接口使用字符串成员 ID 数组）
+await client.kickoffGroupMembers(groupId, memberIds, lines, payload);
 
 // 退出群组
-await client.quitGroup(groupId, lines, notifyMessage);
+await client.quitGroup(groupId, lines, payload);
 
 // 设置群管理员
-await client.setGroupManager(groupId, managers, type);
+await client.setGroupManager(groupId, members, isManager, lines, payload);
 
 // 禁言群成员
-await client.muteGroupMember(groupId, members, type, time);
+await client.muteGroupMember(groupId, members, mute, lines, payload);
+
+// 允许群成员发言
+await client.allowGroupMember(groupId, members, allow, lines, payload);
 ```
 
 ### 机器人资料

@@ -2,6 +2,7 @@ package cn.wildfirechat.app.gateway;
 
 import cn.wildfirechat.app.protocol.ResponseMessage;
 import cn.wildfirechat.common.ErrorCode;
+import cn.wildfirechat.pojos.OutputCreateGroupResult;
 import cn.wildfirechat.pojos.OutputRobot;
 import cn.wildfirechat.sdk.RobotService;
 import cn.wildfirechat.sdk.model.IMResult;
@@ -14,6 +15,7 @@ import org.springframework.web.socket.WebSocketSession;
 
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 机器人服务代理
@@ -59,6 +61,14 @@ public class RobotProxy {
         }
 
         try {
+            // createGroup/addGroupMembers 的 members 必须是对象数组；
+            // 直接传字符串 ID 时 IM 服务会返回 code=0/result=null，等于静默失败。
+            if (("createGroup".equals(method) || "addGroupMembers".equals(method))
+                    && params != null && params.size() > 1) {
+                String error = validateGroupMembers(method, params.get(1));
+                if (error != null) return ResponseMessage.error(requestId, 400, error);
+            }
+
             // 查找方法
             Method targetMethod = findMethod(robotService.getClass(), method, params);
             if (targetMethod == null) {
@@ -68,6 +78,21 @@ public class RobotProxy {
             // 转换参数类型并调用方法
             Object[] args = convertParams(targetMethod, params);
             Object result = targetMethod.invoke(robotService, args);
+
+            // 对“必须产生实体”的方法，拒绝 code=0 但 result 为空。
+            if ("createGroup".equals(method) && result instanceof IMResult) {
+                IMResult<?> imResult = (IMResult<?>) result;
+                if (imResult.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS) {
+                    Object created = imResult.getResult();
+                    String groupId = created instanceof OutputCreateGroupResult
+                            ? ((OutputCreateGroupResult) created).getGroup_id() : null;
+                    if (groupId == null || groupId.trim().isEmpty()) {
+                        LOG.warn("createGroup returned success without group_id; requestId={}", requestId);
+                        return ResponseMessage.error(requestId, 502,
+                                "createGroup returned success but no group_id (check members: [{member_id, type}], to/lines)");
+                    }
+                }
+            }
 
             if("getProfile".equals(method) && result instanceof IMResult) {
                 IMResult<OutputRobot> imResult = (IMResult<OutputRobot>)result;
@@ -86,6 +111,29 @@ public class RobotProxy {
             LOG.error("Failed to execute method {}: {}", method, e.getMessage(), e);
             return ResponseMessage.error(requestId, 500, "Failed to execute: " + e.getMessage());
         }
+    }
+
+    /**
+     * Validate the raw JSON members argument before reflection converts it.
+     * Accepts only object entries with a non-empty member_id.
+     */
+    private String validateGroupMembers(String method, Object rawMembers) {
+        if (!(rawMembers instanceof List)) {
+            return method + ": members must be an array of { member_id, type? } objects";
+        }
+        List<?> members = (List<?>) rawMembers;
+        if (members.isEmpty()) return method + ": members must not be empty";
+        for (int i = 0; i < members.size(); i++) {
+            Object item = members.get(i);
+            if (!(item instanceof Map)) {
+                return method + ": members[" + i + "] must be an object with member_id (bare string ids are invalid)";
+            }
+            Object memberId = ((Map<?, ?>) item).get("member_id");
+            if (!(memberId instanceof String) || ((String) memberId).trim().isEmpty()) {
+                return method + ": members[" + i + "].member_id is required";
+            }
+        }
+        return null;
     }
 
     /**
