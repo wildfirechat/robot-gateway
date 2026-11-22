@@ -378,6 +378,8 @@ ENABLE_PRESETS=0 ./build-deploy.sh wildfire
 | `interaction.approvalOwnerOnly` | 否 | 群内敏感操作由机器人 owner 审批（默认 `false`：任务发起人审批；桌面端注入 `true`） |
 | `security.maxMessagesPerMinute` | 否 | 每会话每分钟消息数上限（0=不限，默认 0） |
 | `security.allowGuestTurns` | 否 | 允许群成员发起 Agent 回合，默认 `true`；`false` 时仅 owner/管理员可发起 |
+| `security.toolsOwnerOnly` | 否 | 高危工具（`im_user_*`、机器人发送/文件/群管理、`im_bot_api`）仅允许机器人 owner / `access.adminUsers` 触发，默认 `true`；子 Agent 会话与非 owner 群回合会被拒绝。桌面端本地桥接会话视为可信 |
+| `security.fileSendRoots` | 否 | 文件发送工具额外允许读取的目录（除 workspace 根目录外），默认 `[]`；真实路径必须位于某个根目录之下 |
 
 ### 主会话（owner 私聊 + line0 普通群旁观）
 
@@ -563,6 +565,22 @@ Agent 的工作目录在 DSH 会话创建时写入会话头（`meta.cwd`），�
 | `/effort` | 查看当前推理等级 |
 | `/effort high` | 在当前模型上设置推理等级 |
 | `/reset` | 清空会话上下文 |
+
+## 工具（robot / 当前用户）
+
+插件向 Agent 注册两组工具（DSH 里可见 `im_bot_*` / `im_user_*`）：
+
+| 工具组 | 身份 | 说明 | 权限 |
+|---|---|---|---|
+| `im_bot_send_message` / `im_bot_send_file` / `im_bot_recall_message` | 机器人 | 以机器人身份发消息、发本地文件、撤回 | owner/admin；文件仅限 workspace 根目录（realpath 校验，防止任意文件外发） |
+| `im_bot_create_group` / `im_bot_add_group_members` / `im_bot_remove_group_members` / `im_bot_transfer_group` / `im_bot_dismiss_group` | 机器人 | 群管理；建群/加人后会回读成员列表返回 `verified` | owner/admin |
+| `im_bot_user_info` / `im_bot_group_info` / `im_bot_group_members` | 机器人 | 读取机器人可见的用户/群信息 | 所有回合 |
+| `im_bot_api` | 机器人 | 通用 RobotServiceClient 分发（50 个方法，已排除 `getOwnerFriendList`/`getUserRobots`/`applicationGetUserInfo` 等隐私接口）；返回 `{ok, code, msg, result}` | owner/admin |
+| `im_user_*`（contacts/groups/conversations/messages/search/send/recall/send_file） | 当前登录用户 | 通过 Electron 回环 bridge 读取/发送当前用户 IM 数据；bridge 侧还会再次校验全局读/发开关 | owner/admin |
+
+权限判定方式：工具执行上下文只带 DSH sessionId → 插件反查 IM 会话 key → 取该回合的发送者；只有 owner/`access.adminUsers` 放行，`security.toolsOwnerOnly=false` 可关闭该限制。环境变量覆盖：`WF_TOOLS_OWNER_ONLY=0`、`WF_FILE_SEND_ROOTS=/a:/b`。
+
+> 当前用户 bridge 工具只在桌面端 (`WF_IM_BRIDGE_URL`/`WF_IM_BRIDGE_TOKEN` 注入) 时注册；读取能力默认开启，发送能力需在客户端设置里打开全局发送开关。
 
 ## 使用
 

@@ -2,13 +2,18 @@
  * Robot-identity tools. These use the protected robot-gateway client only;
  * they never expose robotSecret to the model and never touch the current IM
  * user's local data (that is the separate im_user_* bridge).
+ *
+ * Security: send/file/group-mutation/generic-API tools are owner/admin-only
+ * (`toolSecurity.requireOwnerTurn`), and file sends are restricted to the
+ * configured workspace roots (realpath-checked), so a prompt-injected guest
+ * cannot use the robot as an arbitrary local-file exfiltration channel.
  */
 
-import { readFile, realpath } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { TextMessageContent, FileMessageContent } from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
+import { assertConfigSendablePath, requireOwnerTurn } from "./toolSecurity.js";
 
 function rawTool(name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) {
   return {
@@ -37,24 +42,50 @@ function rawTool(name: string, description: string, parameters: any, execute: (a
   };
 }
 
-function resultOf(response: any): any {
-  if (response == null) return null;
-  if (typeof response.getResult === "function") {
-    try { return response.getResult(); } catch { return null; }
+/** IMResult code (works for both the SDK class and plain objects). */
+function imCode(result: any): number {
+  if (result == null) return -1;
+  try {
+    if (typeof result.getCode === "function") return Number(result.getCode());
+  } catch {
+    return -1;
   }
-  return response.result ?? response;
+  return Number(result.code ?? -1);
 }
 
-async function assertWorkspaceFile(api: any, filePath: string): Promise<void> {
-  const text = String(filePath || "").trim();
-  if (!text || !path.isAbsolute(text)) throw new Error("path must be an absolute file path");
-  const real = await realpath(text);
-  let root = "";
-  try { root = await realpath(api?.workspace?.root?.() || ""); } catch { root = ""; }
-  if (!root) throw new Error("workspace root is unavailable; refusing to send an arbitrary file");
-  if (real !== root && !real.startsWith(root + path.sep)) {
-    throw new Error("file is outside the DSH workspace; refusing to send it");
+function imMsg(result: any): string {
+  if (result == null) return "";
+  try {
+    if (typeof result.getMsg === "function") return String(result.getMsg() ?? "");
+  } catch {
+    return "";
   }
+  return String(result.msg ?? "");
+}
+
+function imValue(result: any): any {
+  if (result == null) return null;
+  try {
+    if (typeof result.getResult === "function") return result.getResult();
+  } catch {
+    return null;
+  }
+  return result.result ?? null;
+}
+
+/** Throw on IM errors so the model sees a failure instead of "ok:true, null". */
+function unwrap(result: any, label: string): any {
+  const code = imCode(result);
+  if (code !== 0) {
+    const msg = imMsg(result);
+    throw new Error(`${label} failed: code=${code}${msg ? ` msg=${msg}` : ""}`);
+  }
+  return imValue(result);
+}
+
+/** Generic dispatch keeps the IM code visible while marking failures as ok:false. */
+function describeResult(result: any): any {
+  return { ok: imCode(result) === 0, code: imCode(result), msg: imMsg(result), result: toPlain(imValue(result)) };
 }
 
 function requireClient() {
@@ -63,11 +94,16 @@ function requireClient() {
   return client;
 }
 
+/**
+ * Advanced robot APIs exposed to the model. Privacy-sensitive owner/account
+ * APIs (getOwnerFriendList / getUserRobots / applicationGetUserInfo) are
+ * deliberately excluded: they leak data about the robot owner or other users.
+ */
 const ROBOT_API_METHODS = [
   "getMessage", "sendMessage", "sendMessageToUsers", "replyMessage", "recallMessage", "updateMessage",
   "updateConversationUserSetting",
   "getUserInfo", "getUserInfoByMobile", "getUserInfoByName", "getUserInfoByEmail", "getBatchUsers",
-  "applicationGetUserInfo", "getOwnerFriendList", "searchUserByDisplayName", "getUserRobots",
+  "searchUserByDisplayName",
   "getProfile", "updateProfile",
   "createGroup", "getGroupInfo", "dismissGroup", "transferGroup", "modifyGroupInfo",
   "getGroupMembers", "getGroupMember", "addGroupMembers", "setGroupManager", "muteGroupMember",
@@ -101,6 +137,22 @@ function toPlain(value: any, depth = 0): any {
   return String(value);
 }
 
+/** Normalize the different group-member list shapes to a plain array. */
+function memberListOf(value: any): any[] {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.members)) return value.members;
+  return [];
+}
+
+function currentWorkspaceRoot(api: any): string {
+  try {
+    const root = api?.workspace?.root?.();
+    return typeof root === "string" ? root : "";
+  } catch {
+    return "";
+  }
+}
+
 export function registerRobotTools(api: any): void {
   let tools: any;
   try {
@@ -125,7 +177,7 @@ export function registerRobotTools(api: any): void {
 
   tools.register(rawTool(
     "im_bot_create_group",
-    "Create a Wildfire group as the robot. memberIds are user ids (strings); the robot and `to` are added automatically. Returns a verified group id.",
+    "Create a Wildfire group as the robot. Owner/admin only. memberIds are user ids (strings); the robot and `to` are added automatically. Returns a verified group id.",
     {
       type: "object",
       properties: {
@@ -137,7 +189,8 @@ export function registerRobotTools(api: any): void {
       required: ["name", "memberIds"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_create_group");
       const client = requireClient();
       const name = String(args?.name || "").trim();
       if (!name) throw new Error("name is required");
@@ -153,19 +206,14 @@ export function registerRobotTools(api: any): void {
         aiLines,
         null
       );
-      const groupId = String(result?.result?.group_id || "").trim();
-      if (result?.code !== 0 || !groupId) {
-        throw new Error(`createGroup failed: code=${result?.code ?? "-"} msg=${result?.msg || "no group_id"}`);
-      }
+      const created = unwrap(result, "createGroup");
+      const groupId = String(created?.group_id || "").trim();
+      if (!groupId) throw new Error("createGroup returned success but no group_id");
       let verified = false;
       try {
-        const members = await client.getGroupMembers(groupId);
-        const raw: any = members?.result;
-        const list = Array.isArray(raw?.members) ? raw.members : (Array.isArray(raw) ? raw : []);
-        if (list.length) {
-          const ids = new Set(list.map((m: any) => String(m?.member_id || m?.memberId || "")));
-          verified = requested.every((m) => ids.has(m.member_id));
-        }
+        const members = memberListOf(unwrap(await client.getGroupMembers(groupId), "getGroupMembers"));
+        const ids = new Set(members.map((m: any) => String(m?.member_id || m?.memberId || "")));
+        verified = requested.every((m) => ids.has(m.member_id));
       } catch {
         verified = false;
       }
@@ -175,7 +223,7 @@ export function registerRobotTools(api: any): void {
 
   tools.register(rawTool(
     "im_bot_add_group_members",
-    "Add users to a Wildfire group as the robot. memberIds are user-id strings.",
+    "Add users to a Wildfire group as the robot. Owner/admin only. memberIds are user-id strings; membership is read back to verify.",
     {
       type: "object",
       properties: {
@@ -185,20 +233,28 @@ export function registerRobotTools(api: any): void {
       required: ["groupId", "memberIds"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_add_group_members");
       const client = requireClient();
       const groupId = String(args?.groupId || "").trim();
       const members = memberObjects(Array.isArray(args?.memberIds) ? args.memberIds : []);
       if (!groupId || !members.length) throw new Error("groupId and non-empty memberIds are required");
-      const result = await client.addGroupMembers(groupId, members, ownerId, aiLines, null);
-      if (result?.code !== 0) throw new Error(`addGroupMembers failed: ${result?.msg || result?.code}`);
-      return { ok: true, groupId, members: members.map((m) => m.member_id) };
+      unwrap(await client.addGroupMembers(groupId, members, ownerId, aiLines, null), "addGroupMembers");
+      let verified = false;
+      try {
+        const list = memberListOf(unwrap(await client.getGroupMembers(groupId), "getGroupMembers"));
+        const ids = new Set(list.map((m: any) => String(m?.member_id || m?.memberId || "")));
+        verified = members.every((m) => ids.has(m.member_id));
+      } catch {
+        verified = false;
+      }
+      return { ok: true, groupId, members: members.map((m) => m.member_id), verified };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_remove_group_members",
-    "Remove users from a Wildfire group as the robot. memberIds are user-id strings.",
+    "Remove users from a Wildfire group as the robot. Owner/admin only. memberIds are user-id strings.",
     {
       type: "object",
       properties: {
@@ -208,20 +264,20 @@ export function registerRobotTools(api: any): void {
       required: ["groupId", "memberIds"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_remove_group_members");
       const client = requireClient();
       const groupId = String(args?.groupId || "").trim();
       const ids = (Array.isArray(args?.memberIds) ? args.memberIds : []).map((v: any) => String(v || "").trim()).filter(Boolean);
       if (!groupId || !ids.length) throw new Error("groupId and non-empty memberIds are required");
-      const result = await client.kickoffGroupMembers(groupId, ids, aiLines, null);
-      if (result?.code !== 0) throw new Error(`kickoffGroupMembers failed: ${result?.msg || result?.code}`);
+      unwrap(await client.kickoffGroupMembers(groupId, ids, aiLines, null), "kickoffGroupMembers");
       return { ok: true, groupId, members: ids };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_transfer_group",
-    "Transfer a Wildfire group to a new owner as the robot.",
+    "Transfer a Wildfire group to a new owner as the robot. Owner/admin only.",
     {
       type: "object",
       properties: {
@@ -231,56 +287,57 @@ export function registerRobotTools(api: any): void {
       required: ["groupId", "newOwnerId"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_transfer_group");
       const client = requireClient();
-      const result = await client.transferGroup(
+      unwrap(await client.transferGroup(
         String(args?.groupId || "").trim(),
         String(args?.newOwnerId || "").trim(),
         aiLines,
         null
-      );
-      if (result?.code !== 0) throw new Error(`transferGroup failed: ${result?.msg || result?.code}`);
+      ), "transferGroup");
       return { ok: true };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_dismiss_group",
-    "Dismiss a Wildfire group as the robot.",
+    "Dismiss a Wildfire group as the robot. Owner/admin only.",
     {
       type: "object",
       properties: { groupId: { type: "string" } },
       required: ["groupId"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_dismiss_group");
       const client = requireClient();
-      const result = await client.dismissGroup(String(args?.groupId || "").trim(), aiLines, null);
-      if (result?.code !== 0) throw new Error(`dismissGroup failed: ${result?.msg || result?.code}`);
+      unwrap(await client.dismissGroup(String(args?.groupId || "").trim(), aiLines, null), "dismissGroup");
       return { ok: true };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_recall_message",
-    "Recall a message sent by the robot. messageUid must be a string.",
+    "Recall a message sent by the robot. Owner/admin only. messageUid must be a string.",
     {
       type: "object",
       properties: { messageUid: { type: "string" } },
       required: ["messageUid"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_recall_message");
       const client = requireClient();
-      const result = await client.recallMessage(String(args?.messageUid || ""));
-      if (result?.code !== 0) throw new Error(`recallMessage failed: ${result?.msg || result?.code}`);
-      return { ok: true, messageUid: String(args?.messageUid || "") };
+      const messageUid = String(args?.messageUid || "");
+      unwrap(await client.recallMessage(messageUid), "recallMessage");
+      return { ok: true, messageUid };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_send_message",
-    "Send a text message as the Wildfire robot. This is the robot identity, not the logged-in user.",
+    "Send a text message as the Wildfire robot. Owner/admin only. This is the robot identity, not the logged-in user.",
     {
       type: "object",
       properties: {
@@ -292,7 +349,8 @@ export function registerRobotTools(api: any): void {
       required: ["type", "target", "text"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_send_message");
       const client = requireClient();
       const content = new TextMessageContent();
       content.content = String(args?.text || "");
@@ -302,8 +360,7 @@ export function registerRobotTools(api: any): void {
         line: Number(args?.line) || 0,
       };
       const result = await client.sendMessage(conversation, content.encode());
-      if (!result?.isSuccess?.()) throw new Error(result?.getMsg?.() || "robot send failed");
-      const out = resultOf(result) || {};
+      const out = unwrap(result, "robot sendMessage") || {};
       return { ok: true, messageUid: String(out.messageUidString ?? out.messageUid ?? "") };
     }
   ));
@@ -319,7 +376,7 @@ export function registerRobotTools(api: any): void {
     },
     async (args: any) => {
       const client = requireClient();
-      return { user: resultOf(await client.getUserInfo(String(args?.userId || ""))) };
+      return { user: unwrap(await client.getUserInfo(String(args?.userId || "")), "getUserInfo") };
     }
   ));
 
@@ -334,7 +391,7 @@ export function registerRobotTools(api: any): void {
     },
     async (args: any) => {
       const client = requireClient();
-      return { group: resultOf(await client.getGroupInfo(String(args?.groupId || ""))) };
+      return { group: unwrap(await client.getGroupInfo(String(args?.groupId || "")), "getGroupInfo") };
     }
   ));
 
@@ -349,49 +406,56 @@ export function registerRobotTools(api: any): void {
     },
     async (args: any) => {
       const client = requireClient();
-      return { groupId: String(args?.groupId || ""), members: resultOf(await client.getGroupMembers(String(args?.groupId || ""))) || [] };
+      const groupId = String(args?.groupId || "");
+      const value = unwrap(await client.getGroupMembers(groupId), "getGroupMembers");
+      return { groupId, members: memberListOf(value) };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_send_file",
-    "Send a local file as the robot to a user or group. The path must be readable by the Host process.",
+    "Send a local file as the robot. Owner/admin only. The path must be inside the agent workspace.",
     {
       type: "object",
       properties: {
         type: { type: "integer", enum: [0, 1], description: "0 single user, 1 group." },
         target: { type: "string" },
         line: { type: "integer", minimum: 0 },
-        path: { type: "string", description: "Absolute local file path." },
+        path: { type: "string", description: "Local file path inside the workspace." },
         name: { type: "string", description: "Optional display file name." },
       },
       required: ["type", "target", "path"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_send_file");
       const client = requireClient();
-      const localPath = String(args?.path || "");
-      await assertWorkspaceFile(api, localPath);
+      // Restrict to workspace roots: arbitrary local files must not be exfiltrated.
+      const localPath = await assertConfigSendablePath(
+        String(args?.path || ""),
+        api?.config || {},
+        [currentWorkspaceRoot(api)]
+      );
       const data = await readFile(localPath);
       const name = String(args?.name || localPath.split(/[\\/]/).pop() || "file");
       const mediaType = 4; // MessageContentMediaType.File
       const upload = await client.uploadFile(data, name, mediaType, "application/octet-stream");
-      const remote = upload?.isSuccess?.() ? (upload.getResult?.() || "") : "";
-      if (!remote) throw new Error(upload?.getMsg?.() || "robot file upload failed");
+      const remote = unwrap(upload, "uploadFile") || "";
+      if (!remote) throw new Error("robot file upload failed: empty remote URL");
       const content = new FileMessageContent(null, remote, name, data.length);
       const result = await client.sendMessage({
         type: Number(args?.type) === 1 ? 1 : 0,
         target: String(args?.target || ""),
         line: Number(args?.line) || 0,
       }, content.encode());
-      if (!result?.isSuccess?.()) throw new Error(result?.getMsg?.() || "robot file send failed");
-      return { ok: true, remoteUrl: remote, messageUid: String(resultOf(result)?.messageUidString ?? "") };
+      const sent = unwrap(result, "robot sendMessage") || {};
+      return { ok: true, remoteUrl: remote, messageUid: String(sent.messageUidString ?? "") };
     }
   ));
 
   tools.register(rawTool(
     "im_bot_api",
-    "Call a RobotServiceClient method directly. Use this for advanced robot APIs not covered by the typed tools. `args` is the positional argument array.",
+    "Call a RobotServiceClient method directly. Owner/admin only. Use this for advanced robot APIs not covered by the typed tools. `args` is the positional argument array. Returns {ok, code, msg, result}; ok=false carries the IM error code.",
     {
       type: "object",
       properties: {
@@ -401,7 +465,8 @@ export function registerRobotTools(api: any): void {
       required: ["method"],
       additionalProperties: false,
     },
-    async (args: any) => {
+    async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, "im_bot_api");
       const client = requireClient();
       const method = String(args?.method || "");
       if (!ROBOT_API_METHODS.includes(method)) throw new Error(`unsupported robot API method: ${method}`);
@@ -409,9 +474,11 @@ export function registerRobotTools(api: any): void {
       if (typeof fn !== "function") throw new Error(`robot API method not available: ${method}`);
       const params = Array.isArray(args?.args) ? args.args : [];
       const result = await fn.apply(client, params);
-      return { ok: true, result: toPlain(result) };
+      return describeResult(result);
     }
   ));
 
-  api.logger?.info?.("[wildfire] robot tools registered: send_message, send_file, user_info, group_info, group_members, create_group/add/remove/transfer/dismiss/recall, api");
+  api.logger?.info?.(
+    "[wildfire] robot tools registered (owner-gated send/file/group/api): send_message, send_file, user_info, group_info, group_members, create_group/add/remove/transfer/dismiss/recall, api"
+  );
 }

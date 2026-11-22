@@ -24,7 +24,7 @@ import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { conversationKey, dshHomePath } from "./utils.js";
-import { turnOwners } from "./inbound.js";
+import { turnOwners } from "./turnContext.js";
 import { describeTurnFailure, extractTurnFailure, turnReasonKind } from "./failures.js";
 import { applyAsrHint } from "./asrPrompt.js";
 
@@ -742,6 +742,9 @@ const STREAM_THROTTLE_MS = 300;
                     `[wildfire-bridge] prompt failed group=${rec.groupId}: ${String(err?.message ?? err)}`
                 );
                 await sendGroupText(rec.groupId, rec.line, `桥接调用失败：${String(err?.message ?? err).slice(0, 200)}`);
+            } finally {
+                // 回合结束后清掉发送者，避免后续本地 Web UI 回合复用旧身份。
+                if (turnOwners.get(key) === String(sender)) turnOwners.delete(key);
             }
         },
         dispose(): void {

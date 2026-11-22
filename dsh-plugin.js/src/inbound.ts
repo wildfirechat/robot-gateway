@@ -28,6 +28,7 @@ import { handleMetadataMessage, publishGuestMetadata, routeMultiRobotMessage } f
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
 import { panelDebug } from "./panelDebug.js";
+import { turnOwners } from "./turnContext.js";
 import {
   CONV_TYPE_SINGLE,
   CONV_TYPE_GROUP,
@@ -226,9 +227,6 @@ function robotTokenMatches(token: string, config: any): boolean {
 }
 // Per-session serialization: only one agent turn per IM conversation at a time.
 const sessionQueues = new Map<string, Promise<void>>();
-
-// Sender who owns the in-flight turn per conversation (for interaction ownership).
-export const turnOwners = new Map<string, string>();
 
 // Per-conversation rate-limit windows (timestamps of the last minute).
 const rateWindows = new Map<string, number[]>();
@@ -804,6 +802,9 @@ async function runMainSessionTurn(
   const slot = new Promise<void>((resolve) => (release = resolve));
   sessionQueues.set(key, slot);
   await prev.catch(() => {});
+  // The main session is driven by the robot owner's DM; record it so privileged
+  // tools (im_user_*, send/file/group mutations) stay owner-only.
+  turnOwners.set(key, String(opts.sender));
 
   const streamId = `wildfire-main-${randomUUID()}`;
   const streaming = getStreamingConfig(config);
@@ -893,6 +894,7 @@ async function runMainSessionTurn(
   } finally {
     release();
     if (sessionQueues.get(key) === slot) sessionQueues.delete(key);
+    if (turnOwners.get(key) === String(opts.sender)) turnOwners.delete(key);
   }
 }
 

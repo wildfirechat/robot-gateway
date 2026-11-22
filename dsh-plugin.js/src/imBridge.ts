@@ -7,6 +7,8 @@
  * live-scoped to the current login and revoked on logout.
  */
 
+import { assertConfigSendablePath, requireOwnerTurn } from "./toolSecurity.js";
+
 type BridgeConfig = {
   url: string;
   token: string;
@@ -27,12 +29,15 @@ function bridgeConfig(): BridgeConfig | null {
 }
 
 async function bridgeRequest(
-  config: BridgeConfig,
   method: "GET" | "POST",
   path: string,
   query?: Record<string, string | number | undefined>,
   body?: unknown
 ): Promise<any> {
+  // Re-read env per request: the Electron bridge hands out a fresh token when
+  // the app restarts, and a start-time snapshot would keep 401-ing.
+  const config = bridgeConfig();
+  if (!config) throw new Error("IM bridge is not configured (WF_IM_BRIDGE_URL/TOKEN missing)");
   const url = new URL(config.url + path);
   for (const [key, value] of Object.entries(query || {})) {
     if (value !== undefined && value !== null && String(value) !== "") {
@@ -113,8 +118,15 @@ export function registerImBridgeTools(api: any): void {
     `[wildfire] IM user bridge tools: read=${config.readEnabled}, send=${config.sendEnabled}`
   );
 
+  /** Every current-user tool reads/sends the host user's IM data: owner/admin only. */
+  const secureTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
+    rawTool(name, description, parameters, async (args: any, exec: any) => {
+      requireOwnerTurn(api, exec, name);
+      return execute(args, exec);
+    });
+
   if (config.readEnabled) {
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_contacts",
       "List or search the current IM user's contacts. Use this for personal-assistant questions about contacts.",
       {
@@ -127,7 +139,7 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => {
-        const data = await bridgeRequest(config, "GET", "/im/contacts", {
+        const data = await bridgeRequest("GET", "/im/contacts", {
           query: args?.query,
           limit: args?.limit,
           offset: args?.offset,
@@ -136,7 +148,7 @@ export function registerImBridgeTools(api: any): void {
       }
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_contact",
       "Get one current-user contact's profile by user id.",
       {
@@ -146,13 +158,12 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/contacts/${encodeURIComponent(String(args?.userId || ""))}`
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_groups",
       "List or search the current IM user's groups.",
       {
@@ -164,14 +175,14 @@ export function registerImBridgeTools(api: any): void {
         },
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "GET", "/im/groups", {
+      async (args: any) => bridgeRequest("GET", "/im/groups", {
         query: args?.query,
         limit: args?.limit,
         offset: args?.offset,
       })
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_group",
       "Get one current-user group's details by group id.",
       {
@@ -181,13 +192,12 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/groups/${encodeURIComponent(String(args?.groupId || ""))}`
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_group_members",
       "List members of one of the current IM user's groups.",
       {
@@ -200,21 +210,20 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/groups/${encodeURIComponent(String(args.groupId || ""))}/members`,
         { limit: args?.limit }
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_organization_root",
       "Get the root organization of the current user's organization directory.",
       { type: "object", properties: {}, additionalProperties: false },
-      async () => bridgeRequest(config, "GET", "/im/organization/root")
+      async () => bridgeRequest("GET", "/im/organization/root")
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_organization",
       "Get one organization node and its sub-organizations.",
       {
@@ -224,13 +233,12 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/organization/${encodeURIComponent(String(args?.organizationId || ""))}`
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_organization_employees",
       "List employees directly under one organization node.",
       {
@@ -240,13 +248,12 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/organization/${encodeURIComponent(String(args?.organizationId || ""))}/employees`
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_search_employee",
       "Search employees in the organization directory.",
       {
@@ -258,13 +265,13 @@ export function registerImBridgeTools(api: any): void {
         required: ["query"],
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "GET", "/im/employees/search", {
+      async (args: any) => bridgeRequest("GET", "/im/employees/search", {
         query: args?.query,
         organizationId: args?.organizationId,
       })
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_channels",
       "List or search channels joined by the current IM user.",
       {
@@ -276,14 +283,14 @@ export function registerImBridgeTools(api: any): void {
         },
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "GET", "/im/channels", {
+      async (args: any) => bridgeRequest("GET", "/im/channels", {
         query: args?.query,
         limit: args?.limit,
         offset: args?.offset,
       })
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_channel",
       "Get one current-user channel's details by channel id.",
       {
@@ -293,13 +300,12 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(
-        config,
         "GET",
         `/im/channels/${encodeURIComponent(String(args?.channelId || ""))}`
       )
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_conversations",
       "List recent conversations of the current IM user with last-message summaries and unread counts.",
       {
@@ -310,13 +316,13 @@ export function registerImBridgeTools(api: any): void {
         },
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "GET", "/im/conversations", {
+      async (args: any) => bridgeRequest("GET", "/im/conversations", {
         limit: args?.limit,
         offset: args?.offset,
       })
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_messages",
       "Read messages in one current-user IM conversation, newest first.",
       {
@@ -332,7 +338,7 @@ export function registerImBridgeTools(api: any): void {
             required: ["type", "target"],
             additionalProperties: false,
           },
-          before: { type: "integer", description: "Message id cursor; omit for latest." },
+          before: { type: "string", description: "Message id cursor as a numeric string; omit for latest." },
           limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum messages." },
         },
         required: ["conversation"],
@@ -341,14 +347,14 @@ export function registerImBridgeTools(api: any): void {
       async (args: any) => {
         const conv = args?.conversation || {};
         const key = `${conv.type}:${conv.target}:${conv.line ?? 0}`;
-        return bridgeRequest(config, "GET", `/im/conversations/${encodeURIComponent(key)}/messages`, {
+        return bridgeRequest("GET", `/im/conversations/${encodeURIComponent(key)}/messages`, {
           before: args?.before,
           limit: args?.limit,
         });
       }
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_search_messages",
       "Search all local IM history of the current user; optionally restrict to one conversation.",
       {
@@ -375,7 +381,7 @@ export function registerImBridgeTools(api: any): void {
       },
       async (args: any) => {
         const conv = args?.conversation;
-        return bridgeRequest(config, "GET", "/im/messages/search", {
+        return bridgeRequest("GET", "/im/messages/search", {
           query: args?.query,
           limit: args?.limit,
           offset: args?.offset,
@@ -388,7 +394,7 @@ export function registerImBridgeTools(api: any): void {
   }
 
   if (config.sendEnabled) {
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_recall_message",
       "Recall one message as the current IM user. Only messages the user sent within the recall window can be recalled.",
       {
@@ -399,12 +405,12 @@ export function registerImBridgeTools(api: any): void {
         required: ["messageUid"],
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "POST", "/im/messages/recall", undefined, {
+      async (args: any) => bridgeRequest("POST", "/im/messages/recall", undefined, {
         messageUid: args?.messageUid,
       })
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_send_file",
       "Send a local file as the current IM user. The path must be readable by the client process.",
       {
@@ -426,16 +432,23 @@ export function registerImBridgeTools(api: any): void {
         required: ["conversation", "path"],
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "POST", "/im/messages/send_file", undefined, {
-        conversation: args?.conversation,
-        path: args?.path,
-        name: args?.name,
-      })
+      async (args: any) => {
+        const localPath = await assertConfigSendablePath(
+          String(args?.path || ""),
+          api?.config || {},
+          [(() => { try { const r = api?.workspace?.root?.(); return typeof r === "string" ? r : ""; } catch { return ""; } })()]
+        );
+        return bridgeRequest("POST", "/im/messages/send_file", undefined, {
+          conversation: args?.conversation,
+          path: localPath,
+          name: args?.name,
+        });
+      }
     ));
 
-    tools.register(rawTool(
+    tools.register(secureTool(
       "im_user_send_message",
-      "Send a text message as the current IM user. Requires the user's global send setting; approval may be required.",
+      "Send a text message as the current IM user. Owner/admin only; also requires the user's global send switch to be enabled.",
       {
         type: "object",
         properties: {
@@ -455,7 +468,7 @@ export function registerImBridgeTools(api: any): void {
         additionalProperties: false,
       },
       async (args: any) => {
-        return bridgeRequest(config, "POST", "/im/messages/send", undefined, {
+        return bridgeRequest("POST", "/im/messages/send", undefined, {
           conversation: args?.conversation,
           text: args?.text,
         });

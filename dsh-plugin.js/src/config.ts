@@ -260,6 +260,15 @@ export interface WildfireSecurityConfig {
    * admins can drive the agent; other members still see the conversation.
    */
   allowGuestTurns?: boolean;
+  /**
+   * Restrict privileged model tools (`im_user_*`, robot send/file/group
+   * mutations, `im_bot_api`) to turns started by the robot owner or an
+   * `access.adminUsers` entry. Default true: guest turns and sub-agent turns
+   * are denied. Set false only for a single trusted user deployment.
+   */
+  toolsOwnerOnly?: boolean;
+  /** Extra directories the file-send tools may read (besides the workspace roots). */
+  fileSendRoots?: string[];
 }
 
 export interface WildfireConfig {
@@ -480,5 +489,9 @@ export function getSecurityConfig(config: WildfireConfig): Required<WildfireSecu
   return {
     maxMessagesPerMinute: config.security?.maxMessagesPerMinute ?? 0,
     allowGuestTurns: config.security?.allowGuestTurns ?? true,
+    toolsOwnerOnly: config.security?.toolsOwnerOnly ?? true,
+    fileSendRoots: Array.isArray(config.security?.fileSendRoots)
+      ? config.security!.fileSendRoots.map((root) => String(root)).filter(Boolean)
+      : [],
   };
 }

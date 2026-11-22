@@ -6,7 +6,7 @@
  */
 
 import { startClient, stopClient, getConnectedClient, isClientReady } from "./clients.js";
-import { turnOwners } from "./inbound.js";
+import { turnOwners } from "./turnContext.js";
 import { getConfig, getSessionConfig, validateConfig } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { AgentSessionManager } from "./agent.js";
