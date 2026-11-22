@@ -1182,8 +1182,8 @@ export async function handleIncomingMessage(
   // Group members are unaffected — they are admitted by the group registry.
   if (conv.type === CONV_TYPE_SINGLE && api.access && !api.access.canUsePrivate(String(sender))) {
     auditPermission(api, "admission.denied", String(sender), conv, { reason: "private-owner-only" });
-    api.logger?.info?.(`[wildfire] private chat denied: sender=${sender} is not owner/admin`);
-    await sendDirectReply(sender, conv, "无权限使用：该机器人仅限 owner 私聊", api);
+    api.logger?.info?.(`[wildfire] private chat ignored: sender=${sender} is not owner/admin`);
+    // 非 owner 私聊不回复、不进入 Agent；避免陌生人驱动工具或产生噪音。
     return;
   }
 
@@ -1578,13 +1578,12 @@ export async function handleIncomingMessage(
     !isRobotOwner(String(sender), api) &&
     !api.access?.canRunCommand?.(String(sender))
   ) {
-    try {
-      await sendDirectReply(sender, conv, "当前群仅允许创建者发起 Agent 任务", api);
-    } finally {
-      release();
-      if (sessionQueues.get(key) === slot) {
-        sessionQueues.delete(key);
-      }
+    auditPermission(api, "admission.denied", String(sender), conv, { reason: "non-owner-group-turn" });
+    api.logger?.info?.(`[wildfire] group turn ignored: sender=${sender} is not robot owner/admin`);
+    // 非 owner 的群指令静默忽略：不调用模型、不回复、不触发任何工具。
+    release();
+    if (sessionQueues.get(key) === slot) {
+      sessionQueues.delete(key);
     }
     return;
   }

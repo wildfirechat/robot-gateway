@@ -4,7 +4,8 @@
  * user's local data (that is the separate im_user_* bridge).
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import path from "node:path";
 import { TextMessageContent, FileMessageContent } from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
@@ -42,6 +43,18 @@ function resultOf(response: any): any {
     try { return response.getResult(); } catch { return null; }
   }
   return response.result ?? response;
+}
+
+async function assertWorkspaceFile(api: any, filePath: string): Promise<void> {
+  const text = String(filePath || "").trim();
+  if (!text || !path.isAbsolute(text)) throw new Error("path must be an absolute file path");
+  const real = await realpath(text);
+  let root = "";
+  try { root = await realpath(api?.workspace?.root?.() || ""); } catch { root = ""; }
+  if (!root) throw new Error("workspace root is unavailable; refusing to send an arbitrary file");
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new Error("file is outside the DSH workspace; refusing to send it");
+  }
 }
 
 function requireClient() {
@@ -358,6 +371,7 @@ export function registerRobotTools(api: any): void {
     async (args: any) => {
       const client = requireClient();
       const localPath = String(args?.path || "");
+      await assertWorkspaceFile(api, localPath);
       const data = await readFile(localPath);
       const name = String(args?.name || localPath.split(/[\\/]/).pop() || "file");
       const mediaType = 4; // MessageContentMediaType.File
