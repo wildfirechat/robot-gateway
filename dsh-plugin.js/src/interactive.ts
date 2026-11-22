@@ -226,6 +226,8 @@ interface PendingApproval {
   /** Who started the turn this approval belongs to (shown on the card). */
   requestedBy?: string;
   cardMessageId?: string;
+  /** true = 写操作确认，不是 DSH 工具审批。 */
+  writeConfirmation?: boolean;
 }
 
 /** Card status payloads for updateMessage (button states + user selection). */
@@ -533,7 +535,20 @@ export class InteractionManager {
     sender: string,
     isAdmin = false
   ): boolean {
-    const approval = this.pendingApprovals.get(key);
+    let approvalKey = key;
+    let approval = this.pendingApprovals.get(key);
+    if (!approval || approval.aid !== payload.aid) {
+      // Write confirmations are delivered to the owner's private chat, which
+      // may differ from the conversation that requested the write.
+      approval = undefined;
+      for (const [candidateKey, candidate] of this.pendingApprovals) {
+        if (candidate.aid === payload.aid) {
+          approval = candidate;
+          approvalKey = candidateKey;
+          break;
+        }
+      }
+    }
     if (!approval || approval.aid !== payload.aid) return false;
     if (!this.canDecide(approval.ownerSender, sender, isAdmin)) {
       this.audit?.record("interaction.denied", {
@@ -546,7 +561,7 @@ export class InteractionManager {
       });
       return false;
     }
-    this.pendingApprovals.delete(key);
+    this.pendingApprovals.delete(approvalKey);
     clearTimeout(approval.timer);
     const outcome = payload.action === "approve" ? "allowed-once" : "rejected";
     this.audit?.record("approval.decided", {
@@ -568,7 +583,7 @@ export class InteractionManager {
       ...(approval.requestedBy ? { requestedBy: approval.requestedBy } : {}),
       action: payload.action,
     });
-    this.pushStatus(key, { state: "running" });
+    if (approvalKey) this.pushStatus(approvalKey, { state: "running" });
     return true;
   }
 
@@ -1349,6 +1364,92 @@ export class InteractionManager {
         timer,
         ownerSender,
         cardMessageId,
+      });
+    });
+  }
+
+  /**
+   * Ask the robot owner (in the owner's private chat) to confirm one write
+   * operation. Reuses the existing 202 card / pending / race machinery so
+   * mobile and PC need no new protocol.
+   */
+  async requestWriteConfirmation(key: string, req: {
+    toolName: string;
+    reason?: string;
+    action?: string;
+    preview?: string;
+  }): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable"> {
+    const owner = String(this.resolveRobotOwner?.() || "").trim();
+    if (!owner) return "unavailable";
+    if (key && this.pendingApprovals.has(key)) return "unavailable";
+
+    const aid = randomUUID();
+    const turnOwner = this.resolveTurnOwner(key);
+    const data: AgentApprovalPayload = {
+      aid,
+      toolName: req.toolName,
+      reason: req.reason || req.preview || "写操作确认",
+      ...(turnOwner ? { requestedBy: turnOwner } : {}),
+      ...(turnOwner !== owner ? { approver: owner } : {}),
+    };
+    const target: ConversationTarget = {
+      sender: owner,
+      conv: { type: 0, target: owner, line: 0 },
+      // The card is always delivered to the owner's private chat, never to a
+      // group where the write was requested.
+    } as ConversationTarget;
+    let cardMessageId: string | undefined;
+    try {
+      cardMessageId = await this.cards.sendCard(
+        target,
+        AGENT_TYPE.APPROVAL,
+        data,
+        summarizeApproval(data),
+        1
+      );
+    } catch (err: any) {
+      this.logger?.warn?.(`[wildfire] write confirmation card send failed: ${err.message}`);
+      return "unavailable";
+    }
+
+    this.audit?.record("write.confirmation.requested", {
+      actor: turnOwner,
+      conversation: key,
+      aid,
+      action: req.action || req.toolName,
+      requestedBy: turnOwner,
+      approver: owner,
+      preview: req.preview,
+    });
+    this.logger?.info?.(
+      `[wildfire] write confirmation requested: key=${key || "(no-session)"}, action=${req.action || req.toolName}, approver=${owner}`
+    );
+    if (key) this.pushStatus(key, { state: "waiting_user", interaction: "approval" });
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingApprovals.delete(key);
+        this.audit?.record("write.confirmation.timeout", {
+          conversation: key,
+          aid,
+          action: req.action || req.toolName,
+          approver: owner,
+        });
+        this.updateCardState(cardMessageId, "approval", "expired");
+        if (key) this.pushStatus(key, { state: "running" });
+        resolve("cancelled");
+      }, this.config.approvalTimeoutMs);
+      timer.unref?.();
+      this.pendingApprovals.set(key, {
+        key,
+        aid,
+        toolName: data.toolName,
+        ...(data.reason ? { reason: data.reason } : {}),
+        resolve: (outcome: string) => resolve(outcome as any),
+        timer,
+        ownerSender: owner,
+        requestedBy: turnOwner,
+        cardMessageId,
+        writeConfirmation: true,
       });
     });
   }

@@ -7,32 +7,49 @@
  * live-scoped to the current login and revoked on logout.
  */
 
-import { assertConfigSendablePath, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { assertConfigSendablePath, confirmWriteAction, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
 
 type BridgeConfig = {
   url: string;
   token: string;
   readEnabled: boolean;
   sendEnabled: boolean;
+  writeConfirmEnabled: boolean;
+  confirmSecret: string;
 };
 
+let bridgeConfigCache: BridgeConfig | null | undefined;
+
 function bridgeConfig(): BridgeConfig | null {
+  if (bridgeConfigCache !== undefined) return bridgeConfigCache;
   const url = String(process.env.WF_IM_BRIDGE_URL || "").trim();
   const token = String(process.env.WF_IM_BRIDGE_TOKEN || "").trim();
-  if (!url || !token) return null;
-  return {
+  if (!url || !token) {
+    bridgeConfigCache = null;
+    return null;
+  }
+  bridgeConfigCache = {
     url: url.replace(/\/+$/, ""),
     token,
     readEnabled: process.env.WF_IM_BRIDGE_READ !== "0",
     sendEnabled: process.env.WF_IM_BRIDGE_SEND === "1",
+    writeConfirmEnabled: process.env.WF_IM_BRIDGE_WRITE_CONFIRM !== "0",
+    confirmSecret: String(process.env.WF_IM_BRIDGE_CONFIRM_SECRET || ""),
   };
+  // Secrets are copied into this plugin's memory; remove them from the Host
+  // environment so later shell tools cannot read them.
+  delete process.env.WF_IM_BRIDGE_CONFIRM_SECRET;
+  delete process.env.WF_IM_BRIDGE_TOKEN;
+  return bridgeConfigCache;
 }
 
 async function bridgeRequest(
   method: "GET" | "POST",
   path: string,
   query?: Record<string, string | number | undefined>,
-  body?: unknown
+  body?: unknown,
+  extraHeaders?: Record<string, string>
 ): Promise<any> {
   // Re-read env per request: the Electron bridge hands out a fresh token when
   // the app restarts, and a start-time snapshot would keep 401-ing.
@@ -52,6 +69,7 @@ async function bridgeRequest(
       headers: {
         "X-DSH-Bridge-Token": config.token,
         "Content-Type": "application/json",
+        ...(extraHeaders || {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
@@ -67,6 +85,54 @@ async function bridgeRequest(
   } finally {
     clearTimeout(timer);
   }
+}
+
+function writeTargetOf(action: string, body: any): string {
+  if (action === "recall") return String(body?.messageUid || "");
+  const conv = body?.conversation || {};
+  return `${Number(conv.type) || 0}:${String(conv.target || "")}:${Number(conv.line) || 0}`;
+}
+
+async function issueWriteConfirmation(api: any, exec: any, config: BridgeConfig, action: string, body: any, preview: string): Promise<string> {
+  if (!config.confirmSecret) throw new Error("write confirmation secret is unavailable");
+  if (config.writeConfirmEnabled) {
+    await confirmWriteAction(api, exec, action, preview);
+  }
+  const argsHash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+  const claim = {
+    v: 1,
+    action,
+    key: String((() => {
+      const sid = String(exec?.agent?.id ?? exec?.agent?.session?.id ?? "");
+      return sid ? api?.wildfireAgents?.keyForSessionId?.(sid) || "" : "";
+    })()),
+    target: writeTargetOf(action, body),
+    argsHash,
+    exp: Date.now() + 60_000,
+    nonce: randomUUID(),
+  };
+  const encoded = Buffer.from(JSON.stringify(claim)).toString("base64url");
+  const sig = createHmac("sha256", config.confirmSecret).update(encoded).digest("base64url");
+  const registered = await bridgeRequest("POST", "/im/write-confirm", undefined, {
+    token: `${encoded}.${sig}`,
+  });
+  const nonce = String(registered?.nonce || "");
+  if (!nonce) throw new Error("write confirmation was not registered");
+  return nonce;
+}
+
+async function writeBridgeRequest(
+  api: any,
+  exec: any,
+  action: string,
+  path: string,
+  body: any,
+  preview: string
+): Promise<any> {
+  const config = bridgeConfig();
+  if (!config) throw new Error("IM bridge is not configured");
+  const nonce = await issueWriteConfirmation(api, exec, config, action, body, preview);
+  return bridgeRequest("POST", path, undefined, body, { "X-Write-Confirm": nonce });
 }
 
 function rawTool(name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) {
@@ -416,9 +482,9 @@ export function registerImBridgeTools(api: any): void {
         required: ["messageUid"],
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest("POST", "/im/messages/recall", undefined, {
+      async (args: any, exec: any) => writeBridgeRequest(api, exec, "recall", "/im/messages/recall", {
         messageUid: args?.messageUid,
-      })
+      }, `撤回消息 ${String(args?.messageUid || "")}`)
     ));
 
     tools.register(secureWriteTool(
@@ -443,17 +509,18 @@ export function registerImBridgeTools(api: any): void {
         required: ["conversation", "path"],
         additionalProperties: false,
       },
-      async (args: any) => {
+      async (args: any, exec: any) => {
         const localPath = await assertConfigSendablePath(
           String(args?.path || ""),
           api?.config || {},
           [(() => { try { const r = api?.workspace?.root?.(); return typeof r === "string" ? r : ""; } catch { return ""; } })()]
         );
-        return bridgeRequest("POST", "/im/messages/send_file", undefined, {
+        const conv = args?.conversation || {};
+        return writeBridgeRequest(api, exec, "send_file", "/im/messages/send_file", {
           conversation: args?.conversation,
           path: localPath,
           name: args?.name,
-        });
+        }, `以当前用户身份发送文件到 ${Number(conv.type) || 0}:${String(conv.target || "")}:${Number(conv.line) || 0}，文件 ${localPath}`);
       }
     ));
 
@@ -478,11 +545,12 @@ export function registerImBridgeTools(api: any): void {
         required: ["conversation", "text"],
         additionalProperties: false,
       },
-      async (args: any) => {
-        return bridgeRequest("POST", "/im/messages/send", undefined, {
+      async (args: any, exec: any) => {
+        const conv = args?.conversation || {};
+        return writeBridgeRequest(api, exec, "send", "/im/messages/send", {
           conversation: args?.conversation,
           text: args?.text,
-        });
+        }, `以当前用户身份发送到 ${Number(conv.type) || 0}:${String(conv.target || "")}:${Number(conv.line) || 0}：${String(args?.text || "").slice(0, 200)}`);
       }
     ));
   }

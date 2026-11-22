@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import { TextMessageContent, FileMessageContent } from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
-import { assertConfigSendablePath, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
+import { assertConfigSendablePath, confirmWriteAction, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
 
 function rawTool(name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) {
   return {
@@ -179,8 +179,13 @@ const secureReadTool = (name: string, description: string, parameters: any, exec
 const secureWriteTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
   rawTool(name, description, parameters, async (args: any, exec: any) => {
     requireWriteTurn(api, exec, name);
+    await confirmWriteAction(api, exec, name, `机器人写操作：${name} ${safePreview(args)}`);
     return execute(args, exec);
   });
+
+function safePreview(value: any): string {
+  try { return JSON.stringify(value).slice(0, 500); } catch { return ""; }
+}
 
 
   const robotId = String(api?.config?.robotId || "");

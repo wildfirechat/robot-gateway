@@ -119,6 +119,29 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
     }
 }
 
+/**
+ * Ask the owner to confirm one write action via the existing 202 card. The
+ * card is delivered to the owner's private chat by InteractionManager.
+ * Disabled only when the deployment explicitly sets
+ * WF_IM_BRIDGE_WRITE_CONFIRM=0.
+ */
+export async function confirmWriteAction(api: any, exec: any, action: string, preview: string): Promise<void> {
+    if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0") return;
+    const interactions = api?.interactions;
+    if (!interactions || typeof interactions.requestWriteConfirmation !== "function") {
+        throw new Error(`${action}: 写操作确认服务不可用，已拒绝`);
+    }
+    const key = resolveSessionKey(api, exec) || "";
+    const outcome = await interactions.requestWriteConfirmation(key, {
+        toolName: action,
+        action,
+        preview,
+    });
+    if (outcome !== "allowed-once") {
+        throw new Error(`${action}: owner 未批准写操作（${String(outcome)}）`);
+    }
+}
+
 /** Directories the file-send tools are allowed to read from (realpath-checked). */
 export function resolveSendRoots(config: WildfireConfig): string[] {
     const workspace = getWorkspaceConfig(config);

@@ -401,6 +401,9 @@ export function apply(ctx: any, config: any): void {
           for (;;) {
             try {
               await startClient(api, cfg);
+              // The gateway client has the secret in memory; remove it from the
+              // Host environment so agent shell/terminal tools cannot read it.
+              delete process.env.WF_ROBOT_SECRET;
               break;
             } catch (err: any) {
               attempt += 1;
