@@ -68,6 +68,18 @@ public class RobotProxy {
                 String error = validateGroupMembers(method, params.get(1));
                 if (error != null) return ResponseMessage.error(requestId, 400, error);
             }
+            if (("setGroupManager".equals(method) || "muteGroupMember".equals(method)
+                    || "allowGroupMember".equals(method) || "kickoffGroupMembers".equals(method))
+                    && params != null && params.size() > 1) {
+                String error = validateStringMemberIds(method, params.get(1));
+                if (error != null) return ResponseMessage.error(requestId, 400, error);
+            }
+            if (("getMessage".equals(method) || "replyMessage".equals(method)
+                    || "recallMessage".equals(method) || "updateMessage".equals(method))
+                    && params != null && !params.isEmpty()) {
+                String error = validateMessageId(method, params.get(0));
+                if (error != null) return ResponseMessage.error(requestId, 400, error);
+            }
 
             // 查找方法
             Method targetMethod = findMethod(robotService.getClass(), method, params);
@@ -94,6 +106,13 @@ public class RobotProxy {
                 }
             }
 
+            if ("getGroupInfo".equals(method) && result instanceof IMResult) {
+                IMResult<?> imResult = (IMResult<?>) result;
+                if (imResult.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS && imResult.getResult() == null) {
+                    return ResponseMessage.error(requestId, 404, "group not found: " + String.valueOf(params == null || params.isEmpty() ? "" : params.get(0)));
+                }
+            }
+
             if("getProfile".equals(method) && result instanceof IMResult) {
                 IMResult<OutputRobot> imResult = (IMResult<OutputRobot>)result;
                 if(imResult.getErrorCode() == ErrorCode.ERROR_CODE_SUCCESS && imResult.getResult() != null) {
@@ -111,6 +130,30 @@ public class RobotProxy {
             LOG.error("Failed to execute method {}: {}", method, e.getMessage(), e);
             return ResponseMessage.error(requestId, 500, "Failed to execute: " + e.getMessage());
         }
+    }
+
+    /** Manager/mute/allow/kick APIs use bare user-id strings, unlike createGroup. */
+    private String validateStringMemberIds(String method, Object rawMembers) {
+        if (!(rawMembers instanceof List)) {
+            return method + ": members must be an array of user-id strings";
+        }
+        List<?> members = (List<?>) rawMembers;
+        if (members.isEmpty()) return method + ": members must not be empty";
+        for (int i = 0; i < members.size(); i++) {
+            Object item = members.get(i);
+            if (!(item instanceof String) || ((String) item).trim().isEmpty()) {
+                return method + ": members[" + i + "] must be a user-id string (not a { member_id } object)";
+            }
+        }
+        return null;
+    }
+
+    /** Message id/UID params are long values; JS must send them as numeric strings. */
+    private String validateMessageId(String method, Object rawMessageId) {
+        if (!(rawMessageId instanceof String) || !((String) rawMessageId).matches("\\d+")) {
+            return method + ": messageId/messageUid must be a non-empty numeric string (JS number loses precision)";
+        }
+        return null;
     }
 
     /**

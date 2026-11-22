@@ -28,6 +28,30 @@ function assertGroupMembers(method, members) {
     return members;
 }
 
+/**
+ * Group-manager / mute / allow / kick APIs take a list of bare user-id strings.
+ * Keep this distinct from createGroup/addGroupMembers, which take objects.
+ */
+function assertStringMemberIds(method, members) {
+    if (!Array.isArray(members) || members.length === 0) {
+        throw new TypeError(`${method}: members must be a non-empty array of user-id strings`);
+    }
+    members.forEach((member, index) => {
+        if (typeof member !== 'string' || member.length === 0) {
+            throw new TypeError(`${method}: members[${index}] must be a user-id string (this API does not take { member_id } objects)`);
+        }
+    });
+    return members;
+}
+
+/** Long message ids/UIDs must travel as strings to avoid JS number precision loss. */
+function assertMessageId(method, messageId) {
+    if (typeof messageId !== 'string' || messageId.length === 0 || !/^\d+$/.test(messageId)) {
+        throw new TypeError(`${method}: messageId/messageUid must be a non-empty numeric string`);
+    }
+    return messageId;
+}
+
 export class RobotServiceClient {
     /**
      * 创建客户端实例
@@ -137,6 +161,9 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async sendMessage(conversation, payload) {
+        if (!conversation || typeof conversation !== 'object' || !payload || typeof payload !== 'object') {
+            throw new TypeError('sendMessage: conversation and payload objects are required');
+        }
         return this.invoke('sendMessage', [this.getRobotId(), conversation, payload]);
     }
 
@@ -159,6 +186,8 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async replyMessage(messageId, payload, mentionSender) {
+        assertMessageId('replyMessage', messageId);
+        if (!payload || typeof payload !== 'object') throw new TypeError('replyMessage: payload is required');
         return this.invoke('replyMessage', [messageId, payload, mentionSender]);
     }
 
@@ -168,9 +197,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async recallMessage(messageId) {
-        if (typeof messageId !== 'string' || messageId.length === 0) {
-            return new IMResult(-1, 'messageId 是超长 long，必须传非空字符串（JS number 会丢失精度）', null);
-        }
+        assertMessageId('recallMessage', messageId);
         return this.invoke('recallMessage', [messageId]);
     }
 
@@ -181,6 +208,8 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async updateMessage(messageId, payload) {
+        assertMessageId('updateMessage', messageId);
+        if (!payload || typeof payload !== 'object') throw new TypeError('updateMessage: payload is required');
         return this.invoke('updateMessage', [messageId, payload]);
     }
 
@@ -404,6 +433,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async setGroupManager(groupId, members, isManager, lines, payload) {
+        assertStringMemberIds('setGroupManager', members);
         return this.invoke('setGroupManager', [groupId, members, isManager, lines, payload]);
     }
 
@@ -417,6 +447,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async muteGroupMember(groupId, members, mute, lines, payload) {
+        assertStringMemberIds('muteGroupMember', members);
         return this.invoke('muteGroupMember', [groupId, members, mute, lines, payload]);
     }
 
@@ -430,6 +461,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async allowGroupMember(groupId, members, allow, lines, payload) {
+        assertStringMemberIds('allowGroupMember', members);
         return this.invoke('allowGroupMember', [groupId, members, allow, lines, payload]);
     }
 
@@ -442,6 +474,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async kickoffGroupMembers(groupId, members, lines, payload) {
+        assertStringMemberIds('kickoffGroupMembers', members);
         return this.invoke('kickoffGroupMembers', [groupId, members, lines, payload]);
     }
 

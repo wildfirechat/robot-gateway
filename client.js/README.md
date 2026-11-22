@@ -68,7 +68,7 @@ async function main() {
         searchableContent: 'Hello from Node.js!'
     };
     
-    const result = await client.sendMessage('FireRobot', conversation, payload);
+    const result = await client.sendMessage(conversation, payload);
     if (result.isSuccess()) {
         console.log('发送成功，消息ID:', result.getResult().messageUid);
     } else {
@@ -98,17 +98,17 @@ client.isAuthenticated();
 ### 消息相关
 
 ```javascript
-// 发送消息
-await client.sendMessage(fromUser, conversation, payload);
+// 发送消息（robotId 由 SDK 自动带上，不需要传 fromUser）
+await client.sendMessage(conversation, payload);
 
-// 回复消息
-await client.replyMessage(fromUser, message, payload);
+// 回复消息（messageId 是超长 long，必须传数字字符串）
+await client.replyMessage(messageId, payload, mentionSender);
 
-// 撤回消息
-await client.recallMessage(fromUser, messageId);
+// 撤回消息（messageId 是超长 long，必须传数字字符串）
+await client.recallMessage(messageId);
 
-// 更新消息
-await client.updateMessage(fromUser, messageId, payload);
+// 更新消息（messageId 是超长 long，必须传数字字符串）
+await client.updateMessage(messageId, payload);
 ```
 
 ### 用户相关
@@ -133,13 +133,16 @@ await client.applicationGetUserInfo(applicationId, userId);
 // 群组 API 的 members 不是字符串 ID 数组，而是对象数组：
 //   [{ member_id: "userId", type: 0 }, ...]
 // 建群成功后必须检查 result.group_id 非空；群成员操作后建议再回读一次。
+// lines 是会话线路数组：普通会话传 [0]；只有需要发到 Agent 线路时才传 [2]。
+// to 是邀请者 user id，服务端会把它写入每个成员的 extra 字段，业务若使用
+// member.extra 需注意不要和这里冲突。
 const members = [
     { member_id: 'ownerUserId', type: 0 },
     { member_id: 'robotId', type: 0 },
 ];
 
 // 创建群组（5 个参数，to 不能省略）
-await client.createGroup({ name: '群名', portrait: '', join_type: 2 }, members, 'ownerUserId', [2], null);
+await client.createGroup({ name: '群名', portrait: '', join_type: 2 }, members, 'ownerUserId', [0], null);
 
 // 获取群组信息
 await client.getGroupInfo(groupId);
@@ -156,23 +159,26 @@ await client.modifyGroupInfo(groupId, modifyType, value, lines, payload);
 // 获取群组成员
 await client.getGroupMembers(groupId);
 
-// 添加群成员（members 同样是对象数组）
+// 添加群成员（对象数组）
 await client.addGroupMembers(groupId, members, to, lines, payload);
 
-// 踢出群成员（这些接口使用字符串成员 ID 数组）
+// 以下管理接口使用字符串成员 ID 数组，不是对象数组：
+const memberIds = ['userId1', 'userId2'];
+
+// 踢出群成员
 await client.kickoffGroupMembers(groupId, memberIds, lines, payload);
 
 // 退出群组
 await client.quitGroup(groupId, lines, payload);
 
-// 设置群管理员
-await client.setGroupManager(groupId, members, isManager, lines, payload);
+// 设置群管理员（字符串成员 ID）
+await client.setGroupManager(groupId, memberIds, true, lines, payload);
 
-// 禁言群成员
-await client.muteGroupMember(groupId, members, mute, lines, payload);
+// 禁言群成员（字符串成员 ID）
+await client.muteGroupMember(groupId, memberIds, true, lines, payload);
 
-// 允许群成员发言
-await client.allowGroupMember(groupId, members, allow, lines, payload);
+// 允许群成员发言（字符串成员 ID）
+await client.allowGroupMember(groupId, memberIds, true, lines, payload);
 ```
 
 ### 机器人资料
