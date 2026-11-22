@@ -15,7 +15,19 @@ function rawTool(name: string, description: string, parameters: any, execute: (a
     parameters,
     output: {
       schema: { type: "object", additionalProperties: true },
-      render: () => null,
+      // DSH expects render() to return tool-result content blocks; returning
+      // null makes the session surface read .some on null and fails the tool.
+      render: (_args: any, value: any) => [{
+        type: "text",
+        text: (() => {
+          try {
+            const text = JSON.stringify(value);
+            return text.length > 20000 ? `${text.slice(0, 20000)}…` : text;
+          } catch {
+            return String(value);
+          }
+        })(),
+      }],
     },
     async execute(args: any, exec: any) {
       return execute(args, exec);
