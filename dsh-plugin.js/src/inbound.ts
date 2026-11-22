@@ -28,7 +28,7 @@ import { handleMetadataMessage, publishGuestMetadata, routeMultiRobotMessage } f
 import { WhitelistFilter } from "./whitelist.js";
 import { AgentSessionManager } from "./agent.js";
 import { panelDebug } from "./panelDebug.js";
-import { turnOwners } from "./turnContext.js";
+import { clearTurnTrust, markTurnSource, turnOwners } from "./turnContext.js";
 import {
   CONV_TYPE_SINGLE,
   CONV_TYPE_GROUP,
@@ -803,8 +803,10 @@ async function runMainSessionTurn(
   sessionQueues.set(key, slot);
   await prev.catch(() => {});
   // The main session is driven by the robot owner's DM; record it so privileged
-  // tools (im_user_*, send/file/group mutations) stay owner-only.
+  // tools (im_user_*, send/file/group mutations) stay owner-only. Its turn
+  // context includes untrusted group history, so writes are not trusted here.
   turnOwners.set(key, String(opts.sender));
+  markTurnSource(key, false);
 
   const streamId = `wildfire-main-${randomUUID()}`;
   const streaming = getStreamingConfig(config);
@@ -895,6 +897,7 @@ async function runMainSessionTurn(
     release();
     if (sessionQueues.get(key) === slot) sessionQueues.delete(key);
     if (turnOwners.get(key) === String(opts.sender)) turnOwners.delete(key);
+  clearTurnTrust(key);
   }
 }
 
@@ -1599,7 +1602,16 @@ export async function handleIncomingMessage(
   let asrAttempted = false;
 
   // This conversation's turn is owned by the sender until the turn completes.
+  // Only a direct text message authored by the robot owner can authorize write
+  // tools; quoted/forwarded/attachment/voice content is read-only context.
   turnOwners.set(key, String(sender));
+  markTurnSource(
+    key,
+    isRobotOwner(String(sender), api)
+      && payloadType === MESSAGE_TYPE_TEXT
+      && !quote
+      && !mediaUrl
+  );
 
   try {
     // Voice + ASR: transcribe first so the agent gets the spoken text.
@@ -1970,6 +1982,7 @@ export async function handleIncomingMessage(
       sessionQueues.delete(key);
     }
     turnOwners.delete(key);
+  clearTurnTrust(key);
     cleanupTemp(media?.tempPath);
   }
 }

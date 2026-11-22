@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import { TextMessageContent, FileMessageContent } from "@wildfirechat/server-sdk";
 import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
-import { assertConfigSendablePath, requireOwnerTurn } from "./toolSecurity.js";
+import { assertConfigSendablePath, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
 
 function rawTool(name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) {
   return {
@@ -166,6 +166,23 @@ export function registerRobotTools(api: any): void {
     return;
   }
 
+const secureReadTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
+  rawTool(name, description, parameters, async (args: any, exec: any) => {
+    requireOwnerTurn(api, exec, name);
+    try {
+      return await execute(args, exec);
+    } finally {
+      markReadResultTainted(api, exec);
+    }
+  });
+
+const secureWriteTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
+  rawTool(name, description, parameters, async (args: any, exec: any) => {
+    requireWriteTurn(api, exec, name);
+    return execute(args, exec);
+  });
+
+
   const robotId = String(api?.config?.robotId || "");
   const ownerId = String(api?.robotOwner || process.env.WF_OWNER_USER_ID || "");
   const aiLines = [getAiLine(api?.config || {})];
@@ -175,7 +192,7 @@ export function registerRobotTools(api: any): void {
     .filter(Boolean)
     .map((id) => ({ member_id: id, type: 0 }));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_create_group",
     "Create a Wildfire group as the robot. Owner/admin only. memberIds are user ids (strings); the robot and `to` are added automatically. Returns a verified group id.",
     {
@@ -221,7 +238,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_add_group_members",
     "Add users to a Wildfire group as the robot. Owner/admin only. memberIds are user-id strings; membership is read back to verify.",
     {
@@ -252,7 +269,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_remove_group_members",
     "Remove users from a Wildfire group as the robot. Owner/admin only. memberIds are user-id strings.",
     {
@@ -275,7 +292,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_transfer_group",
     "Transfer a Wildfire group to a new owner as the robot. Owner/admin only.",
     {
@@ -300,7 +317,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_dismiss_group",
     "Dismiss a Wildfire group as the robot. Owner/admin only.",
     {
@@ -317,7 +334,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_recall_message",
     "Recall a message sent by the robot. Owner/admin only. messageUid must be a string.",
     {
@@ -335,7 +352,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_send_message",
     "Send a text message as the Wildfire robot. Owner/admin only. This is the robot identity, not the logged-in user.",
     {
@@ -365,7 +382,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureReadTool(
     "im_bot_user_info",
     "Get a Wildfire user profile visible to the robot.",
     {
@@ -380,7 +397,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureReadTool(
     "im_bot_group_info",
     "Get Wildfire group information visible to the robot.",
     {
@@ -395,7 +412,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureReadTool(
     "im_bot_group_members",
     "List members of a Wildfire group visible to the robot.",
     {
@@ -412,7 +429,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_send_file",
     "Send a local file as the robot. Owner/admin only. The path must be inside the agent workspace.",
     {
@@ -453,7 +470,7 @@ export function registerRobotTools(api: any): void {
     }
   ));
 
-  tools.register(rawTool(
+  tools.register(secureWriteTool(
     "im_bot_api",
     "Call a RobotServiceClient method directly. Owner/admin only. Use this for advanced robot APIs not covered by the typed tools. `args` is the positional argument array. Returns {ok, code, msg, result}; ok=false carries the IM error code.",
     {

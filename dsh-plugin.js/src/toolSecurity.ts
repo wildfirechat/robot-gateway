@@ -18,7 +18,7 @@ import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { getAccessConfig, getSecurityConfig, getWorkspaceConfig, type WildfireConfig } from "./config.js";
-import { turnOwners } from "./turnContext.js";
+import { turnOwners, turnWriteTrust, markTurnTainted } from "./turnContext.js";
 
 /** Maximum size of a file handed to the IM send tools (100 MB). */
 export const MAX_SEND_FILE_BYTES = 100 * 1024 * 1024;
@@ -80,6 +80,42 @@ export function requireOwnerTurn(api: any, exec: any, feature: string): void {
     }
     if (!isOwnerOrAdmin(api, sender)) {
         throw new Error(`${feature}: 仅限机器人 owner/管理员使用（当前发送者 ${sender}）`);
+    }
+}
+
+/**
+ * Mark the current turn as tainted after a tool returns IM/search/group data.
+ * No-op for sessions without a mapped IM conversation.
+ */
+export function markReadResultTainted(api: any, exec: any): void {
+    const key = resolveSessionKey(api, exec);
+    if (key) markTurnTainted(key);
+}
+
+/**
+ * Write tools are stricter than owner-only: the turn must have started from
+ * the owner's direct text message and must not have consumed untrusted read
+ * results. Bridged local sessions (official DSH Web UI) are owner-driven and
+ * have no IM sender, so they stay allowed.
+ */
+export function requireWriteTurn(api: any, exec: any, feature: string): void {
+    requireOwnerTurn(api, exec, feature);
+    const key = resolveSessionKey(api, exec);
+    if (!key) {
+        if (api?.bridge?.isBridged?.(key)) return;
+        return;
+    }
+    if (api?.bridge?.isBridged?.(key)) return;
+    const trust = turnWriteTrust.get(String(key));
+    if (!trust || trust.ownerDirectText !== true) {
+        throw new Error(
+            `${feature}: 写操作仅允许由机器人 owner 的直接文本指令发起；当前回合不是 owner 直接文本，已拒绝`
+        );
+    }
+    if (trust.tainted) {
+        throw new Error(
+            `${feature}: 本回合已读取不可信内容，写操作需要 owner 在新回合确认/重新下达指令`
+        );
     }
 }
 

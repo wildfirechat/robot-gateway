@@ -7,7 +7,7 @@
  * live-scoped to the current login and revoked on logout.
  */
 
-import { assertConfigSendablePath, requireOwnerTurn } from "./toolSecurity.js";
+import { assertConfigSendablePath, markReadResultTainted, requireOwnerTurn, requireWriteTurn } from "./toolSecurity.js";
 
 type BridgeConfig = {
   url: string;
@@ -122,6 +122,17 @@ export function registerImBridgeTools(api: any): void {
   const secureTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
     rawTool(name, description, parameters, async (args: any, exec: any) => {
       requireOwnerTurn(api, exec, name);
+      try {
+        return await execute(args, exec);
+      } finally {
+        // Any read of contacts/messages/org/etc. makes later writes in this
+        // turn require a fresh owner instruction.
+        markReadResultTainted(api, exec);
+      }
+    });
+  const secureWriteTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
+    rawTool(name, description, parameters, async (args: any, exec: any) => {
+      requireWriteTurn(api, exec, name);
       return execute(args, exec);
     });
 
@@ -394,7 +405,7 @@ export function registerImBridgeTools(api: any): void {
   }
 
   if (config.sendEnabled) {
-    tools.register(secureTool(
+    tools.register(secureWriteTool(
       "im_user_recall_message",
       "Recall one message as the current IM user. Only messages the user sent within the recall window can be recalled.",
       {
@@ -410,7 +421,7 @@ export function registerImBridgeTools(api: any): void {
       })
     ));
 
-    tools.register(secureTool(
+    tools.register(secureWriteTool(
       "im_user_send_file",
       "Send a local file as the current IM user. The path must be readable by the client process.",
       {
@@ -446,7 +457,7 @@ export function registerImBridgeTools(api: any): void {
       }
     ));
 
-    tools.register(secureTool(
+    tools.register(secureWriteTool(
       "im_user_send_message",
       "Send a text message as the current IM user. Owner/admin only; also requires the user's global send switch to be enabled.",
       {
