@@ -389,6 +389,22 @@ export function registerImBridgeTools(api: any): void {
 
   if (config.sendEnabled) {
     tools.register(rawTool(
+      "im_user_recall_message",
+      "Recall one message as the current IM user. Only messages the user sent within the recall window can be recalled.",
+      {
+        type: "object",
+        properties: {
+          messageUid: { type: "string", description: "Message UID from im_user_messages / search results." },
+        },
+        required: ["messageUid"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(config, "POST", "/im/messages/recall", undefined, {
+        messageUid: args?.messageUid,
+      })
+    ));
+
+    tools.register(rawTool(
       "im_user_send_file",
       "Send a local file as the current IM user. The path must be readable by the client process.",
       {
