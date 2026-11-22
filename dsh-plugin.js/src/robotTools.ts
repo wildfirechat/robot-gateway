@@ -179,7 +179,7 @@ const secureReadTool = (name: string, description: string, parameters: any, exec
 const secureWriteTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
   rawTool(name, description, parameters, async (args: any, exec: any) => {
     requireWriteTurn(api, exec, name);
-    await confirmWriteAction(api, exec, name, formatWritePreview(name, args));
+    await confirmWriteAction(api, exec, name, await formatWritePreview(name, args));
     return execute(args, exec);
   });
 
@@ -195,43 +195,105 @@ function memberIdsOf(value: any): string[] {
     .filter(Boolean);
 }
 
-function formatMemberLine(label: string, value: any): string {
+const userNameCache = new Map<string, string>();
+const groupNameCache = new Map<string, string>();
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("lookup timeout")), ms);
+      timer.unref?.();
+    }),
+  ]);
+}
+
+async function resolveUserName(userId: string): Promise<string> {
+  const id = String(userId || "").trim();
+  if (!id) return "";
+  if (userNameCache.has(id)) return userNameCache.get(id) || id;
+  const client = getConnectedClient();
+  if (!client) return id;
+  try {
+    const result: any = await withTimeout(client.getUserInfo(id), 1500);
+    const user = result?.result ?? result;
+    const name = String(user?.displayName || user?.name || "").trim();
+    if (name) {
+      userNameCache.set(id, name);
+      return name;
+    }
+  } catch { /* fall back to id */ }
+  userNameCache.set(id, id);
+  return id;
+}
+
+async function resolveGroupName(groupId: string): Promise<string> {
+  const id = String(groupId || "").trim();
+  if (!id) return "";
+  if (groupNameCache.has(id)) return groupNameCache.get(id) || id;
+  const client = getConnectedClient();
+  if (!client) return id;
+  try {
+    const result: any = await withTimeout(client.getGroupInfo(id), 1500);
+    const group = result?.result ?? result;
+    const name = String(group?.name || group?.groupName || "").trim();
+    if (name) {
+      groupNameCache.set(id, name);
+      return name;
+    }
+  } catch { /* fall back to id */ }
+  groupNameCache.set(id, id);
+  return id;
+}
+
+async function resolveMemberLine(label: string, value: any): Promise<string> {
   const ids = memberIdsOf(value);
-  return `${label}：${ids.length ? ids.join("、") : "(无)"}`;
+  if (!ids.length) return `${label}：(无)`;
+  const names = await Promise.all(ids.slice(0, 30).map(resolveUserName));
+  return `${label}：${names.join("、")}`;
+}
+
+async function resolveConversationName(conv: any): Promise<string> {
+  const target = String(conv?.target || "").trim();
+  if (!target) return "(未指定)";
+  return Number(conv?.type) === 0 ? resolveUserName(target) : resolveGroupName(target);
+}
+
+function defaultOwnerId(): string {
+  return String(process.env.WF_OWNER_USER_ID || "").trim();
 }
 
 /**
- * Human-readable text for the approval card. The model-facing tool args are
- * JSON, but the owner must be able to read WHAT will happen without decoding
- * nested arrays.
+ * Human-readable text for the approval card. Display names come from the
+ * robot's IM profile lookups; raw ids are used only when lookup fails.
  */
-function formatWritePreview(name: string, args: any): string {
+async function formatWritePreview(name: string, args: any): Promise<string> {
   const a = args || {};
   if (name === "im_bot_create_group") {
     return [
       "机器人创建群聊",
       `群名：${String(a.name || "(未命名)")}`,
-      formatMemberLine("邀请成员", a.memberIds),
-      `邀请人：${String(a.to || "(机器人 owner)")}`,
+      await resolveMemberLine("邀请成员", a.memberIds),
+      `邀请人：${await resolveUserName(String(a.to || defaultOwnerId()))}`,
     ].join("\n");
   }
   if (name === "im_bot_add_group_members") {
-    return `机器人添加群成员\n群 ID：${String(a.groupId || "")}\n${formatMemberLine("成员", a.memberIds)}`;
+    return `机器人添加群成员\n群名称：${await resolveGroupName(String(a.groupId || ""))}\n${await resolveMemberLine("成员", a.memberIds)}`;
   }
   if (name === "im_bot_remove_group_members") {
-    return `机器人移出群成员\n群 ID：${String(a.groupId || "")}\n${formatMemberLine("成员", a.memberIds)}`;
+    return `机器人移出群成员\n群名称：${await resolveGroupName(String(a.groupId || ""))}\n${await resolveMemberLine("成员", a.memberIds)}`;
   }
   if (name === "im_bot_transfer_group") {
-    return `机器人转让群主\n群 ID：${String(a.groupId || "")}\n新群主：${String(a.newOwnerId || "")}`;
+    return `机器人转让群主\n群名称：${await resolveGroupName(String(a.groupId || ""))}\n新群主：${await resolveUserName(String(a.newOwnerId || ""))}`;
   }
   if (name === "im_bot_dismiss_group") {
-    return `机器人解散群聊\n群 ID：${String(a.groupId || "")}`;
+    return `机器人解散群聊\n群名称：${await resolveGroupName(String(a.groupId || ""))}`;
   }
   if (name === "im_bot_send_message") {
-    return `机器人发送消息\n目标：${String(a.type) === "0" ? "用户" : "群"} ${String(a.target || "")}\n内容：${String(a.text || "").slice(0, 400)}`;
+    return `机器人发送消息\n目标：${await resolveConversationName({ type: Number(a.type), target: a.target })}\n内容：${String(a.text || "").slice(0, 400)}`;
   }
   if (name === "im_bot_send_file") {
-    return `机器人发送文件\n目标：${String(a.type) === "0" ? "用户" : "群"} ${String(a.target || "")}\n文件：${String(a.path || "")}`;
+    return `机器人发送文件\n目标：${await resolveConversationName({ type: Number(a.type), target: a.target })}\n文件：${String(a.path || "")}`;
   }
   if (name === "im_bot_recall_message") {
     return `机器人撤回消息\n消息 ID：${String(a.messageUid || "")}`;
@@ -244,21 +306,21 @@ function formatWritePreview(name: string, args: any): string {
       return [
         "机器人创建群聊",
         `群名：${String(info.name || info.groupName || "(未命名)")}`,
-        formatMemberLine("邀请成员", list[1]),
-        `邀请人：${String(list[2] || "(机器人 owner)")}`,
+        await resolveMemberLine("邀请成员", list[1]),
+        `邀请人：${await resolveUserName(String(list[2] || defaultOwnerId()))}`,
       ].join("\n");
     }
     if (method === "addGroupMembers") {
-      return `机器人添加群成员\n群 ID：${String(list[0] || "")}\n${formatMemberLine("成员", list[1])}`;
+      return `机器人添加群成员\n群名称：${await resolveGroupName(String(list[0] || ""))}\n${await resolveMemberLine("成员", list[1])}`;
     }
     if (method === "kickoffGroupMembers") {
-      return `机器人移出群成员\n群 ID：${String(list[0] || "")}\n${formatMemberLine("成员", list[1])}`;
+      return `机器人移出群成员\n群名称：${await resolveGroupName(String(list[0] || ""))}\n${await resolveMemberLine("成员", list[1])}`;
     }
     if (method === "transferGroup") {
-      return `机器人转让群主\n群 ID：${String(list[0] || "")}\n新群主：${String(list[1] || "")}`;
+      return `机器人转让群主\n群名称：${await resolveGroupName(String(list[0] || ""))}\n新群主：${await resolveUserName(String(list[1] || ""))}`;
     }
     if (method === "dismissGroup") {
-      return `机器人解散群聊\n群 ID：${String(list[0] || "")}`;
+      return `机器人解散群聊\n群名称：${await resolveGroupName(String(list[0] || ""))}`;
     }
     if (method === "recallMessage") {
       return `机器人撤回消息\n消息 ID：${String(list[0] || "")}`;
@@ -266,7 +328,7 @@ function formatWritePreview(name: string, args: any): string {
     if (method === "sendMessage") {
       const conv: any = list[0] || {};
       const payload: any = list[1] || {};
-      return `机器人发送消息\n目标：${Number(conv.type) === 0 ? "用户" : "群"} ${String(conv.target || "")}\n内容：${String(payload.searchableContent || payload.content || "").slice(0, 400)}`;
+      return `机器人发送消息\n目标：${await resolveConversationName(conv)}\n内容：${String(payload.searchableContent || payload.content || "").slice(0, 400)}`;
     }
     return `机器人 API 写操作：${method || name}\n${jsonPreview(list)}`;
   }
