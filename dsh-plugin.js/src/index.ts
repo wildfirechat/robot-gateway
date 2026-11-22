@@ -21,6 +21,8 @@ import { AuditLog } from "./audit.js";
 import { TextMessageContent } from "@wildfirechat/server-sdk";
 import { registerSessionBridge } from "./bridge.js";
 import { panelDebug } from "./panelDebug.js";
+import { registerImBridgeTools } from "./imBridge.js";
+import { registerRobotTools } from "./robotTools.js";
 
 export const name = "wildfire";
 
@@ -28,7 +30,7 @@ export const name = "wildfire";
 // (`cannot get property "x" without inject`), so every service used must be
 // injected. `userQuestions` / `attachments` / `sessionPersistence` / `goals`
 // are provided by the base bundle.
-export const inject = ["agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals", "systemPrompt"];
+export const inject = ["tools", "approval", "agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals", "systemPrompt"];
 
 /**
  * Plugin entry.
@@ -376,6 +378,8 @@ export function apply(ctx: any, config: any): void {
         }
       }
       await api.wildfireAgents.init();
+      registerRobotTools(api);
+      registerImBridgeTools(api);
 
       // Connect with retry: the gateway may be briefly down (restart, network).
       // The SDK auto-reconnects once connected; a failed FIRST connect needs
