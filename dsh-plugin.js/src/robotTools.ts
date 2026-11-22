@@ -179,12 +179,98 @@ const secureReadTool = (name: string, description: string, parameters: any, exec
 const secureWriteTool = (name: string, description: string, parameters: any, execute: (args: any, exec: any) => Promise<any>) =>
   rawTool(name, description, parameters, async (args: any, exec: any) => {
     requireWriteTurn(api, exec, name);
-    await confirmWriteAction(api, exec, name, `机器人写操作：${name} ${safePreview(args)}`);
+    await confirmWriteAction(api, exec, name, formatWritePreview(name, args));
     return execute(args, exec);
   });
 
-function safePreview(value: any): string {
-  try { return JSON.stringify(value).slice(0, 500); } catch { return ""; }
+function jsonPreview(value: any): string {
+  try { return JSON.stringify(value).slice(0, 600); } catch { return ""; }
+}
+
+function memberIdsOf(value: any): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item: any) => typeof item === "string"
+    ? item
+    : String(item?.member_id ?? item?.memberId ?? item?.userId ?? "").trim())
+    .filter(Boolean);
+}
+
+function formatMemberLine(label: string, value: any): string {
+  const ids = memberIdsOf(value);
+  return `${label}：${ids.length ? ids.join("、") : "(无)"}`;
+}
+
+/**
+ * Human-readable text for the approval card. The model-facing tool args are
+ * JSON, but the owner must be able to read WHAT will happen without decoding
+ * nested arrays.
+ */
+function formatWritePreview(name: string, args: any): string {
+  const a = args || {};
+  if (name === "im_bot_create_group") {
+    return [
+      "机器人创建群聊",
+      `群名：${String(a.name || "(未命名)")}`,
+      formatMemberLine("邀请成员", a.memberIds),
+      `邀请人：${String(a.to || "(机器人 owner)")}`,
+    ].join("\n");
+  }
+  if (name === "im_bot_add_group_members") {
+    return `机器人添加群成员\n群 ID：${String(a.groupId || "")}\n${formatMemberLine("成员", a.memberIds)}`;
+  }
+  if (name === "im_bot_remove_group_members") {
+    return `机器人移出群成员\n群 ID：${String(a.groupId || "")}\n${formatMemberLine("成员", a.memberIds)}`;
+  }
+  if (name === "im_bot_transfer_group") {
+    return `机器人转让群主\n群 ID：${String(a.groupId || "")}\n新群主：${String(a.newOwnerId || "")}`;
+  }
+  if (name === "im_bot_dismiss_group") {
+    return `机器人解散群聊\n群 ID：${String(a.groupId || "")}`;
+  }
+  if (name === "im_bot_send_message") {
+    return `机器人发送消息\n目标：${String(a.type) === "0" ? "用户" : "群"} ${String(a.target || "")}\n内容：${String(a.text || "").slice(0, 400)}`;
+  }
+  if (name === "im_bot_send_file") {
+    return `机器人发送文件\n目标：${String(a.type) === "0" ? "用户" : "群"} ${String(a.target || "")}\n文件：${String(a.path || "")}`;
+  }
+  if (name === "im_bot_recall_message") {
+    return `机器人撤回消息\n消息 ID：${String(a.messageUid || "")}`;
+  }
+  if (name === "im_bot_api") {
+    const method = String(a.method || "");
+    const list = Array.isArray(a.args) ? a.args : [];
+    if (method === "createGroup") {
+      const info: any = list[0] || {};
+      return [
+        "机器人创建群聊",
+        `群名：${String(info.name || info.groupName || "(未命名)")}`,
+        formatMemberLine("邀请成员", list[1]),
+        `邀请人：${String(list[2] || "(机器人 owner)")}`,
+      ].join("\n");
+    }
+    if (method === "addGroupMembers") {
+      return `机器人添加群成员\n群 ID：${String(list[0] || "")}\n${formatMemberLine("成员", list[1])}`;
+    }
+    if (method === "kickoffGroupMembers") {
+      return `机器人移出群成员\n群 ID：${String(list[0] || "")}\n${formatMemberLine("成员", list[1])}`;
+    }
+    if (method === "transferGroup") {
+      return `机器人转让群主\n群 ID：${String(list[0] || "")}\n新群主：${String(list[1] || "")}`;
+    }
+    if (method === "dismissGroup") {
+      return `机器人解散群聊\n群 ID：${String(list[0] || "")}`;
+    }
+    if (method === "recallMessage") {
+      return `机器人撤回消息\n消息 ID：${String(list[0] || "")}`;
+    }
+    if (method === "sendMessage") {
+      const conv: any = list[0] || {};
+      const payload: any = list[1] || {};
+      return `机器人发送消息\n目标：${Number(conv.type) === 0 ? "用户" : "群"} ${String(conv.target || "")}\n内容：${String(payload.searchableContent || payload.content || "").slice(0, 400)}`;
+    }
+    return `机器人 API 写操作：${method || name}\n${jsonPreview(list)}`;
+  }
+  return `机器人写操作：${name}\n${jsonPreview(a)}`;
 }
 
 
