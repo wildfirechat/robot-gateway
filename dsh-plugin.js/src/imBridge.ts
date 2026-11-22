@@ -12,7 +12,6 @@ type BridgeConfig = {
   token: string;
   readEnabled: boolean;
   sendEnabled: boolean;
-  approvalRequired: boolean;
 };
 
 function bridgeConfig(): BridgeConfig | null {
@@ -24,7 +23,6 @@ function bridgeConfig(): BridgeConfig | null {
     token,
     readEnabled: process.env.WF_IM_BRIDGE_READ !== "0",
     sendEnabled: process.env.WF_IM_BRIDGE_SEND === "1",
-    approvalRequired: process.env.WF_IM_BRIDGE_APPROVAL !== "0",
   };
 }
 
@@ -100,7 +98,7 @@ export function registerImBridgeTools(api: any): void {
   }
 
   api.logger?.info?.(
-    `[wildfire] IM user bridge tools: read=${config.readEnabled}, send=${config.sendEnabled}, approval=${config.approvalRequired}`
+    `[wildfire] IM user bridge tools: read=${config.readEnabled}, send=${config.sendEnabled}`
   );
 
   if (config.readEnabled) {
@@ -112,6 +110,7 @@ export function registerImBridgeTools(api: any): void {
         properties: {
           query: { type: "string", description: "Optional name or user-id keyword." },
           limit: { type: "integer", minimum: 1, maximum: 200, description: "Maximum contacts to return." },
+          offset: { type: "integer", minimum: 0, description: "Pagination offset." },
         },
         additionalProperties: false,
       },
@@ -119,9 +118,26 @@ export function registerImBridgeTools(api: any): void {
         const data = await bridgeRequest(config, "GET", "/im/contacts", {
           query: args?.query,
           limit: args?.limit,
+          offset: args?.offset,
         });
         return data;
       }
+    ));
+
+    tools.register(rawTool(
+      "im_user_contact",
+      "Get one current-user contact's profile by user id.",
+      {
+        type: "object",
+        properties: { userId: { type: "string", description: "IM user id." } },
+        required: ["userId"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(
+        config,
+        "GET",
+        `/im/contacts/${encodeURIComponent(String(args?.userId || ""))}`
+      )
     ));
 
     tools.register(rawTool(
@@ -132,13 +148,31 @@ export function registerImBridgeTools(api: any): void {
         properties: {
           query: { type: "string", description: "Optional group name or id keyword." },
           limit: { type: "integer", minimum: 1, maximum: 200, description: "Maximum groups to return." },
+          offset: { type: "integer", minimum: 0, description: "Pagination offset." },
         },
         additionalProperties: false,
       },
       async (args: any) => bridgeRequest(config, "GET", "/im/groups", {
         query: args?.query,
         limit: args?.limit,
+        offset: args?.offset,
       })
+    ));
+
+    tools.register(rawTool(
+      "im_user_group",
+      "Get one current-user group's details by group id.",
+      {
+        type: "object",
+        properties: { groupId: { type: "string", description: "IM group id." } },
+        required: ["groupId"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(
+        config,
+        "GET",
+        `/im/groups/${encodeURIComponent(String(args?.groupId || ""))}`
+      )
     ));
 
     tools.register(rawTool(
@@ -162,16 +196,112 @@ export function registerImBridgeTools(api: any): void {
     ));
 
     tools.register(rawTool(
+      "im_user_organization_root",
+      "Get the root organization of the current user's organization directory.",
+      { type: "object", properties: {}, additionalProperties: false },
+      async () => bridgeRequest(config, "GET", "/im/organization/root")
+    ));
+
+    tools.register(rawTool(
+      "im_user_organization",
+      "Get one organization node and its sub-organizations.",
+      {
+        type: "object",
+        properties: { organizationId: { type: "string" } },
+        required: ["organizationId"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(
+        config,
+        "GET",
+        `/im/organization/${encodeURIComponent(String(args?.organizationId || ""))}`
+      )
+    ));
+
+    tools.register(rawTool(
+      "im_user_organization_employees",
+      "List employees directly under one organization node.",
+      {
+        type: "object",
+        properties: { organizationId: { type: "string" } },
+        required: ["organizationId"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(
+        config,
+        "GET",
+        `/im/organization/${encodeURIComponent(String(args?.organizationId || ""))}/employees`
+      )
+    ));
+
+    tools.register(rawTool(
+      "im_user_search_employee",
+      "Search employees in the organization directory.",
+      {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          organizationId: { type: "string", description: "Optional organization node; defaults to root." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(config, "GET", "/im/employees/search", {
+        query: args?.query,
+        organizationId: args?.organizationId,
+      })
+    ));
+
+    tools.register(rawTool(
+      "im_user_channels",
+      "List or search channels joined by the current IM user.",
+      {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional channel name or id keyword." },
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+          offset: { type: "integer", minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(config, "GET", "/im/channels", {
+        query: args?.query,
+        limit: args?.limit,
+        offset: args?.offset,
+      })
+    ));
+
+    tools.register(rawTool(
+      "im_user_channel",
+      "Get one current-user channel's details by channel id.",
+      {
+        type: "object",
+        properties: { channelId: { type: "string" } },
+        required: ["channelId"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(
+        config,
+        "GET",
+        `/im/channels/${encodeURIComponent(String(args?.channelId || ""))}`
+      )
+    ));
+
+    tools.register(rawTool(
       "im_user_conversations",
       "List recent conversations of the current IM user with last-message summaries and unread counts.",
       {
         type: "object",
         properties: {
           limit: { type: "integer", minimum: 1, maximum: 200, description: "Maximum conversations to return." },
+          offset: { type: "integer", minimum: 0, description: "Pagination offset." },
         },
         additionalProperties: false,
       },
-      async (args: any) => bridgeRequest(config, "GET", "/im/conversations", { limit: args?.limit })
+      async (args: any) => bridgeRequest(config, "GET", "/im/conversations", {
+        limit: args?.limit,
+        offset: args?.offset,
+      })
     ));
 
     tools.register(rawTool(
@@ -224,6 +354,9 @@ export function registerImBridgeTools(api: any): void {
             additionalProperties: false,
           },
           limit: { type: "integer", minimum: 1, maximum: 100 },
+          offset: { type: "integer", minimum: 0, description: "Pagination offset." },
+          from: { type: "integer", description: "Optional start timestamp (ms)." },
+          to: { type: "integer", description: "Optional end timestamp (ms)." },
         },
         required: ["query"],
         additionalProperties: false,
@@ -233,6 +366,9 @@ export function registerImBridgeTools(api: any): void {
         return bridgeRequest(config, "GET", "/im/messages/search", {
           query: args?.query,
           limit: args?.limit,
+          offset: args?.offset,
+          from: args?.from,
+          to: args?.to,
           conversation: conv ? `${conv.type}:${conv.target}:${conv.line ?? 0}` : undefined,
         });
       }
@@ -240,6 +376,35 @@ export function registerImBridgeTools(api: any): void {
   }
 
   if (config.sendEnabled) {
+    tools.register(rawTool(
+      "im_user_send_file",
+      "Send a local file as the current IM user. The path must be readable by the client process.",
+      {
+        type: "object",
+        properties: {
+          conversation: {
+            type: "object",
+            properties: {
+              type: { type: "integer", description: "0 single, 1 group." },
+              target: { type: "string" },
+              line: { type: "integer", minimum: 0 },
+            },
+            required: ["type", "target"],
+            additionalProperties: false,
+          },
+          path: { type: "string", description: "Absolute local file path." },
+          name: { type: "string", description: "Optional display name." },
+        },
+        required: ["conversation", "path"],
+        additionalProperties: false,
+      },
+      async (args: any) => bridgeRequest(config, "POST", "/im/messages/send_file", undefined, {
+        conversation: args?.conversation,
+        path: args?.path,
+        name: args?.name,
+      })
+    ));
+
     tools.register(rawTool(
       "im_user_send_message",
       "Send a text message as the current IM user. Requires the user's global send setting; approval may be required.",
@@ -261,24 +426,7 @@ export function registerImBridgeTools(api: any): void {
         required: ["conversation", "text"],
         additionalProperties: false,
       },
-      async (args: any, exec: any) => {
-        if (config.approvalRequired) {
-          let approval: any;
-          try { approval = api.ctx?.get?.("approval"); } catch { approval = null; }
-          if (!approval?.request || !exec?.agent) {
-            throw new Error("IM send approval is required but no approval service/agent is available");
-          }
-          const outcome = await approval.request({
-            agent: exec.agent,
-            toolName: "im_user_send_message",
-            callId: exec.callId,
-            reason: "以当前 IM 用户身份发送消息",
-            signal: exec.signal,
-          });
-          if (outcome !== "allowed-once") {
-            throw new Error(`IM send was not approved (${String(outcome)})`);
-          }
-        }
+      async (args: any) => {
         return bridgeRequest(config, "POST", "/im/messages/send", undefined, {
           conversation: args?.conversation,
           text: args?.text,

@@ -30,7 +30,7 @@ export const name = "wildfire";
 // (`cannot get property "x" without inject`), so every service used must be
 // injected. `userQuestions` / `attachments` / `sessionPersistence` / `goals`
 // are provided by the base bundle.
-export const inject = ["tools", "approval", "agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals", "systemPrompt"];
+export const inject = ["tools", "agents", "sessions", "agentDefaultModel", "userQuestions", "attachments", "sessionPersistence", "goals", "systemPrompt"];
 
 /**
  * Plugin entry.
