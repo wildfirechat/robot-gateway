@@ -1,11 +1,11 @@
 {
   "name": "@wildfirechat/robot-gateway-client-sdk",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "description": "野火IM机器人网关客户端SDK (Node.js/JavaScript版)",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "wildfirechat",

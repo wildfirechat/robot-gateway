@@ -164,33 +164,36 @@ public class RobotServiceClient {
     }
 
     public IMResult<SendMessageResult> replyMessage(long messageId, MessagePayload payload, boolean mentionSender) {
-        return invoke("replyMessage", Arrays.asList(messageId, payload, mentionSender),
+        // Send the id as a numeric string: the gateway's lazy-number parser keeps
+        // it exact, and this also works against older gateways (Gson coerces strings).
+        return invoke("replyMessage", Arrays.asList(String.valueOf(messageId), payload, mentionSender),
                 new com.google.gson.reflect.TypeToken<IMResult<SendMessageResult>>(){}.getType());
     }
 
     public IMResult<String> recallMessage(long messageId) {
-        return invoke("recallMessage", Arrays.asList(messageId),
+        return invoke("recallMessage", Arrays.asList(String.valueOf(messageId)),
                 new com.google.gson.reflect.TypeToken<IMResult<String>>(){}.getType());
     }
 
     public IMResult<Void> updateMessage(long messageId, MessagePayload payload) {
-        return invoke("updateMessage", Arrays.asList(messageId, payload),
+        return invoke("updateMessage", Arrays.asList(String.valueOf(messageId), payload),
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 
     public IMResult<Void> updateMessage(long messageId, MessagePayload payload, boolean distribute) {
-        return invoke("updateMessage", Arrays.asList(messageId, payload, distribute),
+        return invoke("updateMessage", Arrays.asList(String.valueOf(messageId), payload, distribute),
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 
     /**
      * 获取单条消息（只能获取机器人参与会话中的消息）。
-     * messageUid 为 long，Java 原生无精度问题（JS 端需用字符串，见 JS SDK getMessage）。
+     * messageUid 为 long，Java 原生无精度问题；传输时统一转成数字字符串，
+     * 与 JS/Go SDK 以及网关的 long 参数校验保持一致。
      * @param messageUid 消息 uid
      * @return 消息数据（payload.searchableContent 为文本正文；引用被引原文取此处）
      */
     public IMResult<OutputMessageData> getMessage(long messageUid) {
-        return invoke("getMessage", Arrays.asList(messageUid),
+        return invoke("getMessage", Arrays.asList(String.valueOf(messageUid)),
                 new com.google.gson.reflect.TypeToken<IMResult<OutputMessageData>>(){}.getType());
     }
 
@@ -358,7 +361,7 @@ public class RobotServiceClient {
     }
 
     public IMResult<Void> updateMomentsFeed(long feedId, int type, String text, List<MediaEntry> medias, List<String> mentionUsers, List<String> allowUsers, List<String> denyUsers, String extra) {
-        return invoke("updateMomentsFeed", Arrays.asList(feedId, type, text, medias, mentionUsers, allowUsers, denyUsers, extra),
+        return invoke("updateMomentsFeed", Arrays.asList(String.valueOf(feedId), type, text, medias, mentionUsers, allowUsers, denyUsers, extra),
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 
@@ -368,22 +371,22 @@ public class RobotServiceClient {
     }
 
     public IMResult<FeedPojo> getMomentsFeed(long feedId) {
-        return invoke("getMomentsFeed", Arrays.asList(feedId),
+        return invoke("getMomentsFeed", Arrays.asList(String.valueOf(feedId)),
                 new com.google.gson.reflect.TypeToken<IMResult<FeedPojo>>(){}.getType());
     }
 
     public IMResult<Void> deleteMomentsFeed(long feedId) {
-        return invoke("deleteMomentsFeed", Arrays.asList(feedId),
+        return invoke("deleteMomentsFeed", Arrays.asList(String.valueOf(feedId)),
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 
     public IMResult<CommentPojo> postMomentsComment(long feedId, long commentId, int type, String text, String replyTo, String extra) {
-        return invoke("postMomentsComment", Arrays.asList(feedId, commentId, type, text, replyTo, extra),
+        return invoke("postMomentsComment", Arrays.asList(String.valueOf(feedId), String.valueOf(commentId), type, text, replyTo, extra),
                 new com.google.gson.reflect.TypeToken<IMResult<CommentPojo>>(){}.getType());
     }
 
     public IMResult<Void> deleteMomentsComment(long feedId, long commentId) {
-        return invoke("deleteMomentsComment", Arrays.asList(feedId, commentId),
+        return invoke("deleteMomentsComment", Arrays.asList(String.valueOf(feedId), String.valueOf(commentId)),
                 new com.google.gson.reflect.TypeToken<IMResult<Void>>(){}.getType());
     }
 

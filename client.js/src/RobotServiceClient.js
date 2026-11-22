@@ -1,5 +1,6 @@
 import { ConnectionManager } from './ConnectionManager.js';
 import { IMResult } from '@wildfirechat/server-sdk';
+import { assertGroupMembers, assertLongId, assertStringMemberIds } from './validation.js';
 
 /**
  * RobotService 客户端
@@ -7,51 +8,6 @@ import { IMResult } from '@wildfirechat/server-sdk';
  * 
  * 注意：使用 @../server-sdk.js 中的模型类（Conversation, MessagePayload 等）
  */
-/**
- * Validate the group-member wire shape shared by createGroup/addGroupMembers.
- * Wildfire's group API expects objects such as { member_id: "userId", type: 0 },
- * not a list of bare user-id strings. Failing here is intentional: the IM
- * server otherwise returns code=0 with a null result for malformed members.
- */
-function assertGroupMembers(method, members) {
-    if (!Array.isArray(members) || members.length === 0) {
-        throw new TypeError(`${method}: members must be a non-empty array of { member_id, type? } objects`);
-    }
-    members.forEach((member, index) => {
-        if (typeof member === 'string') {
-            throw new TypeError(`${method}: members[${index}] must be an object with member_id; bare string ids are invalid (use [{ member_id: "..." }])`);
-        }
-        if (!member || typeof member !== 'object' || typeof member.member_id !== 'string' || member.member_id.length === 0) {
-            throw new TypeError(`${method}: members[${index}].member_id is required`);
-        }
-    });
-    return members;
-}
-
-/**
- * Group-manager / mute / allow / kick APIs take a list of bare user-id strings.
- * Keep this distinct from createGroup/addGroupMembers, which take objects.
- */
-function assertStringMemberIds(method, members) {
-    if (!Array.isArray(members) || members.length === 0) {
-        throw new TypeError(`${method}: members must be a non-empty array of user-id strings`);
-    }
-    members.forEach((member, index) => {
-        if (typeof member !== 'string' || member.length === 0) {
-            throw new TypeError(`${method}: members[${index}] must be a user-id string (this API does not take { member_id } objects)`);
-        }
-    });
-    return members;
-}
-
-/** Long message ids/UIDs must travel as strings to avoid JS number precision loss. */
-function assertMessageId(method, messageId) {
-    if (typeof messageId !== 'string' || messageId.length === 0 || !/^\d+$/.test(messageId)) {
-        throw new TypeError(`${method}: messageId/messageUid must be a non-empty numeric string`);
-    }
-    return messageId;
-}
-
 export class RobotServiceClient {
     /**
      * 创建客户端实例
@@ -148,10 +104,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>} - result 为消息数据（含 searchableContent 等）
      */
     async getMessage(messageUid) {
-        if (typeof messageUid !== 'string') {
-            return new IMResult(-1, 'messageUid 是超长 long，必须传字符串（JS number 会丢失精度）', null);
-        }
-        return this.invoke('getMessage', [messageUid]);
+        return this.invoke('getMessage', [assertLongId('getMessage', 'messageUid', messageUid)]);
     }
 
     /**
@@ -186,7 +139,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async replyMessage(messageId, payload, mentionSender) {
-        assertMessageId('replyMessage', messageId);
+        messageId = assertLongId('replyMessage', 'messageId', messageId);
         if (!payload || typeof payload !== 'object') throw new TypeError('replyMessage: payload is required');
         return this.invoke('replyMessage', [messageId, payload, mentionSender]);
     }
@@ -197,7 +150,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async recallMessage(messageId) {
-        assertMessageId('recallMessage', messageId);
+        messageId = assertLongId('recallMessage', 'messageId', messageId);
         return this.invoke('recallMessage', [messageId]);
     }
 
@@ -208,7 +161,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async updateMessage(messageId, payload) {
-        assertMessageId('updateMessage', messageId);
+        messageId = assertLongId('updateMessage', 'messageId', messageId);
         if (!payload || typeof payload !== 'object') throw new TypeError('updateMessage: payload is required');
         return this.invoke('updateMessage', [messageId, payload]);
     }
@@ -545,6 +498,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async updateMomentsFeed(feedId, type, text, medias, mentionUsers, allowUsers, denyUsers, extra) {
+        feedId = assertLongId('updateMomentsFeed', 'feedId', feedId);
         return this.invoke('updateMomentsFeed', [feedId, type, text, medias, mentionUsers, allowUsers, denyUsers, extra]);
     }
 
@@ -565,6 +519,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async getMomentsFeed(feedId) {
+        feedId = assertLongId('getMomentsFeed', 'feedId', feedId);
         return this.invoke('getMomentsFeed', [feedId]);
     }
 
@@ -574,6 +529,7 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async deleteMomentsFeed(feedId) {
+        feedId = assertLongId('deleteMomentsFeed', 'feedId', feedId);
         return this.invoke('deleteMomentsFeed', [feedId]);
     }
 
@@ -588,6 +544,8 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async postMomentsComment(feedId, commentId, type, text, replyTo, extra) {
+        feedId = assertLongId('postMomentsComment', 'feedId', feedId);
+        commentId = assertLongId('postMomentsComment', 'commentId', commentId);
         return this.invoke('postMomentsComment', [feedId, commentId, type, text, replyTo, extra]);
     }
 
@@ -598,6 +556,8 @@ export class RobotServiceClient {
      * @returns {Promise<IMResult>}
      */
     async deleteMomentsComment(feedId, commentId) {
+        feedId = assertLongId('deleteMomentsComment', 'feedId', feedId);
+        commentId = assertLongId('deleteMomentsComment', 'commentId', commentId);
         return this.invoke('deleteMomentsComment', [feedId, commentId]);
     }
 

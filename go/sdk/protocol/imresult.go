@@ -14,16 +14,16 @@ func (r *IMResult[T]) IsSuccess() bool {
 
 // InputOutputUserInfo represents user information.
 type InputOutputUserInfo struct {
-	UserID           string `json:"userId"`
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName"`
-	Portrait         string `json:"portrait"`
-	Mobile           string `json:"mobile"`
-	Email            string `json:"email"`
-	Address          string `json:"address"`
-	Company          string `json:"company"`
-	Extra            string `json:"extra"`
-	Gender           int    `json:"gender"`
+	UserID      string `json:"userId"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Portrait    string `json:"portrait"`
+	Mobile      string `json:"mobile"`
+	Email       string `json:"email"`
+	Address     string `json:"address"`
+	Company     string `json:"company"`
+	Extra       string `json:"extra"`
+	Gender      int    `json:"gender"`
 }
 
 // OutputApplicationUserInfo represents application user info.
@@ -50,31 +50,35 @@ type SendMessageResult struct {
 	Timestamp  int64 `json:"timestamp"`
 }
 
-// PojoGroupInfo represents group information.
+// PojoGroupInfo represents group information. Field tags follow the IM Java
+// pojos on the wire (snake_case), not Go's default camelCase.
 type PojoGroupInfo struct {
-	GroupID       string `json:"groupId"`
-	Name          string `json:"name"`
-	Portrait      string `json:"portrait"`
-	Owner         string `json:"owner"`
-	Type          int    `json:"type"`
-	MemberCount   int    `json:"memberCount"`
-	Extra         string `json:"extra"`
-	UpdateDt      int64  `json:"updateDt"`
+	TargetID    string `json:"target_id"`
+	Name        string `json:"name"`
+	Portrait    string `json:"portrait"`
+	Owner       string `json:"owner"`
+	Type        int    `json:"type"`
+	MemberCount int    `json:"member_count"`
+	Extra       string `json:"extra"`
+	Mute        int    `json:"mute"`
+	JoinType    int    `json:"join_type"`
+	PrivateChat int    `json:"private_chat"`
 }
 
-// PojoGroupMember represents a group member.
+// PojoGroupMember represents a group member. The IM wire contract is
+// { member_id, type, alias, extra, updateDt, createDt }.
 type PojoGroupMember struct {
-	GroupID     string `json:"groupId"`
-	MemberID    string `json:"memberId"`
-	Alias       string `json:"alias"`
-	Extra       string `json:"extra"`
-	Type        int    `json:"type"` // 0=normal, 1=manager, 2=owner
-	UpdateDt    int64  `json:"updateDt"`
+	MemberID string `json:"member_id"`
+	Alias    string `json:"alias"`
+	Extra    string `json:"extra"`
+	Type     int    `json:"type"` // 0=normal, 1=manager, 2=owner
+	UpdateDt int64  `json:"updateDt"`
+	CreateDt int64  `json:"createDt"`
 }
 
 // OutputCreateGroupResult represents the result of creating a group.
 type OutputCreateGroupResult struct {
-	GroupID string `json:"groupId"`
+	GroupID string `json:"group_id"`
 }
 
 // OutputGroupMemberList represents a list of group members.
@@ -132,10 +136,10 @@ type MediaEntry struct {
 
 // OutputPresignedUploadUrl represents the result of getting a presigned upload URL.
 type OutputPresignedUploadUrl struct {
-	Type             int    `json:"type"`             // 1=Qiniu, others=S3/OSS
-	UploadURL        string `json:"uploadUrl"`        // Primary upload URL
-	BackupUploadURL  string `json:"backupUploadUrl"`  // Backup upload URL (for S3/OSS)
-	DownloadURL      string `json:"downloadUrl"`      // Download URL after upload
+	Type            int    `json:"type"`            // 1=Qiniu, others=S3/OSS
+	UploadURL       string `json:"uploadUrl"`       // Primary upload URL
+	BackupUploadURL string `json:"backupUploadUrl"` // Backup upload URL (for S3/OSS)
+	DownloadURL     string `json:"downloadUrl"`     // Download URL after upload
 }
 
 // OutputGetFriendList represents the friend list result.

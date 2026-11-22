@@ -3,6 +3,7 @@ package cn.wildfirechat.app.gateway;
 import cn.wildfirechat.app.protocol.ConnectMessage;
 import cn.wildfirechat.app.protocol.RequestMessage;
 import cn.wildfirechat.app.protocol.ResponseMessage;
+import cn.wildfirechat.app.config.GsonFactory;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -38,7 +39,7 @@ public class RobotGatewayEndpoint extends TextWebSocketHandler {
     @Autowired
     private AuthHandler authHandler;
 
-    private final Gson gson = new Gson();
+    private final Gson gson = GsonFactory.gson();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {

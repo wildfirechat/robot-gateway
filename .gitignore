@@ -5,3 +5,4 @@ target
 */__pycache__/*
 hermes-gateway.py/src/hermes_wildfire/__pycache__
 hermes-gateway.py/tests/__pycache__
+.gocache/

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/wildfirechat/robot-gateway-sdk/protocol"
@@ -163,26 +164,26 @@ func (c *RobotServiceClient) SendMessageWithUsers(conv *protocol.Conversation, p
 
 // ReplyMessage replies to a message.
 func (c *RobotServiceClient) ReplyMessage(messageID int64, payload *protocol.MessagePayload, mentionSender bool) (*protocol.IMResult[protocol.SendMessageResult], error) {
-	params := []interface{}{messageID, payload, mentionSender}
+	params := []interface{}{strconv.FormatInt(messageID, 10), payload, mentionSender}
 	return invoke[protocol.SendMessageResult](c, "replyMessage", params)
 }
 
 // RecallMessage recalls a message.
 func (c *RobotServiceClient) RecallMessage(messageID int64) (*protocol.IMResult[string], error) {
-	params := []interface{}{messageID}
+	params := []interface{}{strconv.FormatInt(messageID, 10)}
 	return invoke[string](c, "recallMessage", params)
 }
 
 // UpdateMessage updates a message.
 func (c *RobotServiceClient) UpdateMessage(messageID int64, payload *protocol.MessagePayload) (*protocol.IMResult[struct{}], error) {
-	params := []interface{}{messageID, payload}
+	params := []interface{}{strconv.FormatInt(messageID, 10), payload}
 	return invoke[struct{}](c, "updateMessage", params)
 }
 
 // GetMessage 按消息 uid 获取单条消息，只能获取机器人参与会话中的消息。
 // messageUID 是 int64（Go 原生强类型，无 JS 端精度问题）。对应网关/IM 的 getMessage 方法。
 func (c *RobotServiceClient) GetMessage(messageUID int64) (*protocol.IMResult[protocol.OutputMessageData], error) {
-	params := []interface{}{messageUID}
+	params := []interface{}{strconv.FormatInt(messageUID, 10)}
 	return invoke[protocol.OutputMessageData](c, "getMessage", params)
 }
 

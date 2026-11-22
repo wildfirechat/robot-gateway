@@ -109,6 +109,10 @@ await client.recallMessage(messageId);
 
 // 更新消息（messageId 是超长 long，必须传数字字符串）
 await client.updateMessage(messageId, payload);
+
+// 朋友圈 feed/comment id 同样是 64 位 long，必须传数字字符串：
+// await client.getMomentsFeed(feedId);
+// await client.deleteMomentsComment(feedId, commentId);
 ```
 
 ### 用户相关

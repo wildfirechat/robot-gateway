@@ -6,6 +6,7 @@ import cn.wildfirechat.pojos.OutputCreateGroupResult;
 import cn.wildfirechat.pojos.OutputRobot;
 import cn.wildfirechat.sdk.RobotService;
 import cn.wildfirechat.sdk.model.IMResult;
+import cn.wildfirechat.app.config.GsonFactory;
 import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,7 @@ public class RobotProxy {
     @Autowired
     private SessionManager sessionManager;
 
-    private final Gson gson = new Gson();
+    private final Gson gson = GsonFactory.gson();
 
     /**
      * 处理客户端请求
@@ -77,7 +78,20 @@ public class RobotProxy {
             if (("getMessage".equals(method) || "replyMessage".equals(method)
                     || "recallMessage".equals(method) || "updateMessage".equals(method))
                     && params != null && !params.isEmpty()) {
-                String error = validateMessageId(method, params.get(0));
+                String error = validateLongId(method, "messageId/messageUid", params.get(0));
+                if (error != null) return ResponseMessage.error(requestId, 400, error);
+            }
+            // Moments ids are also 64-bit longs (precision-sensitive in JS clients).
+            if (("getMomentsFeed".equals(method) || "deleteMomentsFeed".equals(method)
+                    || "updateMomentsFeed".equals(method))
+                    && params != null && !params.isEmpty()) {
+                String error = validateLongId(method, "feedId", params.get(0));
+                if (error != null) return ResponseMessage.error(requestId, 400, error);
+            }
+            if (("postMomentsComment".equals(method) || "deleteMomentsComment".equals(method))
+                    && params != null && params.size() > 1) {
+                String error = validateLongId(method, "feedId", params.get(0));
+                if (error == null) error = validateLongId(method, "commentId", params.get(1));
                 if (error != null) return ResponseMessage.error(requestId, 400, error);
             }
 
@@ -148,10 +162,27 @@ public class RobotProxy {
         return null;
     }
 
-    /** Message id/UID params are long values; JS must send them as numeric strings. */
-    private String validateMessageId(String method, Object rawMessageId) {
-        if (!(rawMessageId instanceof String) || !((String) rawMessageId).matches("\\d+")) {
-            return method + ": messageId/messageUid must be a non-empty numeric string (JS number loses precision)";
+    /**
+     * Validate a 64-bit id parameter before reflection converts it.
+     *
+     * <p>JS clients must send numeric strings (a JS number loses precision above
+     * 2^53); Java/Go SDKs send JSON numbers, which the lazy-number Gson keeps
+     * exact until conversion. Both are accepted here.
+     */
+    private String validateLongId(String method, String field, Object rawId) {
+        String text = null;
+        if (rawId instanceof String) {
+            text = ((String) rawId).trim();
+        } else if (rawId instanceof Number) {
+            text = rawId.toString();
+        }
+        if (text == null || !text.matches("\\d+")) {
+            return method + ": " + field + " must be a numeric string or integer (JS numbers lose precision)";
+        }
+        try {
+            Long.parseLong(text);
+        } catch (NumberFormatException e) {
+            return method + ": " + field + " is out of range";
         }
         return null;
     }
@@ -240,6 +271,11 @@ public class RobotProxy {
         if (targetType.isAssignableFrom(sourceType)) {
             return true;
         }
+        // JSON numbers are parsed as LazilyParsedNumber (a Number), keeping the
+        // exact literal for 64-bit ids. Treat them as numeric-compatible.
+        if (Number.class.isAssignableFrom(sourceType) && isNumericType(targetType)) {
+            return true;
+        }
         // 处理基本类型和包装类型
         if (targetType.isPrimitive()) {
             if (targetType == int.class && (sourceType == Integer.class || sourceType == Long.class || sourceType == Short.class)) return true;
@@ -260,6 +296,16 @@ public class RobotProxy {
         if (sourceType == Byte.class && targetType == byte.class) return true;
 
         return false;
+    }
+
+    /** Primitive numeric / boxed numeric parameter types. */
+    private boolean isNumericType(Class<?> type) {
+        return type == int.class || type == Integer.class
+                || type == long.class || type == Long.class
+                || type == short.class || type == Short.class
+                || type == byte.class || type == Byte.class
+                || type == double.class || type == Double.class
+                || type == float.class || type == Float.class;
     }
 
     /**
@@ -284,6 +330,10 @@ public class RobotProxy {
                 else if (paramTypes[i] == byte.class) args[i] = (byte) 0;
                 else if (paramTypes[i] == char.class) args[i] = '\u0000';
                 else args[i] = null;
+            } else if (param instanceof Number && (isNumericType(paramTypes[i]) || paramTypes[i] == String.class)) {
+                // LazilyParsedNumber.toString() is the original JSON literal, so
+                // the conversion to long/int is exact (no Double precision loss).
+                args[i] = gson.fromJson(param.toString(), paramTypes[i]);
             } else if (isCompatibleType(param.getClass(), paramTypes[i])) {
                 // 类型兼容，直接使用
                 args[i] = param;
