@@ -223,8 +223,8 @@ async function resolveUserName(userId: string): Promise<string> {
       return name;
     }
   } catch { /* fall back to id */ }
-  userNameCache.set(id, id);
-  return id;
+  userNameCache.set(id, "未知用户");
+  return "未知用户";
 }
 
 async function resolveGroupName(groupId: string): Promise<string> {
@@ -242,8 +242,8 @@ async function resolveGroupName(groupId: string): Promise<string> {
       return name;
     }
   } catch { /* fall back to id */ }
-  groupNameCache.set(id, id);
-  return id;
+  groupNameCache.set(id, "未知群组");
+  return "未知群组";
 }
 
 async function resolveMemberLine(label: string, value: any): Promise<string> {
