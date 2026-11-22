@@ -166,6 +166,17 @@ export function resolveSendRoots(config: WildfireConfig): string[] {
         .map((root) => path.resolve(root));
 }
 
+/** Case-insensitive path comparison on Windows. */
+function samePath(a: string, b: string): boolean {
+    const fold = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+    return fold(a) === fold(b);
+}
+
+function pathInside(file: string, root: string): boolean {
+    const fold = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+    return samePath(file, root) || fold(file).startsWith(fold(root) + path.sep);
+}
+
 /** Resolve *filePath* and ensure it lives under one of *roots*; returns the real path. */
 export async function assertSendablePath(filePath: string, roots: string[]): Promise<string> {
     const requested = String(filePath || "").trim();
@@ -193,8 +204,7 @@ export async function assertSendablePath(filePath: string, roots: string[]): Pro
         } catch {
             continue;
         }
-        if (resolvedFile === resolvedRoot) return resolvedFile;
-        if (resolvedFile.startsWith(resolvedRoot + path.sep)) return resolvedFile;
+        if (pathInside(resolvedFile, resolvedRoot)) return resolvedFile;
     }
     throw new Error(
         `file path is outside the workspace; allowed roots: ${roots.join(", ") || "(none)"}`
