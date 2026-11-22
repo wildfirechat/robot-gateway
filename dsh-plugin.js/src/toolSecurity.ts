@@ -120,18 +120,34 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
 }
 
 /**
- * Ask the owner to confirm one write action via the existing 202 card. The
- * card is delivered to the owner's private chat by InteractionManager.
- * Disabled only when the deployment explicitly sets
- * WF_IM_BRIDGE_WRITE_CONFIRM=0.
+ * Ask for one write confirmation.
+ *
+ * Bridged official DSH Web UI sessions use the DSH approval seam first, so the
+ * card appears in the Web UI. If the UI has no approval answerer (or the
+ * session policy is temporarily forced to ask but no client is attached), the
+ * existing IM 202 card remains the fallback, which keeps mobile working.
  */
 export async function confirmWriteAction(api: any, exec: any, action: string, preview: string): Promise<void> {
     if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0") return;
+    const key = resolveSessionKey(api, exec) || "";
+    const bridged = !!key && api?.bridge?.isBridged?.(key) === true;
+
+    if (bridged) {
+        const dshOutcome = await requestDshApproval(api, exec, action, preview);
+        if (dshOutcome === "allowed-once") return;
+        if (dshOutcome === "rejected") {
+            throw new Error(`${action}: owner 在 DSH 界面拒绝了写操作`);
+        }
+        if (dshOutcome === "cancelled") {
+            throw new Error(`${action}: DSH 写操作确认已取消`);
+        }
+        // unavailable: fall through to the IM 202 card (mobile fallback).
+    }
+
     const interactions = api?.interactions;
     if (!interactions || typeof interactions.requestWriteConfirmation !== "function") {
         throw new Error(`${action}: 写操作确认服务不可用，已拒绝`);
     }
-    const key = resolveSessionKey(api, exec) || "";
     const outcome = await interactions.requestWriteConfirmation(key, {
         toolName: action,
         action,
@@ -139,6 +155,59 @@ export async function confirmWriteAction(api: any, exec: any, action: string, pr
     });
     if (outcome !== "allowed-once") {
         throw new Error(`${action}: owner 未批准写操作（${String(outcome)}）`);
+    }
+}
+
+/**
+ * Request the official DSH approval card for a bridged Web UI session.
+ * Returns null when this DSH build/session has no approval seam or no answerer.
+ * A session policy of `never` is temporarily switched to `ask` for this one
+ * request, then restored, so the user's global policy is not permanently
+ * changed.
+ */
+async function requestDshApproval(
+    api: any,
+    exec: any,
+    action: string,
+    preview: string
+): Promise<string | null> {
+    const approval = api?.ctx?.get?.("approval");
+    const agent = exec?.agent;
+    if (!approval || typeof approval.request !== "function" || !agent) return null;
+    const session = agent.session;
+    let previous: string | undefined;
+    try {
+        previous = typeof approval.overrideOf === "function" && session ? approval.overrideOf(session) : undefined;
+    } catch {
+        previous = undefined;
+    }
+    let defaultPolicy: string | undefined;
+    try { defaultPolicy = approval?.config?.policy; } catch { defaultPolicy = undefined; }
+    const forcedAsk = (previous ?? defaultPolicy) === "never";
+    if (forcedAsk && typeof approval.setPolicy === "function") {
+        try { approval.setPolicy(agent, "ask"); } catch { return null; }
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("DSH write confirmation timeout")), 120_000);
+    timer.unref?.();
+    try {
+        const outcome = await approval.request({
+            agent,
+            toolName: action,
+            reason: preview,
+            signal: controller.signal,
+        });
+        return outcome === "allowed-once" || outcome === "rejected" || outcome === "cancelled"
+            ? outcome
+            : null;
+    } catch (err: any) {
+        api?.logger?.warn?.(`[wildfire] DSH approval unavailable: ${String(err?.message ?? err)}`);
+        return null;
+    } finally {
+        clearTimeout(timer);
+        if (forcedAsk && typeof approval.setPolicy === "function") {
+            try { approval.setPolicy(agent, "never"); } catch { /* ignore */ }
+        }
     }
 }
 

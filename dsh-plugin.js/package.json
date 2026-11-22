@@ -1,6 +1,6 @@
 {
   "name": "@wildfirechat/dsh-wildfire",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "Wildfire IM channel plugin for DeepSeek Harness (dsh)",
   "license": "MIT",
   "author": "Wildfire IM Team",
