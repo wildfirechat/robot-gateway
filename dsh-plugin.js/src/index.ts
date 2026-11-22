@@ -23,6 +23,7 @@ import { registerSessionBridge } from "./bridge.js";
 import { panelDebug } from "./panelDebug.js";
 import { registerImBridgeTools } from "./imBridge.js";
 import { registerRobotTools } from "./robotTools.js";
+import { bindToolResultTaint } from "./toolTaint.js";
 
 export const name = "wildfire";
 
@@ -315,7 +316,12 @@ export function apply(ctx: any, config: any): void {
       // runtime switch that still needs to be written into the session log.
       (key: string, session?: any) => api.models.resolve(key, session),
       // 在每个 agent scope 绑定 subagent 事件 → 任务卡片（scoped 事件全局监听不到）
-      (agentCtx: any, agent?: any) => api.interactions.bindAgentScope(agentCtx, agent),
+      // 同时监听 tools/result，把任何工具结果（web/fetch/MCP/subagent/读取）
+      // 标记为不可信，阻止同一回合后续写操作。
+      (agentCtx: any, agent?: any) => {
+        api.interactions.bindAgentScope(agentCtx, agent);
+        bindToolResultTaint(api, agentCtx);
+      },
       (key: string) => api.models.peekOverride(key),
       // preset 挂载失败 → 该会话的 agent 没有任何工具：必须让用户看到（一次性告警），
       // 而不是只在日志里 warn 一声继续跑。
