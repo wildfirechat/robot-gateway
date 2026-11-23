@@ -36,8 +36,8 @@ export class AccessController {
   canUsePrivate(senderId: string): boolean {
     const access = getAccessConfig(this.config);
     if (!access.privateOwnerOnly) return true;
-    if (this.owner && senderId === this.owner) return true;
-    return access.adminUsers.includes(senderId);
+    // 普通单聊/普通群 AI 只服务机器人 owner；admin 不参与对话。
+    return !!this.owner && senderId === this.owner;
   }
 
   /** Whether the sender may run a private-chat management command. */

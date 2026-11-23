@@ -112,9 +112,11 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
             `${feature}: 写操作仅允许由机器人 owner 的直接文本指令发起；当前回合不是 owner 直接文本，已拒绝`
         );
     }
-    if (trust.tainted) {
+    if (trust.tainted && process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0") {
+        // 写确认关闭时保留旧的严格 taint 拦截；开启时由 owner 的
+        // 一次性确认卡承担最终授权（主会话需要先查群历史再写）。
         throw new Error(
-            `${feature}: 本回合已读取不可信内容，写操作需要 owner 在新回合确认/重新下达指令`
+            `${feature}: 本回合已读取不可信内容，写操作需要 owner 确认或在新回合重新下达指令`
         );
     }
 }
