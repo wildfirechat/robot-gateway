@@ -455,8 +455,30 @@ export function apply(ctx, config) {
     },
     async (args, exec) => {
       const { bytes, target } = await readInput(ctx, exec, args.path, cfg.maxBytes);
-      const doc = await loadPdf(bytes, args.password);
-      const sizes = doc.getPages().map((p) => { const { width, height } = p.getSize(); return { width, height }; });
+      let doc;
+      let encrypted = false;
+      try {
+        doc = await loadPdf(bytes, args.password);
+      } catch (error) {
+        if (!/PDF_ENCRYPTED/.test(String(error?.message ?? error))) throw error;
+        // pdf-lib cannot decrypt. Still report page count/sizes through pdfjs
+        // when a password is supplied; page mutation remains unsupported.
+        encrypted = true;
+      }
+      let pageCount;
+      let sizes = [];
+      if (doc) {
+        pageCount = doc.getPageCount();
+        sizes = doc.getPages().map((p) => { const { width, height } = p.getSize(); return { width, height }; });
+      } else {
+        const js = await loadPdfjs(bytes, args.password);
+        pageCount = js.numPages;
+        for (let i = 1; i <= pageCount; i++) {
+          const page = await js.getPage(i);
+          const vp = page.getViewport({ scale: 1 });
+          sizes.push({ width: vp.width, height: vp.height });
+        }
+      }
       let hasTextLayer = false;
       let textPages = 0;
       try {
@@ -469,14 +491,14 @@ export function apply(ctx, config) {
       } catch { /* encrypted/unsupported text layer */ }
       return {
         path: target.displayPath,
-        pageCount: doc.getPageCount(),
+        pageCount,
         pages: sizes,
-        encrypted: false,
+        encrypted,
         hasTextLayer,
-        textPagesSample: `${textPages}/${Math.min(doc.getPageCount(), 5)}`,
-        title: doc.getTitle() || "",
-        author: doc.getAuthor() || "",
-        subject: doc.getSubject() || "",
+        textPagesSample: `${textPages}/${Math.min(pageCount, 5)}`,
+        title: doc ? (doc.getTitle() || "") : "",
+        author: doc ? (doc.getAuthor() || "") : "",
+        subject: doc ? (doc.getSubject() || "") : "",
       };
     }
   ));
