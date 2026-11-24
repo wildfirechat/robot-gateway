@@ -1,13 +1,15 @@
 {
   "name": "@wildfirechat/dsh-pdf",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PDF tools for Wildfire DSH: text/table extraction, page operations, watermarks, forms.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js"
   },
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "license": "MIT",
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",

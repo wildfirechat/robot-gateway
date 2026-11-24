@@ -9,11 +9,35 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
-import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import fontkit from "@pdf-lib/fontkit";
 
 const require = createRequire(import.meta.url);
 const PDFJS_ROOT = path.dirname(require.resolve("pdfjs-dist/package.json"));
+
+/**
+ * Load PDF.js lazily so merely enabling the PDF plugin does not initialize
+ * PDF.js's Node canvas polyfills. The optional @napi-rs/canvas package is not
+ * shipped (text extraction/page operations do not need it); filter only the
+ * four known optional-canvas warnings during the one-time import.
+ */
+let pdfjsPromise;
+async function getPdfjs() {
+    if (pdfjsPromise === undefined) {
+        const originalLog = console.log;
+        console.log = (...args) => {
+            const text = args.map(String).join(" ");
+            if (text.startsWith('Warning: Cannot load "@napi-rs/canvas"')
+                || /^Warning: Cannot polyfill `(DOMMatrix|ImageData|Path2D)`/.test(text)) return;
+            originalLog.apply(console, args);
+        };
+        try {
+            pdfjsPromise = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        } finally {
+            console.log = originalLog;
+        }
+    }
+    return pdfjsPromise;
+}
 const MAX_DEFAULT = 128 * 1024 * 1024;
 
 export const name = "dsh-pdf";
@@ -126,6 +150,7 @@ async function loadPdfjs(bytes, password) {
   };
   if (password) opts.password = password;
   try {
+    const pdfjs = await getPdfjs();
     return await pdfjs.getDocument(opts).promise;
   } catch (error) {
     const message = String(error?.message ?? error);
