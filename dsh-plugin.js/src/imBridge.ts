@@ -400,6 +400,13 @@ export function registerImBridgeTools(api: any): void {
     ));
 
     tools.register(secureTool(
+      "im_user_message_types",
+      "List supported IM message content types and the payload fields required to send each type. Use this before im_user_send_content.",
+      { type: "object", properties: {}, additionalProperties: false },
+      async () => bridgeRequest("GET", "/im/message-types")
+    ));
+
+    tools.register(secureTool(
       "im_user_messages",
       "Read messages in one current-user IM conversation, newest first.",
       {
@@ -551,6 +558,38 @@ export function registerImBridgeTools(api: any): void {
           conversation: args?.conversation,
           text: args?.text,
         }, `以当前用户身份发送到 ${Number(conv.type) || 0}:${String(conv.target || "")}:${Number(conv.line) || 0}：${String(args?.text || "").slice(0, 200)}`);
+      }
+    ));
+
+    tools.register(secureWriteTool(
+      "im_user_send_content",
+      "Send a non-text IM message as the current user: image, file, video, voice, location, link, card, sticker, or conference invite. Call im_user_message_types first for payload fields.",
+      {
+        type: "object",
+        properties: {
+          conversation: {
+            type: "object",
+            properties: {
+              type: { type: "integer", description: "0 single, 1 group." },
+              target: { type: "string" },
+              line: { type: "integer", minimum: 0 },
+            },
+            required: ["type", "target"],
+            additionalProperties: false,
+          },
+          content_type: { type: "integer", description: "Message content type from im_user_message_types." },
+          payload: { type: "object", additionalProperties: true, description: "Type-specific fields from im_user_message_types." },
+        },
+        required: ["conversation", "content_type", "payload"],
+        additionalProperties: false,
+      },
+      async (args: any, exec: any) => {
+        const conv = args?.conversation || {};
+        return writeBridgeRequest(api, exec, "send_content", "/im/messages/send_content", {
+          conversation: args?.conversation,
+          contentType: Number(args?.content_type) || 0,
+          payload: args?.payload || {},
+        }, `以当前用户身份发送消息类型 ${Number(args?.content_type) || 0} 到 ${Number(conv.type) || 0}:${String(conv.target || "")}:${Number(conv.line) || 0}\n${JSON.stringify(args?.payload || {}).slice(0, 500)}`);
       }
     ));
   }
