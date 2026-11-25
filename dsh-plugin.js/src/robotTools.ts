@@ -347,7 +347,7 @@ async function formatWritePreview(name: string, args: any): Promise<string> {
 
   tools.register(secureWriteTool(
     "im_bot_create_group",
-    "Create a Wildfire group as the robot. Owner/admin only. memberIds are user ids (strings); the robot and `to` are added automatically. Returns a verified group id.",
+    "Create a normal Wildfire group as the robot on line 0 (join_type=2). Owner/admin only. memberIds are user ids (strings); the robot and `to` are added automatically. Never create DSH/AI line-2 groups with this tool. Returns a verified group id.",
     {
       type: "object",
       properties: {
@@ -373,7 +373,7 @@ async function formatWritePreview(name: string, args: any): Promise<string> {
         { name, portrait: "", join_type: 2 },
         requested,
         to,
-        aiLines,
+        [0],
         null
       );
       const created = unwrap(result, "createGroup");
@@ -625,7 +625,7 @@ async function formatWritePreview(name: string, args: any): Promise<string> {
 
   tools.register(secureWriteTool(
     "im_bot_api",
-    "Call a RobotServiceClient method directly. Owner/admin only. Use this for advanced robot APIs not covered by the typed tools. `args` is the positional argument array. Returns {ok, code, msg, result}; ok=false carries the IM error code.",
+    "Call a RobotServiceClient method directly. Owner/admin only. Use this for advanced robot APIs not covered by the typed tools. `args` is the positional argument array. `createGroup` is restricted to join_type=2, line 0 (normal Wildfire groups); line-2 DSH/AI groups must not be created through this tool. Returns {ok, code, msg, result}; ok=false carries the IM error code.",
     {
       type: "object",
       properties: {
@@ -643,6 +643,16 @@ async function formatWritePreview(name: string, args: any): Promise<string> {
       const fn = (client as any)[method];
       if (typeof fn !== "function") throw new Error(`robot API method not available: ${method}`);
       const params = Array.isArray(args?.args) ? args.args : [];
+      if (method === "createGroup") {
+        const lines = Array.isArray(params[3]) ? params[3].map((n: any) => Number(n)) : [];
+        if (lines.some((n) => !Number.isInteger(n) || n !== 0)) {
+          throw new Error("createGroup only supports line 0 (normal Wildfire group); DSH/AI groups use line 2 and must not be created by im_bot_api");
+        }
+        const info: any = params[0] && typeof params[0] === "object" ? { ...params[0] } : {};
+        info.join_type = 2;
+        params[0] = info;
+        params[3] = [0];
+      }
       const result = await fn.apply(client, params);
       return describeResult(result);
     }
