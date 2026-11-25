@@ -22,6 +22,7 @@ import { TextMessageContent } from "@wildfirechat/server-sdk";
 import { registerSessionBridge } from "./bridge.js";
 import { panelDebug } from "./panelDebug.js";
 import { registerImBridgeTools } from "./imBridge.js";
+import { registerAppTools } from "./appTools.js";
 import { registerRobotTools } from "./robotTools.js";
 import { bindToolResultTaint } from "./toolTaint.js";
 
@@ -385,6 +386,7 @@ export function apply(ctx: any, config: any): void {
       }
       await api.wildfireAgents.init();
       registerRobotTools(api);
+      registerAppTools(api);
       registerImBridgeTools(api);
 
       // Connect with retry: the gateway may be briefly down (restart, network).
