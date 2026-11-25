@@ -83,14 +83,21 @@ export function apply(ctx) {
     "mail_accounts",
     "List configured mailbox accounts (address and display name only; secrets are never returned).",
     { type: "object", properties: {}, additionalProperties: false },
-    async () => call("/mail/accounts", {})
+    async () => {
+      // DSH validates every tool output as an object; wrap the bridge array.
+      const accounts = await call("/mail/accounts", {});
+      return { accounts: Array.isArray(accounts) ? accounts : [] };
+    }
   ));
 
   ctx.tools.register(tool(
     "mail_folders",
     "List mailbox folders for a configured account.",
     accountArgs(),
-    async (args) => call("/mail/folders", { account: args.account })
+    async (args) => {
+      const folders = await call("/mail/folders", { account: args.account });
+      return { account: args.account || "", folders: Array.isArray(folders) ? folders : [] };
+    }
   ));
 
   ctx.tools.register(tool(
