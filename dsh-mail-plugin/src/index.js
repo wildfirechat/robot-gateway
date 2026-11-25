@@ -189,6 +189,30 @@ export function apply(ctx) {
   ));
 
   ctx.tools.register(tool(
+    "mail_draft",
+    "Save a message to the Drafts folder without sending it. Attachments must be workspace files.",
+    accountArgs({
+      to: { type: "string" },
+      cc: { type: "string" },
+      bcc: { type: "string" },
+      subject: { type: "string" },
+      text: { type: "string" },
+      html: { type: "string" },
+      attachments: { type: "array", items: { type: "object", properties: { path: { type: "string" }, filename: { type: "string" } }, required: ["path"], additionalProperties: false } },
+    }),
+    async (args) => call("/mail/draft", {
+      account: args.account,
+      to: args.to,
+      cc: args.cc,
+      bcc: args.bcc,
+      subject: args.subject,
+      text: args.text,
+      html: args.html,
+      attachments: args.attachments,
+    })
+  ));
+
+  ctx.tools.register(tool(
     "mail_send",
     "Send a new email as the configured account. Requires one-shot owner approval before SMTP sends.",
     accountArgs({
