@@ -24,7 +24,7 @@ import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { conversationKey, dshHomePath } from "./utils.js";
-import { turnOwners } from "./turnContext.js";
+import { turnOwners, markTurnVoice } from "./turnContext.js";
 import { describeTurnFailure, extractTurnFailure, turnReasonKind } from "./failures.js";
 import { applyAsrHint } from "./asrPrompt.js";
 
@@ -721,6 +721,7 @@ const STREAM_THROTTLE_MS = 300;
                 return;
             }
             turnOwners.set(key, String(sender));
+            if (options?.asrAttempted) markTurnVoice(key);
             // 手机端发起的回合：立刻置 running（turn/start 事件随后也会推一次）
             pushStatus(rec, {
                 state: "running",

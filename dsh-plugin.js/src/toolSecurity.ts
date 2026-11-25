@@ -18,7 +18,7 @@ import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { getAccessConfig, getSecurityConfig, getWorkspaceConfig, type WildfireConfig } from "./config.js";
-import { turnOwners, turnWriteTrust, markTurnTainted } from "./turnContext.js";
+import { turnOwners, turnWriteTrust, markTurnTainted, isVoiceTurn } from "./turnContext.js";
 
 /** Maximum size of a file handed to the IM send tools (100 MB). */
 export const MAX_SEND_FILE_BYTES = 100 * 1024 * 1024;
@@ -107,6 +107,10 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
     }
     if (api?.bridge?.isBridged?.(key)) return;
     const trust = turnWriteTrust.get(String(key));
+    // Voice/ASR turns are allowed to reach write tools, but every write tool
+    // still asks for owner confirmation; the ASR prompt also requires explicit
+    // confirmation for names/recipients before a user-related action.
+    if (trust?.voice === true) return;
     if (!trust || trust.ownerDirectText !== true) {
         throw new Error(
             `${feature}: 写操作仅允许由机器人 owner 的直接文本指令发起；当前回合不是 owner 直接文本，已拒绝`
@@ -133,6 +137,11 @@ export async function confirmWriteAction(api: any, exec: any, action: string, pr
     if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0") return;
     const key = resolveSessionKey(api, exec) || "";
     const bridged = !!key && api?.bridge?.isBridged?.(key) === true;
+    // A voice transcript can misrecognize names/recipients. Make the approval
+    // card say so, so the owner checks the actual users before approving.
+    if (key && isVoiceTurn(key)) {
+        preview = `[语音输入] ASR 可能误识别人名/收件人/群成员，请核对后确认。\n${preview}`;
+    }
 
     if (bridged) {
         const dshOutcome = await requestDshApproval(api, exec, action, preview);
