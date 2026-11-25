@@ -749,9 +749,9 @@ async function handleMainGroupObservation(
   const mentioned = extractMentionedUids(opts.payload);
   if (!robotId || !mentioned.includes(robotId)) return;
 
-  const replyConv = cfg.groupReply === "owner"
-    ? { type: CONV_TYPE_SINGLE, target: String(api.robotOwner || ""), line: 0 }
-    : opts.conv;
+  // 群内 @ 的回复必须回到触发它的群；状态/审批/提问仍走 owner 私聊。
+  // 旧的 groupReply=owner 选项会破坏“@ 在哪、回在哪”，已不再读取。
+  const replyConv = opts.conv;
   await runMainSessionTurn(api, config, {
     sender,
     replyConv,
@@ -792,10 +792,12 @@ async function runMainSessionTurn(
   await migrateLegacyMainContext(api);
   ensureMainWorkspace(api, key, cfg.workspace);
 
-  // 提问/审批一律回到 owner 私聊（群内回复时也不能把卡片发到群里）。
+  // 回复走 replyConv；状态、提问、审批一律回到 owner 私聊。
   const ownerId = String(api.robotOwner || "");
   if (ownerId) {
-    api.interactions?.remember?.(key, ownerId, { type: CONV_TYPE_SINGLE, target: ownerId, line: 0 });
+    const ownerConv = { type: CONV_TYPE_SINGLE, target: ownerId, line: 0 };
+    api.interactions?.remember?.(key, ownerId, ownerConv);
+    api.interactions?.rememberStatus?.(key, ownerId, ownerConv);
   }
 
   const groupHint = opts.mode === "group" && opts.groupId

@@ -1,6 +1,6 @@
 {
   "name": "@wildfirechat/dsh-mail",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Mailbox tools for Wildfire DSH: read, search, list and save attachments through the local Mail Bridge.",
   "type": "module",
   "main": "src/index.js",

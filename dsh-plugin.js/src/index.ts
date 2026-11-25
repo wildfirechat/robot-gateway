@@ -221,7 +221,7 @@ export function apply(ctx: any, config: any): void {
         setConversationState: async (key: string, payload: Record<string, unknown>) => {
           const client = getConnectedClient();
           if (!client) return;
-          const target = api.interactions.getConversation(key);
+          const target = api.interactions.getStatusConversation(key);
           if (!target) return;
           // scope=31 conversation user setting: private → target = the other
           // user; group → target = groupId. type=1 = 状态 (business convention).

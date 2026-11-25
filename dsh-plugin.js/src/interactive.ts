@@ -244,6 +244,8 @@ export class InteractionManager {
   private resolveRobotOwner: RobotOwnerResolver;
   private audit?: AuditSink;
   private conversations = new Map<string, ConversationTarget>();
+  /** Status-only target: main session keeps its state in owner's private chat. */
+  private statusConversations = new Map<string, ConversationTarget>();
   private pendingQuestions = new Map<string, PendingQuestion>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private registered = false;
@@ -278,10 +280,20 @@ export class InteractionManager {
   /** Remember where to reply for a conversation (updated on every inbound message). */
   remember(key: string, sender: string, conv: { type: number; target: string; line: number }): void {
     this.conversations.set(key, { sender, conv });
+    this.statusConversations.set(key, { sender, conv });
+  }
+
+  /** Pin the scope=31 status target independently from the reply target. */
+  rememberStatus(key: string, sender: string, conv: { type: number; target: string; line: number }): void {
+    this.statusConversations.set(key, { sender, conv });
   }
 
   getConversation(key: string): ConversationTarget | undefined {
     return this.conversations.get(key);
+  }
+
+  getStatusConversation(key: string): ConversationTarget | undefined {
+    return this.statusConversations.get(key) || this.conversations.get(key);
   }
 
   /**
