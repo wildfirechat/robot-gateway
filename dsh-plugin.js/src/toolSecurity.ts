@@ -134,12 +134,16 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
  * existing IM 202 card remains the fallback, which keeps mobile working.
  */
 export async function confirmWriteAction(api: any, exec: any, action: string, preview: string): Promise<void> {
-    if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0") return;
     const key = resolveSessionKey(api, exec) || "";
+    const voice = !!key && isVoiceTurn(key);
+    // Voice/ASR turns always require owner confirmation, even when the global
+    // write-confirmation switch is off: a misrecognized name must never be sent
+    // or applied silently.
+    if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0" && !voice) return;
     const bridged = !!key && api?.bridge?.isBridged?.(key) === true;
     // A voice transcript can misrecognize names/recipients. Make the approval
     // card say so, so the owner checks the actual users before approving.
-    if (key && isVoiceTurn(key)) {
+    if (voice) {
         preview = `[语音输入] ASR 可能误识别人名/收件人/群成员，请核对后确认。\n${preview}`;
     }
 
