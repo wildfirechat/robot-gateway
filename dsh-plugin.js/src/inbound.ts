@@ -489,6 +489,14 @@ function mainSessionKey(api: any): string {
   return owner ? conversationKey(false, owner) : "";
 }
 
+/** Collision-resistant visible title for the IM main session (hidden from Web UI). */
+function mainSessionTitle(api: any): string {
+  const owner = String(api?.robotOwner || "");
+  const robot = String(api?.robotId || process.env.WF_ROBOT_ID || "");
+  const hash = createHash("sha256").update(`${owner}:${robot}`).digest("hex").slice(0, 12);
+  return `主会话 · WF#${hash}`;
+}
+
 /**
  * 一次性清理旧版本主会话里的群聊缓冲注入。
  *
@@ -791,6 +799,7 @@ async function runMainSessionTurn(
 
   await migrateLegacyMainContext(api);
   ensureMainWorkspace(api, key, cfg.workspace);
+  await agents.ensureSessionTitle?.(key, mainSessionTitle(api));
 
   // 回复走 replyConv；状态、提问、审批一律回到 owner 私聊。
   const ownerId = String(api.robotOwner || "");
@@ -1582,6 +1591,7 @@ export async function handleIncomingMessage(
       await migrateLegacyMainContext(api);
       const cfg = getMainSessionConfig(config);
       ensureMainWorkspace(api, key, cfg.workspace);
+      await api.wildfireAgents?.ensureSessionTitle?.(key, mainSessionTitle(api));
       // 清理旧版本遗留的群聊缓冲文件；新版本不再读写它。
       try {
         rmSync(dshHomePath("wildfire-main-context.json"), { force: true });

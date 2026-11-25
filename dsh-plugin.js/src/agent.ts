@@ -998,6 +998,25 @@ export class AgentSessionManager {
    * caller can push generating updates to Wildfire. `extras.images` become
    * image content blocks (via the dsh attachment service).
    */
+  /**
+   * Pin a conversation's DSH session title. Used for the IM main session so
+   * the Web UI can identify it by a collision-resistant display name; the
+   * title service's rename() pins the title against automatic generation.
+   */
+  async ensureSessionTitle(key: string, title: string): Promise<void> {
+    try {
+      const agent = await this.getAgent(key);
+      const service = this.ctx.get("sessionTitle") as any;
+      if (!service || typeof service.rename !== "function") return;
+      const current = typeof service.get === "function" ? service.get(agent.session) : undefined;
+      if (current && current.title === title) return;
+      service.rename(agent.session, title);
+      this.logger?.info?.(`[wildfire-agent] session title pinned: key=${key}, title=${title}`);
+    } catch (err: any) {
+      this.logger?.warn?.(`[wildfire-agent] session title failed: key=${key}, ${String(err?.message ?? err)}`);
+    }
+  }
+
   async dispatch(
     key: string,
     text: string,
