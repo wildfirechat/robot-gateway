@@ -61,6 +61,24 @@ async function call(path, body = {}) {
   return data;
 }
 
+async function requireSendApproval(ctx, exec, toolName, reason) {
+  const approval = typeof ctx.get === "function" ? ctx.get("approval") : ctx.approval;
+  if (!approval || typeof approval.request !== "function") {
+    throw new Error("邮件发送审批服务不可用，已拒绝发送");
+  }
+  if (!exec || !exec.agent) throw new Error("邮件发送只能在 Agent 会话中执行");
+  const outcome = await approval.request({
+    agent: exec.agent,
+    toolName,
+    callId: exec.callId,
+    reason,
+    signal: exec.signal,
+  });
+  if (outcome !== "allowed-once") {
+    throw new Error(`邮件未发送：owner 审批结果为 ${outcome}`);
+  }
+}
+
 const ACCOUNT = {
   type: "string",
   description: "Mailbox account id from mail_accounts; omit when only one account is configured.",
@@ -102,33 +120,37 @@ export function apply(ctx) {
 
   ctx.tools.register(tool(
     "mail_list",
-    "List recent mail headers in a folder. Bodies are not downloaded.",
+    "List mail headers newest-first in a folder with offset pagination. Bodies are not downloaded.",
     accountArgs({
       folder: FOLDER,
       limit: { type: "integer", description: "1-100, default 20." },
+      offset: { type: "integer", description: "Number of newest messages to skip; use 0, 20, 40... to page." },
       unread_only: { type: "boolean" },
     }),
     async (args) => call("/mail/list", {
       account: args.account,
       folder: args.folder || "INBOX",
       limit: args.limit,
+      offset: args.offset,
       unreadOnly: args.unread_only === true,
     })
   ));
 
   ctx.tools.register(tool(
     "mail_search",
-    "Search mail headers/body on the mail server. Uses IMAP SEARCH; exact syntax support varies by provider.",
+    "Search mail headers/body on the mail server, newest-first, with offset pagination. Uses IMAP SEARCH; exact syntax support varies by provider.",
     accountArgs({
       folder: FOLDER,
       query: { type: "string", description: "Text to search for. Chinese text is supported when the server advertises UTF-8." },
       limit: { type: "integer", description: "1-100, default 20." },
+      offset: { type: "integer", description: "Number of newest matches to skip." },
     }),
     async (args) => call("/mail/search", {
       account: args.account,
       folder: args.folder || "INBOX",
       query: String(args.query || ""),
       limit: args.limit,
+      offset: args.offset,
     })
   ));
 
@@ -163,6 +185,109 @@ export function apply(ctx) {
       uid: args.uid,
       part: args.part,
       output: args.output,
+    })
+  ));
+
+  ctx.tools.register(tool(
+    "mail_send",
+    "Send a new email as the configured account. Requires one-shot owner approval before SMTP sends.",
+    accountArgs({
+      to: { type: "string" },
+      cc: { type: "string" },
+      bcc: { type: "string" },
+      subject: { type: "string" },
+      text: { type: "string" },
+      html: { type: "string" },
+      attachments: { type: "array", items: { type: "object", properties: { path: { type: "string" }, filename: { type: "string" } }, required: ["path"], additionalProperties: false } },
+    }),
+    async (args, exec) => {
+      await requireSendApproval(ctx, exec, "mail_send", `发送邮件到 ${args.to || ""}，主题：${args.subject || ""}`);
+      return call("/mail/send", {
+        account: args.account,
+        to: args.to,
+        cc: args.cc,
+        bcc: args.bcc,
+        subject: args.subject,
+        text: args.text,
+        html: args.html,
+        attachments: args.attachments,
+      });
+    }
+  ));
+
+  ctx.tools.register(tool(
+    "mail_reply",
+    "Reply to a message. Requires one-shot owner approval before SMTP sends.",
+    accountArgs({
+      folder: FOLDER,
+      uid: { type: "integer" },
+      text: { type: "string" },
+      reply_all: { type: "boolean" },
+      html: { type: "boolean" },
+    }),
+    async (args, exec) => {
+      await requireSendApproval(ctx, exec, "mail_reply", `回复邮件 uid=${args.uid}（folder=${args.folder || "INBOX"}）`);
+      return call("/mail/reply", {
+        account: args.account,
+        folder: args.folder || "INBOX",
+        uid: args.uid,
+        text: args.text,
+        replyAll: args.reply_all === true,
+        html: args.html === true,
+      });
+    }
+  ));
+
+  ctx.tools.register(tool(
+    "mail_forward",
+    "Forward a message. Requires one-shot owner approval before SMTP sends.",
+    accountArgs({
+      folder: FOLDER,
+      uid: { type: "integer" },
+      to: { type: "string" },
+      text: { type: "string" },
+    }),
+    async (args, exec) => {
+      await requireSendApproval(ctx, exec, "mail_forward", `转发邮件 uid=${args.uid} 到 ${args.to || ""}`);
+      return call("/mail/forward", {
+        account: args.account,
+        folder: args.folder || "INBOX",
+        uid: args.uid,
+        to: args.to,
+        text: args.text,
+      });
+    }
+  ));
+
+  ctx.tools.register(tool(
+    "mail_mark",
+    "Change IMAP flags on a message (seen/unseen/flagged/unflagged).",
+    accountArgs({
+      folder: FOLDER,
+      uid: { type: "integer" },
+      flags: { type: "array", items: { type: "string", enum: ["seen", "unseen", "flagged", "unflagged"] } },
+    }),
+    async (args) => call("/mail/mark", {
+      account: args.account,
+      folder: args.folder || "INBOX",
+      uid: args.uid,
+      flags: args.flags,
+    })
+  ));
+
+  ctx.tools.register(tool(
+    "mail_move",
+    "Move a message to another folder.",
+    accountArgs({
+      folder: FOLDER,
+      uid: { type: "integer" },
+      target_folder: { type: "string" },
+    }),
+    async (args) => call("/mail/move", {
+      account: args.account,
+      folder: args.folder || "INBOX",
+      uid: args.uid,
+      targetFolder: args.target_folder,
     })
   ));
 }
