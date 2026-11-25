@@ -800,6 +800,7 @@ async function runMainSessionTurn(
   await migrateLegacyMainContext(api);
   ensureMainWorkspace(api, key, cfg.workspace);
   await agents.ensureSessionTitle?.(key, mainSessionTitle(api));
+  await agents.attachToWorkspace?.(key);
 
   // 回复走 replyConv；状态、提问、审批一律回到 owner 私聊。
   const ownerId = String(api.robotOwner || "");
@@ -1592,6 +1593,7 @@ export async function handleIncomingMessage(
       const cfg = getMainSessionConfig(config);
       ensureMainWorkspace(api, key, cfg.workspace);
       await api.wildfireAgents?.ensureSessionTitle?.(key, mainSessionTitle(api));
+      await api.wildfireAgents?.attachToWorkspace?.(key);
       // 清理旧版本遗留的群聊缓冲文件；新版本不再读写它。
       try {
         rmSync(dshHomePath("wildfire-main-context.json"), { force: true });

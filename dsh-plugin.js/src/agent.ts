@@ -1017,6 +1017,29 @@ export class AgentSessionManager {
     }
   }
 
+  /**
+   * Attach the conversation's DSH session to the Workspace that owns its cwd.
+   * DSH's normal Web session-creation path attaches explicitly; plugin-created
+   * sessions must do the same or the Web UI groups them under “未分组”.
+   */
+  async attachToWorkspace(key: string): Promise<void> {
+    try {
+      const agent = await this.getAgent(key);
+      const cwd = this.cwdByKey.get(key);
+      const registry = this.ctx.get("workspaceRegistry") as any;
+      if (!cwd || !registry) return;
+      let workspace = await registry.resolveByPath(cwd).catch(() => undefined);
+      if (!workspace && typeof registry.create === "function") {
+        workspace = await registry.create(cwd);
+      }
+      if (!workspace || typeof workspace.attachSession !== "function") return;
+      await workspace.attachSession(agent.session.id);
+      this.logger?.info?.(`[wildfire-agent] session attached to workspace: key=${key}, session=${agent.session.id}`);
+    } catch (err: any) {
+      this.logger?.warn?.(`[wildfire-agent] workspace attach failed: key=${key}, ${String(err?.message ?? err)}`);
+    }
+  }
+
   async dispatch(
     key: string,
     text: string,
