@@ -55,6 +55,7 @@ export interface BridgeInboundOptions {
 export interface SessionBridge {
     isBridged(key: string): boolean;
     bindLocalMainSessions(): void;
+    bindLocalMainSession(session: any): void;
     handleImMessage(
         key: string,
         sender: string,
@@ -725,6 +726,20 @@ const STREAM_THROTTLE_MS = 300;
         return wanted.has(id);
     };
 
+    const bindLocalMainSession = (session: any): void => {
+        const agents = api.wildfireAgents;
+        if (!agents?.bindExternalSession || !session) return;
+        const id = String(session.id || "");
+        const key = mainOwnerKey();
+        if (!id || !key || !isMainOwnerSession(session)) return;
+        try {
+            if (!agents.keyForSessionId?.(id)) {
+                agents.bindExternalSession(key, id);
+                logger?.info?.(`[wildfire-agent] local main session bound: key=${key}, session=${id}`);
+            }
+        } catch { /* ignore */ }
+    };
+
     const bindLocalMainSessions = (): void => {
         const agents = api.wildfireAgents;
         if (!agents?.bindExternalSession) return;
@@ -735,24 +750,20 @@ const STREAM_THROTTLE_MS = 300;
         for (const session of sessions) {
             const id = String(session?.id || "");
             if (!id || !isMainOwnerSession(session)) continue;
-            try {
-                if (!agents.keyForSessionId?.(id)) {
-                    agents.bindExternalSession(key, id);
-                    logger?.info?.(`[wildfire-agent] local main session bound: key=${key}, session=${id}`);
-                }
-            } catch { /* ignore */ }
+            try { bindLocalMainSession(session); } catch { /* ignore */ }
         }
     };
 
     return {
         isBridged(key: string): boolean {
-            // Group bridge keys are registered records. The owner's local main
-            // session (official DSH Web UI) is owner-driven too; treat its key
-            // as bridged so local tool approvals use the DSH approval seam.
-            const ownerKey = mainOwnerKey();
-            return byKey.has(key) || (!!ownerKey && key === ownerKey);
+            // Only real recorded IM bridge sessions. The local owner main
+            // session is handled separately by toolSecurity; treating it as
+            // bridged would route approvals through an unavailable DSH
+            // answerer and leave orphan approval cards.
+            return byKey.has(key);
         },
         bindLocalMainSessions,
+        bindLocalMainSession,
         async handleImMessage(
             key: string,
             sender: string,

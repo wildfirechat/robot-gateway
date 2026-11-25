@@ -19,6 +19,7 @@ import path from "node:path";
 
 import { getAccessConfig, getSecurityConfig, getWorkspaceConfig, type WildfireConfig } from "./config.js";
 import { turnOwners, turnWriteTrust, markTurnTainted, isVoiceTurn } from "./turnContext.js";
+import { conversationKey } from "./utils.js";
 
 /** Maximum size of a file handed to the IM send tools (100 MB). */
 export const MAX_SEND_FILE_BYTES = 100 * 1024 * 1024;
@@ -32,7 +33,14 @@ function sessionIdOf(exec: any): string {
 export function resolveSessionKey(api: any, exec: any): string | undefined {
     const sessionId = sessionIdOf(exec);
     if (!sessionId) return undefined;
-    const key = api?.wildfireAgents?.keyForSessionId?.(sessionId);
+    let key = api?.wildfireAgents?.keyForSessionId?.(sessionId);
+    if (!key) {
+        // A resumed official DSH Web UI main session may not emit
+        // session/created after a Host restart. Bind it lazily on first tool
+        // call using the deterministic owner-main-session id.
+        try { api?.bridge?.bindLocalMainSession?.(exec?.agent?.session); } catch { /* ignore */ }
+        key = api?.wildfireAgents?.keyForSessionId?.(sessionId);
+    }
     return key ? String(key) : undefined;
 }
 
@@ -42,6 +50,12 @@ export function resolveTurnSender(api: any, exec: any): string | undefined {
     if (!key) return undefined;
     const sender = turnOwners.get(key);
     return sender ? String(sender) : undefined;
+}
+
+/** Owner's local DSH Web UI main-session key (not an IM bridge record). */
+function isOwnerMainKey(api: any, key: string | undefined): boolean {
+    const owner = String(api?.robotOwner || process.env.WF_OWNER_USER_ID || "").trim();
+    return !!owner && String(key || "") === conversationKey(false, owner);
 }
 
 /** Whether *sender* is the robot owner or an entry of access.adminUsers. */
@@ -73,7 +87,7 @@ export function requireOwnerTurn(api: any, exec: any, feature: string): void {
         // (web UI) when no IM sender is recorded; IM-driven turns always record
         // the sender above. Everything else (sub-agent sessions etc.) is denied.
         const key = resolveSessionKey(api, exec);
-        if (key && api?.bridge?.isBridged?.(key)) return;
+        if (key && (api?.bridge?.isBridged?.(key) || isOwnerMainKey(api, key))) return;
         throw new Error(
             `${feature}: 仅限机器人 owner/管理员在 IM 会话或本地桥接会话中触发（当前会话未关联发送者）`
         );
@@ -105,7 +119,7 @@ export function requireWriteTurn(api: any, exec: any, feature: string): void {
         if (api?.bridge?.isBridged?.(key)) return;
         return;
     }
-    if (api?.bridge?.isBridged?.(key)) return;
+    if (api?.bridge?.isBridged?.(key) || isOwnerMainKey(api, key)) return;
     const trust = turnWriteTrust.get(String(key));
     // Voice/ASR turns are allowed to reach write tools, but every write tool
     // still asks for owner confirmation; the ASR prompt also requires explicit
@@ -140,7 +154,11 @@ export async function confirmWriteAction(api: any, exec: any, action: string, pr
     // write-confirmation switch is off: a misrecognized name must never be sent
     // or applied silently.
     if (process.env.WF_IM_BRIDGE_WRITE_CONFIRM === "0" && !voice) return;
-    const bridged = !!key && api?.bridge?.isBridged?.(key) === true;
+    // Only real IM bridge sessions use the DSH approval seam. The owner's
+    // local DSH Web UI main session has no reliable approval answerer today;
+    // attempting it leaves an orphan approval request in the UI. Use the IM
+    // card (which supports in-place state updates) for local main sessions.
+    const bridged = !!key && api?.bridge?.isBridged?.(key) === true && !isOwnerMainKey(api, key);
     // A voice transcript can misrecognize names/recipients. Make the approval
     // card say so, so the owner checks the actual users before approving.
     if (voice) {

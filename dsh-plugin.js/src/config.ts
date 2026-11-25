@@ -444,7 +444,7 @@ export function getInteractionConfig(
     askUserEnabled: config.interaction?.askUserEnabled ?? true,
     approvalEnabled: config.interaction?.approvalEnabled ?? true,
     askUserTimeoutMs: config.interaction?.askUserTimeoutMs ?? 300000,
-    approvalTimeoutMs: config.interaction?.approvalTimeoutMs ?? 120000,
+    approvalTimeoutMs: config.interaction?.approvalTimeoutMs ?? 300000,
     approvedLabel: config.interaction?.approvedLabel ?? "同意",
     deniedLabel: config.interaction?.deniedLabel ?? "拒绝",
     approvalOwnerOnly: config.interaction?.approvalOwnerOnly ?? false,
