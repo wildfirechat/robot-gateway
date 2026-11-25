@@ -24,6 +24,7 @@ import { getConnectedClient } from "./clients.js";
 import { getAiLine } from "./config.js";
 import type { WildfireConfig } from "./config.js";
 import { conversationKey, dshHomePath } from "./utils.js";
+import { sessionIdForConversation, sessionIdForConversationWithCwd } from "./agent.js";
 import { turnOwners, markTurnVoice } from "./turnContext.js";
 import { describeTurnFailure, extractTurnFailure, turnReasonKind } from "./failures.js";
 import { applyAsrHint } from "./asrPrompt.js";
@@ -53,6 +54,7 @@ export interface BridgeInboundOptions {
 
 export interface SessionBridge {
     isBridged(key: string): boolean;
+    bindLocalMainSessions(): void;
     handleImMessage(
         key: string,
         sender: string,
@@ -513,7 +515,11 @@ const STREAM_THROTTLE_MS = 300;
     const onCreated = (session: any) => {
         try {
             const id = String(session?.id || "");
-            if (!id || id.startsWith("wildfire-")) return;
+            if (!id) return;
+            if (id.startsWith("wildfire-")) {
+                if (isMainOwnerSession(session)) bindLocalMainSessions();
+                return;
+            }
             if (session?.header?.parentSession) return;
             if (bySession.has(id)) return;
             if (!sessionGroupBridgeEnabled()) {
@@ -696,10 +702,57 @@ const STREAM_THROTTLE_MS = 300;
         }`
     );
 
+    const mainOwnerKey = () => {
+        const owner = String(api.robotOwner || process.env.WF_OWNER_USER_ID || "");
+        return owner ? conversationKey(false, owner) : "";
+    };
+
+    const isMainOwnerSession = (session: any): boolean => {
+        const id = String(session?.id || "");
+        if (!id.startsWith("wildfire-")) return false;
+        if (session?.header?.parentSession) return false;
+        const owner = String(api.robotOwner || process.env.WF_OWNER_USER_ID || "");
+        if (!owner) return false;
+        const cwd = String(session?.header?.cwd || "");
+        if (!cwd) return false;
+        const key = mainOwnerKey();
+        if (!key) return false;
+        const wanted = new Set<string>();
+        for (let epoch = 0; epoch <= 20; epoch++) {
+            wanted.add(sessionIdForConversationWithCwd(key, path.resolve(cwd), epoch));
+            wanted.add(sessionIdForConversation(key, epoch));
+        }
+        return wanted.has(id);
+    };
+
+    const bindLocalMainSessions = (): void => {
+        const agents = api.wildfireAgents;
+        if (!agents?.bindExternalSession) return;
+        let sessions: any[] = [];
+        try { sessions = api.ctx?.get?.("sessions")?.list?.() || []; } catch { sessions = []; }
+        const key = mainOwnerKey();
+        if (!key) return;
+        for (const session of sessions) {
+            const id = String(session?.id || "");
+            if (!id || !isMainOwnerSession(session)) continue;
+            try {
+                if (!agents.keyForSessionId?.(id)) {
+                    agents.bindExternalSession(key, id);
+                    logger?.info?.(`[wildfire-agent] local main session bound: key=${key}, session=${id}`);
+                }
+            } catch { /* ignore */ }
+        }
+    };
+
     return {
         isBridged(key: string): boolean {
-            return byKey.has(key);
+            // Group bridge keys are registered records. The owner's local main
+            // session (official DSH Web UI) is owner-driven too; treat its key
+            // as bridged so local tool approvals use the DSH approval seam.
+            const ownerKey = mainOwnerKey();
+            return byKey.has(key) || (!!ownerKey && key === ownerKey);
         },
+        bindLocalMainSessions,
         async handleImMessage(
             key: string,
             sender: string,

@@ -403,6 +403,10 @@ export function apply(ctx: any, config: any): void {
           for (;;) {
             try {
               await startClient(api, cfg);
+              // Bind the owner's existing local DSH Web UI main session (if it
+              // was opened before login/restart) so local tool calls are
+              // recognized as owner-driven, not "no IM sender".
+              try { (api as any).bridge?.bindLocalMainSessions?.(); } catch { /* ignore */ }
               // The gateway client has the secret in memory; remove it from the
               // Host environment so agent shell/terminal tools cannot read it.
               delete process.env.WF_ROBOT_SECRET;
