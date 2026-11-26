@@ -34,16 +34,13 @@ export interface WildfireWhiteListConfig {
  * 主会话：owner 私聊 + line0 普通群（非 DSH 群）旁观共用同一个 dsh 会话。
  *
  * - owner 私聊：普通文本进入主会话；斜杠命令仍走控制面板。
- * - line0 普通群：所有文本写入缓冲（不跑模型）；群里有人提到 owner 时私聊提醒；
- *   owner 在群里 @ 机器人时，用主会话跑一轮并回复到该群（群内安全模式，禁止
- *   引用私聊内容）。其他成员的 @ 只记录/提醒，不回复。
+ * - line0 普通群：只有 owner @ 机器人时进入主会话，并回复到该群
+ *   （群内安全模式，禁止引用私聊内容）；其他群消息直接丢弃。
  * - line2 DSH 群会话不受影响。
  */
 export interface WildfireMainSessionConfig {
   /** 是否启用。默认 false（需要显式开启，避免影响既有部署）。 */
   enabled?: boolean;
-  /** 允许旁观的群（groupId 列表，支持 "*"）；为空 = 所有非 DSH 群。 */
-  groups?: string[];
   /** 主会话工作目录。默认 <dshHome>/main-workspace。 */
   workspace?: string;
   /** 每个群保留的最近消息条数。默认 200。 */
@@ -454,7 +451,6 @@ export function getInteractionConfig(
 /** Effective security settings with defaults applied. */
 export interface ResolvedMainSessionConfig {
   enabled: boolean;
-  groups: string[];
   workspace: string;
   bufferLimit: number;
   injectLimit: number;
@@ -469,7 +465,6 @@ export function getMainSessionConfig(config: WildfireConfig): ResolvedMainSessio
   const c = config.mainSession ?? {};
   return {
     enabled: c.enabled === true,
-    groups: Array.isArray(c.groups) ? c.groups.map((g) => String(g)).filter(Boolean) : [],
     workspace: c.workspace ? String(c.workspace) : dshHomePath("main-workspace"),
     bufferLimit: Number(c.bufferLimit) > 0 ? Number(c.bufferLimit) : 200,
     injectLimit: Number(c.injectLimit) > 0 ? Number(c.injectLimit) : 30,

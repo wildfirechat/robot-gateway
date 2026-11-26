@@ -553,11 +553,6 @@ function saveMainContext(): void {
   }
 }
 
-function mainGroupInScope(cfg: ReturnType<typeof getMainSessionConfig>, groupId: string): boolean {
-  if (!cfg.groups.length) return true;
-  return cfg.groups.includes("*") || cfg.groups.includes(groupId);
-}
-
 /** payload 里 @ 的 uid 列表（mentionedType=1）。 */
 function extractMentionedUids(payload: any): string[] {
   try {
@@ -668,7 +663,6 @@ function formatMainContext(config: WildfireConfig, onlyGroupId?: string): string
   const entries: Array<{ ts: number; group: string; sender: string; text: string }> = [];
   const groupIds = onlyGroupId ? [onlyGroupId] : Object.keys(ctx.groups);
   for (const gid of groupIds) {
-    if (!onlyGroupId && !mainGroupInScope(cfg, gid)) continue;
     const group = ctx.groups[gid];
     if (!group || !Array.isArray(group.messages)) continue;
     const name = String(group.name || gid);
@@ -745,11 +739,10 @@ async function handleMainGroupObservation(
   config: WildfireConfig,
   opts: { sender: string; conv: { type: number; target: string; line: number }; payload: any; text: string }
 ): Promise<void> {
-  const cfg = getMainSessionConfig(config);
   const groupId = String(opts.conv.target);
   const robotId = String(config.robotId || "");
   const sender = String(opts.sender);
-  if (!mainGroupInScope(cfg, groupId)) return;
+  // 所有 line0 普通群都允许 owner @ 触发；非 owner/非 @ 消息仍一律丢弃。
   if (robotId && sender === robotId) return;
   // 普通群只有 owner 直接 @ 机器人才进入助手；其他消息（包括 admin、
   // 非 @ 的群聊、普通文本）一律丢弃，不写主会话缓冲，也不做通知。
